@@ -1,0 +1,76 @@
+name: Bug report
+description: Report reproducible incorrect behavior in Windows Admin Toolkit.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Remove credentials, real hostnames, private inventory, tokens, and confidential logs. Report security vulnerabilities privately through the Security tab.
+  - type: input
+    id: toolkit_version
+    attributes:
+      label: Toolkit version
+      placeholder: 2.0.0
+    validations:
+      required: true
+  - type: input
+    id: powershell_version
+    attributes:
+      label: PowerShell edition and version
+      placeholder: Windows PowerShell 5.1.26100.9168 or PowerShell 7.6.4
+    validations:
+      required: true
+  - type: input
+    id: windows_version
+    attributes:
+      label: Windows edition and build
+      placeholder: Windows 11 Pro, build 26200.9168
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Target mode
+      options:
+        - Local
+        - Remote with WinRM
+        - Remote with PsExec
+    validations:
+      required: true
+  - type: input
+    id: workflow
+    attributes:
+      label: Selected workflow
+      placeholder: System Information
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Provide the smallest safe sequence that reproduces the issue.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and sanitized error text
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety checks
+      options:
+        - label: I removed credentials, real infrastructure names, private addresses, tokens, and confidential data.
+          required: true
+        - label: This is not a security vulnerability report.
+          required: true

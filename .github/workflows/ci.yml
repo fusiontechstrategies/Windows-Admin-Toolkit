@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Tests (${{ matrix.os }}, ${{ matrix.edition }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - windows-2022
+          - windows-2025
+        edition:
+          - Windows PowerShell 5.1
+          - PowerShell 7
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run tests in Windows PowerShell 5.1
+        if: matrix.edition == 'Windows PowerShell 5.1'
+        shell: powershell
+        run: .\tests\Run-Tests.ps1
+
+      - name: Run tests in PowerShell 7
+        if: matrix.edition == 'PowerShell 7'
+        shell: pwsh
+        run: .\tests\Run-Tests.ps1
+
+  analysis:
+    name: PSScriptAnalyzer
+    runs-on: windows-2025
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install pinned analyzer
+        shell: powershell
+        run: Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Scope CurrentUser -Force -AllowClobber -Repository PSGallery
+
+      - name: Analyze repository
+        shell: powershell
+        run: |
+          Import-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -ErrorAction Stop
+          $findings = @(Invoke-ScriptAnalyzer -Path . -Recurse -Settings .\PSScriptAnalyzerSettings.psd1)
+          if ($findings.Count -gt 0) {
+              $findings | Format-Table -AutoSize
+              throw "PSScriptAnalyzer reported $($findings.Count) finding(s)."
+          }
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Scan Git history and working tree
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

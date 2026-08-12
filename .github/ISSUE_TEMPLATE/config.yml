@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Private security report
+    url: https://github.com/fusiontechstrategies/Windows-Admin-Toolkit/security/advisories/new
+    about: Report suspected vulnerabilities privately. Do not open a public issue.
+  - name: Usage and support guidance
+    url: https://github.com/fusiontechstrategies/Windows-Admin-Toolkit/blob/main/SUPPORT.md
+    about: Review supported questions and the information needed for troubleshooting.

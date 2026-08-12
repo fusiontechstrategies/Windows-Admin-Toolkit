@@ -1,0 +1,50 @@
+# Windows Admin Toolkit local and generated data
+
+# Logs and reports
+*.log
+logs/
+reports/
+exports/
+results/
+WindowsAdminToolkit_*.csv
+WindowsAdminToolkit_*.json
+WindowsAdminToolkit_*.html
+
+# Private target lists
+computers.txt
+hosts.txt
+servers.txt
+targets.txt
+inventory.txt
+
+# Credentials and local configuration
+*.cred
+*.credential
+*.clixml
+.env
+.env.*
+config.local.*
+settings.local.*
+
+# PsExec is downloaded directly from Microsoft and is never redistributed here
+PsExec.exe
+PsExec64.exe
+psexec.exe
+psexec64.exe
+
+# Temporary and backup files
+*.tmp
+*.temp
+*.bak
+*.backup
+~$*
+
+# Editor and operating-system files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini

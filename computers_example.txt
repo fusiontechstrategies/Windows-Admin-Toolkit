@@ -1,0 +1,27 @@
+# Windows Admin Toolkit synthetic target examples
+#
+# Copy this file and replace the examples with Windows systems you are
+# explicitly authorized to administer. Use one target per line.
+#
+# Accepted target forms:
+#   SERVER01
+#   server01.example.com
+#   192.0.2.10
+#
+# Blank lines and lines beginning with # are ignored.
+# These names use example.com and RFC 5737 documentation address ranges.
+
+# Synthetic hostnames
+server01.example.com
+server02.example.com
+workstation01.example.com
+workstation02.example.com
+
+# Synthetic NetBIOS-style names
+LAB-SERVER-01
+LAB-CLIENT-01
+
+# Documentation-only IPv4 addresses
+192.0.2.10
+198.51.100.20
+203.0.113.30
