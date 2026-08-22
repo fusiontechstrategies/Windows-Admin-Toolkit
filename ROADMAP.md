@@ -18,10 +18,15 @@ Implementation status: complete for release review.
 
 ## 2.2.0: Policy and least privilege
 
-- Optional policy profiles that allow or deny actions, transports, targets, and concurrency levels
-- JEA-oriented WinRM guidance and compatibility
-- Preflight capability discovery before action execution
-- Explicit policy decisions in logs and reports
+Implementation status: complete for release review.
+
+- Versioned strict policy profiles for action, transport, target-mode, and target allow or deny decisions
+- Literal exact-target and leading star-dot suffix controls without wildcard expansion
+- Policy caps for target count, concurrency, retries, delays, connectivity, operation timeouts, and supported action inputs
+- Built-in safety ceilings that policy cannot relax, with documented command-line precedence
+- Capability preflight before requested-action execution
+- Explicit policy decisions and reason codes in logs, results, and action catalogs
+- JEA-oriented WinRM guidance without endpoint or security-setting changes
 
 ## 2.3.0: Enterprise auditability
 

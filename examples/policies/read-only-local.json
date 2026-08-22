@@ -1,0 +1,74 @@
+{
+  "schemaVersion": "1.0",
+  "profileName": "Read-only local operations",
+  "description": "Allows bounded read-only inventory and query actions on the local computer.",
+  "actions": {
+    "allow": [
+      "SystemInfo",
+      "DiskSpace",
+      "HardwareInfo",
+      "NetworkConfig",
+      "LoggedOnUsers",
+      "RunningProcesses",
+      "SoftwareInventory",
+      "LicenseStatus",
+      "PendingReboot",
+      "ServiceManagement",
+      "ScheduledTasks",
+      "FirewallStatus",
+      "EventLogQuery",
+      "RegistryRead"
+    ],
+    "deny": [
+      "WindowsUpdate",
+      "ScheduleReboot",
+      "TerminateProcess",
+      "ClearTempFiles",
+      "CustomCommand",
+      "CustomPowerShell"
+    ]
+  },
+  "transports": {
+    "allow": ["Local"],
+    "deny": ["WinRM", "PsExec"]
+  },
+  "targetModes": {
+    "allow": ["Local"],
+    "deny": ["Remote"]
+  },
+  "targets": {
+    "allow": [],
+    "deny": []
+  },
+  "limits": {
+    "maxTargets": 1,
+    "maxConcurrentJobs": 1,
+    "maxRetryCount": 0,
+    "maxRetryDelaySeconds": 3,
+    "maxOperationTimeoutMinutes": 15,
+    "maxConnectivityTimeoutSeconds": 5
+  },
+  "actionInputs": {
+    "RunningProcesses": {
+      "TopCount": {
+        "minimum": 1,
+        "maximum": 50
+      }
+    },
+    "ServiceManagement": {
+      "ServiceAction": {
+        "allowedValues": ["Query"]
+      }
+    },
+    "EventLogQuery": {
+      "EntryCount": {
+        "minimum": 1,
+        "maximum": 100
+      },
+      "EventLevel": {
+        "maximumItems": 3,
+        "allowedValues": ["Critical", "Error", "Warning"]
+      }
+    }
+  }
+}

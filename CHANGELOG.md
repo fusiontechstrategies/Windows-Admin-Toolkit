@@ -11,18 +11,22 @@ The format follows Keep a Changelog principles, and the project uses Semantic Ve
 - Noninteractive `-Automation` mode with 20 stable named action identifiers
 - Explicit local, single-remote-target, and validated target-list selectors
 - Action-specific noninteractive inputs with complete pre-execution validation
-- JSON schema version 1.0 with deterministic root fields, target ordering, UTC timestamps, array stability, safe serialization, and outcome-to-exit-code constraints
+- JSON result schema version 1.1 with deterministic root fields, target ordering, UTC timestamps, array stability, safe serialization, policy decisions, preflight state, and outcome-to-exit-code constraints
 - Stable exit codes for complete success, partial success, validation, authorization, execution, timeout, and internal failures
-- Clean stdout JSON with `-` and native `STDOUT` selectors, atomic file output, overwrite refusal, and six committed result examples
-- `-ListActions` catalog discovery for action metadata and input requirements
-- RMM, scheduled-task, WinRM, target-list, CI, and `WhatIf` examples
+- Clean stdout JSON with `-` and native `STDOUT` selectors, atomic file output, overwrite refusal, and eight committed result examples
+- `-ListActions` catalog discovery for action metadata, input requirements, and optional policy annotations
+- Optional strict policy profiles for actions, transports, target modes, target patterns, runtime caps, and supported action-input constraints
+- Policy schema version 1.0 and two synthetic least-privilege example profiles
+- `-Preflight` capability discovery for commands, executables, COM components, administrator status, PowerShell environment, and language mode without requested-action execution
+- RMM, scheduled-task, WinRM, target-list, CI, `WhatIf`, policy, preflight, and JEA-oriented examples and guidance
 - Automation regression coverage under Windows PowerShell 5.1 and PowerShell 7.x
 
 ### Changed
 
 - Refactored interactive and automation modes to share one action catalog and one execution implementation
 - Added deterministic per-target timing, attempts, normalized errors, and concurrency-order restoration
-- Increased the dependency-free native suite to 379 deterministic checks
+- Increased the dependency-free native suite to 504 deterministic checks per PowerShell edition
+- Updated the toolkit version to 2.2.0 and the automation result contract to schema version 1.1
 
 ### Fixed
 
@@ -48,6 +52,11 @@ The format follows Keep a Changelog principles, and the project uses Semantic Ve
 - Rejected WinRM-only controls with PsExec and PsExec-only controls with WinRM
 - Added strict, bounded UTF-8 decoding for target lists and custom PowerShell files across both PowerShell editions
 - Added pre-execution JSON destination writeability checks, reserved-name rejection, unique log names, and cancellation cleanup for background jobs
+- Made policy parsing a strict UTF-8, 1 MiB security boundary that rejects duplicate keys, case conflicts, unknown fields, unsupported values, inconsistent rules, and constraints that could silently do nothing
+- Enforced built-in ceilings as absolute, denied explicitly supplied values above policy limits, and clamped omitted runtime values to tighter policy caps
+- Evaluated target deny rules before allow patterns and stopped known denied actions before target-list or custom-source file reads
+- Kept policy files credential-free and preserved every existing confirmation, `ShouldProcess`, target-count, transport, protected-process, and no-retry safeguard
+- Proved through native child-process tests that capability preflight does not execute or log supplied custom PowerShell
 
 ## [2.0.0] - 2026-08-12
 

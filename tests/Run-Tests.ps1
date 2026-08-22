@@ -140,10 +140,11 @@ exit `$LASTEXITCODE
     }
 }
 
-Test-ToolkitAssertion -Condition ($Script:ToolkitVersion -eq '2.1.0') -Name 'Version is 2.1.0'
+Test-ToolkitAssertion -Condition ($Script:ToolkitVersion -eq '2.2.0') -Name 'Version is 2.2.0'
 Test-ToolkitAssertion -Condition ($Script:ActionCatalog.Count -eq 20) -Name 'Action catalog contains 20 actions'
 Test-ToolkitAssertion -Condition ($Script:ActionScripts.Count -eq 20) -Name 'Action script registry contains 20 scripts'
-Test-ToolkitAssertion -Condition ($Script:AutomationSchemaVersion -eq '1.0') -Name 'Automation schema version is 1.0'
+Test-ToolkitAssertion -Condition ($Script:AutomationSchemaVersion -eq '1.1') -Name 'Automation schema version is 1.1'
+Test-ToolkitAssertion -Condition ($Script:PolicySchemaVersion -eq '1.0') -Name 'Policy schema version is 1.0'
 
 $expectedActionIds = @(
     'SystemInfo',
@@ -227,12 +228,25 @@ foreach ($entry in $Script:ActionScripts.GetEnumerator()) {
     Test-ToolkitAssertion -Condition (@($parseErrors).Count -eq 0) -Name "Action script $($entry.Key) parses in this engine"
     Test-ToolkitAssertion -Condition ($entry.Value.ToString() -notmatch '\bRead-Host\b') -Name "Action script $($entry.Key) is noninteractive"
 }
+$capabilityTokens = $null
+$capabilityParseErrors = $null
+[void][System.Management.Automation.Language.Parser]::ParseInput($Script:CapabilityDiscoveryScript.ToString(), [ref]$capabilityTokens, [ref]$capabilityParseErrors)
+Test-ToolkitAssertion -Condition (@($capabilityParseErrors).Count -eq 0) -Name 'Capability discovery script parses in this engine'
+Test-ToolkitAssertion -Condition ($Script:CapabilityDiscoveryScript.ToString() -notmatch '\bRead-Host\b') -Name 'Capability discovery script is noninteractive'
+Test-ToolkitAssertion -Condition ($Script:ActionCapabilityRequirements.Count -eq 20 -and (($Script:ActionCapabilityRequirements.Keys -join '|') -ceq ($expectedActionIds -join '|'))) -Name 'Capability requirement registry covers every stable action in canonical order'
+$serviceQueryCapability = Get-AdminActionCapabilityRequirement -ActionId ServiceManagement -Inputs ([ordered]@{ ServiceAction = 'Query' })
+$serviceRestartCapability = Get-AdminActionCapabilityRequirement -ActionId ServiceManagement -Inputs ([ordered]@{ ServiceAction = 'Restart' })
+Test-ToolkitAssertion -Condition (($serviceQueryCapability.Commands -ccontains 'Get-Service') -and ($serviceQueryCapability.Commands -cnotcontains 'Restart-Service') -and -not $serviceQueryCapability.RequiresAdministrator -and ($serviceRestartCapability.Commands -ccontains 'Get-Service') -and ($serviceRestartCapability.Commands -ccontains 'Restart-Service') -and $serviceRestartCapability.RequiresAdministrator) -Name 'Capability requirements follow the resolved service operation'
+$blockedCapability = @(& $Script:CapabilityDiscoveryScript 'SystemInfo' @('DefinitelyMissing-WatCommand') @('definitely-missing-wat.exe') @() $false)
+Test-ToolkitAssertion -Condition ($blockedCapability.Count -eq 1 -and -not $blockedCapability[0].CanRun -and $blockedCapability[0].Status -ceq 'Failed') -Name 'Capability discovery reports a blocked action when dependencies are missing'
+Test-ToolkitAssertion -Condition ($blockedCapability[0].MissingCommands[0] -ceq 'DefinitelyMissing-WatCommand' -and $blockedCapability[0].MissingExecutables[0] -ceq 'definitely-missing-wat.exe' -and @($blockedCapability[0].Reasons).Count -eq 2) -Name 'Capability discovery identifies each missing dependency category safely'
 
 $automationCatalog = @(Get-AdminAutomationActionCatalog)
 Test-ToolkitAssertion -Condition ($automationCatalog.Count -eq 20) -Name 'Automation catalog enumerates 20 actions'
 Test-ToolkitAssertion -Condition (($automationCatalog.id -join '|') -ceq ($expectedActionIds -join '|')) -Name 'Automation catalog uses stable action identifiers'
 Test-ToolkitAssertion -Condition (@($automationCatalog | Where-Object { $_.id -eq 'ServiceManagement' }).inputs.Count -eq 2) -Name 'Automation catalog describes conditional service inputs'
 Test-ToolkitAssertion -Condition (@($automationCatalog | Where-Object { $_.id -eq 'CustomPowerShell' }).inputs.Count -eq 2) -Name 'Automation catalog describes both PowerShell input sources'
+Test-ToolkitAssertion -Condition (@($automationCatalog | Where-Object { $_.policyDecision -ne 'NotApplied' -or $_.policyReasonCode -ne 'NoPolicy' }).Count -eq 0) -Name 'Automation catalog reports policy as not applied by default'
 
 $validAutomationRequests = [ordered]@{
     SystemInfo        = @{ Action = 'SystemInfo'; Local = $true }
@@ -653,21 +667,276 @@ try {
     $invalidUtf8PowerShellFileResolution = Resolve-AdminAutomationRequest -Parameters @{ Action = 'CustomPowerShell'; Local = $true; PowerShellFile = $invalidUtf8PowerShellFile; WhatIf = $true }
     Test-ToolkitAssertion -Condition (-not $invalidUtf8PowerShellFileResolution.Success -and $invalidUtf8PowerShellFileResolution.Category -eq 'Validation' -and $invalidUtf8PowerShellFileResolution.Message -match 'UTF-8') -Name 'Automation rejects invalid UTF-8 PowerShell source files deterministically'
 
+    $policyExampleDirectory = Join-Path $projectRoot 'examples\policies'
+    $readOnlyPolicyPath = Join-Path $policyExampleDirectory 'read-only-local.json'
+    $helpdeskPolicyPath = Join-Path $policyExampleDirectory 'helpdesk-winrm.json'
+    $policyExampleFiles = @(Get-ChildItem -LiteralPath $policyExampleDirectory -Filter '*.json' -File | Sort-Object -Property Name)
+    Test-ToolkitAssertion -Condition ($policyExampleFiles.Count -eq 2) -Name 'Repository includes two documented policy profiles'
+    $readOnlyPolicy = Import-AdminPolicyProfile -LiteralPath $readOnlyPolicyPath
+    $helpdeskPolicy = Import-AdminPolicyProfile -LiteralPath $helpdeskPolicyPath
+    Test-ToolkitAssertion -Condition ($readOnlyPolicy.SchemaVersion -ceq '1.0' -and $readOnlyPolicy.ProfileName -ceq 'Read-only local operations') -Name 'Read-only local policy imports with canonical metadata'
+    Test-ToolkitAssertion -Condition ($helpdeskPolicy.SchemaVersion -ceq '1.0' -and $helpdeskPolicy.ProfileName -ceq 'Helpdesk WinRM operations') -Name 'Helpdesk WinRM policy imports with canonical metadata'
+    Test-ToolkitAssertion -Condition ($readOnlyPolicy.SourcePath -eq $readOnlyPolicyPath -and $helpdeskPolicy.SourcePath -eq $helpdeskPolicyPath) -Name 'Imported policies retain their resolved literal source paths'
+
+    $customRemotePolicyPath = Join-Path $resolvedTemporaryRoot 'custom-remote-policy.json'
+    $customRemotePolicyJson = '{"schemaVersion":"1.0","profileName":"Custom remote test","actions":{"allow":["CustomPowerShell"]},"transports":{"allow":["WinRM"]},"targetModes":{"allow":["Remote"]},"targets":{"allow":["*.example.com"]}}'
+    [System.IO.File]::WriteAllText($customRemotePolicyPath, $customRemotePolicyJson, $encoding)
+    $missingDeniedSourcePath = Join-Path $resolvedTemporaryRoot 'policy-denied-source.ps1'
+    $targetDeniedBeforeSourceRead = Resolve-AdminAutomationRequest -Parameters @{ Action = 'CustomPowerShell'; ComputerName = 'server01.example.net'; PolicyPath = $customRemotePolicyPath; PowerShellFile = $missingDeniedSourcePath }
+    Test-ToolkitAssertion -Condition (-not $targetDeniedBeforeSourceRead.Success -and $targetDeniedBeforeSourceRead.Category -ceq 'Authorization' -and $targetDeniedBeforeSourceRead.PolicyDecision.reasonCode -ceq 'TargetNotAllowed' -and -not (Test-Path -LiteralPath $missingDeniedSourcePath)) -Name 'Automation target policy denial precedes custom source reads'
+
+    $interactivePolicyLogPath = Join-Path $resolvedTemporaryRoot 'interactive-policy.log'
+    $originalInvocationParameters = $Script:InvocationParameters
+    $originalLogFileParameter = $LogFile
+    $originalInteractivePolicyState = [pscustomobject]@{
+        LogFile                    = $Script:State.LogFile
+        PolicyProfile              = $Script:State.PolicyProfile
+        MaxConcurrentJobs          = $Script:State.MaxConcurrentJobs
+        RetryCount                 = $Script:State.RetryCount
+        RetryDelaySeconds          = $Script:State.RetryDelaySeconds
+        OperationTimeoutMinutes    = $Script:State.OperationTimeoutMinutes
+        ConnectivityTimeoutSeconds = $Script:State.ConnectivityTimeoutSeconds
+    }
+    $Script:InteractiveInputQueue = New-Object 'System.Collections.Generic.Queue[string]'
+    $Script:InteractiveInputQueue.Enqueue('L')
+    $Script:InteractiveInputQueue.Enqueue('Q')
+    function global:Read-Host {
+        param([string]$Prompt)
+        if ($Script:InteractiveInputQueue.Count -eq 0) {
+            throw "Unexpected interactive prompt: $Prompt"
+        }
+        return $Script:InteractiveInputQueue.Dequeue()
+    }
+    try {
+        $Script:InvocationParameters = [ordered]@{ PolicyPath = $readOnlyPolicyPath }
+        $LogFile = $interactivePolicyLogPath
+        Invoke-WindowsAdminToolkit -Confirm:$false *> $null
+        $interactivePolicyLogText = Get-Content -LiteralPath $interactivePolicyLogPath -Raw -ErrorAction Stop
+        Test-ToolkitAssertion -Condition ($interactivePolicyLogText -match "Policy profile 'Read-only local operations' loaded and validated") -Name 'Interactive mode loads and logs a supplied policy profile'
+        Test-ToolkitAssertion -Condition ($interactivePolicyLogText -match 'Policy allowed the selected target context: PolicyAllowed') -Name 'Interactive mode applies policy before showing actions for a target context'
+
+        $Script:InteractiveInputQueue.Enqueue('R')
+        $Script:InvocationParameters = [ordered]@{ PolicyPath = $readOnlyPolicyPath }
+        $LogFile = Join-Path $resolvedTemporaryRoot 'interactive-policy-mode-denied.log'
+        $modeDeniedBeforeTargetInput = $false
+        try {
+            Invoke-WindowsAdminToolkit -Confirm:$false *> $null
+        }
+        catch {
+            $modeDeniedBeforeTargetInput = $_.Exception.Message -match 'explicitly denies the requested target mode'
+        }
+        Test-ToolkitAssertion -Condition $modeDeniedBeforeTargetInput -Name 'Interactive policy denies a target mode before target input or connectivity work'
+
+        $Script:InteractiveInputQueue.Enqueue('R')
+        $Script:InteractiveInputQueue.Enqueue('S')
+        $Script:InteractiveInputQueue.Enqueue('server01.example.net')
+        $Script:InvocationParameters = [ordered]@{ PolicyPath = $helpdeskPolicyPath }
+        $LogFile = Join-Path $resolvedTemporaryRoot 'interactive-policy-target-denied.log'
+        $targetDeniedBeforeConnectivity = $false
+        try {
+            Invoke-WindowsAdminToolkit -Confirm:$false *> $null
+        }
+        catch {
+            $targetDeniedBeforeConnectivity = $_.Exception.Message -match 'do not match the policy allow patterns'
+        }
+        Test-ToolkitAssertion -Condition $targetDeniedBeforeConnectivity -Name 'Interactive policy denies an unapproved target before PsExec or connectivity work'
+    }
+    finally {
+        Remove-Item Function:\global:Read-Host -ErrorAction SilentlyContinue
+        Remove-Variable -Name InteractiveInputQueue -Scope Script -ErrorAction SilentlyContinue
+        $Script:InvocationParameters = $originalInvocationParameters
+        $LogFile = $originalLogFileParameter
+        $Script:State.LogFile = $originalInteractivePolicyState.LogFile
+        $Script:State.PolicyProfile = $originalInteractivePolicyState.PolicyProfile
+        $Script:State.MaxConcurrentJobs = $originalInteractivePolicyState.MaxConcurrentJobs
+        $Script:State.RetryCount = $originalInteractivePolicyState.RetryCount
+        $Script:State.RetryDelaySeconds = $originalInteractivePolicyState.RetryDelaySeconds
+        $Script:State.OperationTimeoutMinutes = $originalInteractivePolicyState.OperationTimeoutMinutes
+        $Script:State.ConnectivityTimeoutSeconds = $originalInteractivePolicyState.ConnectivityTimeoutSeconds
+    }
+
+    $readOnlyPolicyCatalog = @(Get-AdminAutomationActionCatalog -PolicyProfile $readOnlyPolicy)
+    Test-ToolkitAssertion -Condition (@($readOnlyPolicyCatalog | Where-Object { $_.policyDecision -eq 'Allowed' }).Count -eq 14) -Name 'Policy-aware catalog marks every allowed read-only local workflow'
+    Test-ToolkitAssertion -Condition (@($readOnlyPolicyCatalog | Where-Object { $_.policyDecision -eq 'Denied' }).Count -eq 6) -Name 'Policy-aware catalog marks every denied state-changing or expert workflow'
+    Test-ToolkitAssertion -Condition (($readOnlyPolicyCatalog | Where-Object { $_.id -eq 'WindowsUpdate' }).policyReasonCode -ceq 'ActionDenied') -Name 'Policy-aware catalog distinguishes explicit action denial'
+
+    Test-ToolkitAssertion -Condition (Test-AdminPolicyTargetPattern -Pattern '*.example.com') -Name 'Policy accepts one leading star-dot target suffix pattern'
+    Test-ToolkitAssertion -Condition (-not (Test-AdminPolicyTargetPattern -Pattern 'server*.example.com')) -Name 'Policy rejects embedded target wildcards'
+    Test-ToolkitAssertion -Condition (-not (Test-AdminPolicyTargetPattern -Pattern 'server01.example.com.')) -Name 'Policy rejects trailing-dot target forms that cannot match canonical requests'
+    Test-ToolkitAssertion -Condition (Test-AdminPolicyTargetMatch -ComputerName 'SERVER01.EXAMPLE.COM' -Pattern '*.example.com') -Name 'Policy target suffix matching is case-insensitive'
+    Test-ToolkitAssertion -Condition (-not (Test-AdminPolicyTargetMatch -ComputerName 'example.com' -Pattern '*.example.com')) -Name 'Policy suffix pattern does not match the suffix root itself'
+    Test-ToolkitAssertion -Condition (-not (Test-AdminPolicyTargetMatch -ComputerName 'server01.example.net' -Pattern '*.example.com')) -Name 'Policy suffix pattern does not expand beyond its literal suffix'
+
+    $emptyPolicyInputs = [ordered]@{}
+    $emptyPolicyParameters = [ordered]@{}
+    $localPolicyRequest = Resolve-AdminPolicyRequest -PolicyProfile $readOnlyPolicy -ActionId SystemInfo -TargetMode Local -Transport Local -Computers @($env:COMPUTERNAME) -Inputs $emptyPolicyInputs -Parameters $emptyPolicyParameters
+    Test-ToolkitAssertion -Condition ($localPolicyRequest.Allowed -and $localPolicyRequest.PolicyDecision.reasonCode -ceq 'PolicyAllowed') -Name 'Policy permits an allow-listed local read-only request'
+    $deniedActionDecision = Get-AdminPolicyActionDecision -PolicyProfile $readOnlyPolicy -ActionId WindowsUpdate
+    Test-ToolkitAssertion -Condition ($deniedActionDecision.decision -ceq 'Denied' -and $deniedActionDecision.reasonCode -ceq 'ActionDenied') -Name 'Explicit action denial wins before execution'
+    $implicitActionDecision = Get-AdminPolicyActionDecision -PolicyProfile $helpdeskPolicy -ActionId HardwareInfo
+    Test-ToolkitAssertion -Condition ($implicitActionDecision.decision -ceq 'Denied' -and $implicitActionDecision.reasonCode -ceq 'ActionNotAllowed') -Name 'Action omission from an allow list fails closed'
+
+    $remoteAllowedRequest = Resolve-AdminPolicyRequest -PolicyProfile $helpdeskPolicy -ActionId SystemInfo -TargetMode Remote -Transport WinRM -Computers @('server01.example.com') -Inputs $emptyPolicyInputs -Parameters $emptyPolicyParameters
+    Test-ToolkitAssertion -Condition $remoteAllowedRequest.Allowed -Name 'Policy permits an approved remote WinRM target'
+    $remoteDeniedRequest = Resolve-AdminPolicyRequest -PolicyProfile $helpdeskPolicy -ActionId SystemInfo -TargetMode Remote -Transport WinRM -Computers @('restricted.example.com') -Inputs $emptyPolicyInputs -Parameters $emptyPolicyParameters
+    Test-ToolkitAssertion -Condition (-not $remoteDeniedRequest.Allowed -and $remoteDeniedRequest.PolicyDecision.reasonCode -ceq 'TargetDenied') -Name 'Explicit target denial wins over a matching allow suffix'
+    $remoteOutsideRequest = Resolve-AdminPolicyRequest -PolicyProfile $helpdeskPolicy -ActionId SystemInfo -TargetMode Remote -Transport WinRM -Computers @('server01.example.net') -Inputs $emptyPolicyInputs -Parameters $emptyPolicyParameters
+    Test-ToolkitAssertion -Condition (-not $remoteOutsideRequest.Allowed -and $remoteOutsideRequest.PolicyDecision.reasonCode -ceq 'TargetNotAllowed') -Name 'Target outside every allow pattern fails closed'
+    $localModeDeniedRequest = Resolve-AdminPolicyRequest -PolicyProfile $helpdeskPolicy -ActionId SystemInfo -TargetMode Local -Transport Local -Computers @($env:COMPUTERNAME) -Inputs $emptyPolicyInputs -Parameters $emptyPolicyParameters
+    Test-ToolkitAssertion -Condition (-not $localModeDeniedRequest.Allowed -and $localModeDeniedRequest.PolicyDecision.reasonCode -ceq 'TargetModeDenied') -Name 'Policy rejects a denied local target mode'
+    $transportDeniedRequest = Resolve-AdminPolicyRequest -PolicyProfile $helpdeskPolicy -ActionId SystemInfo -TargetMode Remote -Transport PsExec -Computers @('server01.example.com') -Inputs $emptyPolicyInputs -Parameters $emptyPolicyParameters
+    Test-ToolkitAssertion -Condition (-not $transportDeniedRequest.Allowed -and $transportDeniedRequest.PolicyDecision.reasonCode -ceq 'TransportDenied') -Name 'Policy rejects a denied transport'
+    $tooManyPolicyTargets = @(1..26 | ForEach-Object { 'server{0:d2}.example.com' -f $_ })
+    $targetLimitRequest = Resolve-AdminPolicyRequest -PolicyProfile $helpdeskPolicy -ActionId SystemInfo -TargetMode Remote -Transport WinRM -Computers $tooManyPolicyTargets -Inputs $emptyPolicyInputs -Parameters $emptyPolicyParameters
+    Test-ToolkitAssertion -Condition (-not $targetLimitRequest.Allowed -and $targetLimitRequest.PolicyDecision.reasonCode -ceq 'TargetCountExceeded') -Name 'Policy caps target count below the built-in ceiling'
+
+    $originalPolicyRuntime = [pscustomobject]@{
+        MaxConcurrentJobs          = $Script:State.MaxConcurrentJobs
+        RetryCount                 = $Script:State.RetryCount
+        RetryDelaySeconds          = $Script:State.RetryDelaySeconds
+        OperationTimeoutMinutes    = $Script:State.OperationTimeoutMinutes
+        ConnectivityTimeoutSeconds = $Script:State.ConnectivityTimeoutSeconds
+    }
+    try {
+        $Script:State.MaxConcurrentJobs = 8
+        $Script:State.RetryCount = 2
+        $Script:State.RetryDelaySeconds = 10
+        $Script:State.OperationTimeoutMinutes = 60
+        $Script:State.ConnectivityTimeoutSeconds = 30
+        $clampedPolicyRequest = Resolve-AdminPolicyRequest -PolicyProfile $helpdeskPolicy -ActionId SystemInfo -TargetMode Remote -Transport WinRM -Computers @('server01.example.com') -Inputs $emptyPolicyInputs -Parameters $emptyPolicyParameters
+        Test-ToolkitAssertion -Condition ($clampedPolicyRequest.Allowed -and $clampedPolicyRequest.ExecutionSettings.MaxConcurrentJobs -eq 4 -and $clampedPolicyRequest.ExecutionSettings.RetryCount -eq 1 -and $clampedPolicyRequest.ExecutionSettings.OperationTimeoutMinutes -eq 30 -and $clampedPolicyRequest.ExecutionSettings.ConnectivityTimeoutSeconds -eq 10) -Name 'Omitted runtime controls are clamped to tighter policy limits'
+        $explicitRuntimeRequest = Resolve-AdminPolicyRequest -PolicyProfile $helpdeskPolicy -ActionId SystemInfo -TargetMode Remote -Transport WinRM -Computers @('server01.example.com') -Inputs $emptyPolicyInputs -Parameters @{ MaxConcurrentJobs = 5 }
+        Test-ToolkitAssertion -Condition (-not $explicitRuntimeRequest.Allowed -and $explicitRuntimeRequest.PolicyDecision.reasonCode -ceq 'RuntimeLimitExceeded') -Name 'Explicit runtime control above policy limit is denied instead of silently changed'
+    }
+    finally {
+        $Script:State.MaxConcurrentJobs = $originalPolicyRuntime.MaxConcurrentJobs
+        $Script:State.RetryCount = $originalPolicyRuntime.RetryCount
+        $Script:State.RetryDelaySeconds = $originalPolicyRuntime.RetryDelaySeconds
+        $Script:State.OperationTimeoutMinutes = $originalPolicyRuntime.OperationTimeoutMinutes
+        $Script:State.ConnectivityTimeoutSeconds = $originalPolicyRuntime.ConnectivityTimeoutSeconds
+    }
+
+    $topCountDeniedRequest = Resolve-AdminPolicyRequest -PolicyProfile $helpdeskPolicy -ActionId RunningProcesses -TargetMode Remote -Transport WinRM -Computers @('server01.example.com') -Inputs ([ordered]@{ TopCount = 51 }) -Parameters $emptyPolicyParameters
+    Test-ToolkitAssertion -Condition (-not $topCountDeniedRequest.Allowed -and $topCountDeniedRequest.PolicyDecision.reasonCode -ceq 'ActionInputDenied') -Name 'Policy denies an action input above its profile maximum'
+    $topCountAllowedRequest = Resolve-AdminPolicyRequest -PolicyProfile $helpdeskPolicy -ActionId RunningProcesses -TargetMode Remote -Transport WinRM -Computers @('server01.example.com') -Inputs ([ordered]@{ TopCount = 50 }) -Parameters $emptyPolicyParameters
+    Test-ToolkitAssertion -Condition $topCountAllowedRequest.Allowed -Name 'Policy permits an action input at its profile maximum'
+    $caseEquivalentServiceRequest = Resolve-AdminPolicyRequest -PolicyProfile $helpdeskPolicy -ActionId ServiceManagement -TargetMode Remote -Transport WinRM -Computers @('server01.example.com') -Inputs ([ordered]@{ ServiceName = 'spooler'; ServiceAction = 'query' }) -Parameters $emptyPolicyParameters
+    Test-ToolkitAssertion -Condition $caseEquivalentServiceRequest.Allowed -Name 'Policy input identifiers follow case-insensitive Windows resource semantics'
+
+    $policyAutomationAllowed = Resolve-AdminAutomationRequest -Parameters @{ Action = 'SystemInfo'; Local = $true; PolicyPath = $readOnlyPolicyPath }
+    Test-ToolkitAssertion -Condition ($policyAutomationAllowed.Success -and $policyAutomationAllowed.Request.PolicyDecision.decision -ceq 'Allowed') -Name 'Automation resolution applies an optional policy profile'
+    $policyAutomationDenied = Resolve-AdminAutomationRequest -Parameters @{ Action = 'WindowsUpdate'; Local = $true; WhatIf = $true; PolicyPath = $readOnlyPolicyPath }
+    Test-ToolkitAssertion -Condition (-not $policyAutomationDenied.Success -and $policyAutomationDenied.Category -ceq 'Authorization' -and $policyAutomationDenied.PolicyDecision.reasonCode -ceq 'ActionDenied') -Name 'Automation policy denial uses authorization semantics'
+    $policyInputDenied = Resolve-AdminAutomationRequest -Parameters @{ Action = 'RunningProcesses'; Local = $true; TopCount = 51; PolicyPath = $readOnlyPolicyPath }
+    Test-ToolkitAssertion -Condition (-not $policyInputDenied.Success -and $policyInputDenied.PolicyDecision.reasonCode -ceq 'ActionInputDenied') -Name 'Automation applies policy constraints after canonical input validation'
+    $policyServiceDenied = Resolve-AdminAutomationRequest -Parameters @{ Action = 'ServiceManagement'; Local = $true; ServiceName = 'wuauserv'; ServiceAction = 'Start'; WhatIf = $true; PolicyPath = $readOnlyPolicyPath }
+    Test-ToolkitAssertion -Condition (-not $policyServiceDenied.Success -and $policyServiceDenied.PolicyDecision.reasonCode -ceq 'ActionInputDenied') -Name 'Conditional service changes can be narrowed to query-only by policy'
+    $policyServiceAllowed = Resolve-AdminAutomationRequest -Parameters @{ Action = 'ServiceManagement'; Local = $true; ServiceName = 'wuauserv'; ServiceAction = 'Query'; PolicyPath = $readOnlyPolicyPath }
+    Test-ToolkitAssertion -Condition ($policyServiceAllowed.Success -and $policyServiceAllowed.Request.ReadOnly) -Name 'Policy permits the query-only form of a conditional action'
+    $preflightResolution = Resolve-AdminAutomationRequest -Parameters @{ Action = 'ScheduleReboot'; Local = $true; Preflight = $true }
+    Test-ToolkitAssertion -Condition ($preflightResolution.Success -and $preflightResolution.Request.Preflight -and -not $preflightResolution.Request.ReadOnly) -Name 'State-changing capability preflight does not require execution confirmation'
+    $preflightWrongConfirmation = Resolve-AdminAutomationRequest -Parameters @{ Action = 'ScheduleReboot'; Local = $true; Preflight = $true; ConfirmationText = 'schedule reboot' }
+    Test-ToolkitAssertion -Condition (-not $preflightWrongConfirmation.Success -and $preflightWrongConfirmation.Category -ceq 'Authorization') -Name 'Capability preflight still rejects an incorrect supplied confirmation'
+    $preflightWhatIfConflict = Resolve-AdminAutomationRequest -Parameters @{ Action = 'SystemInfo'; Local = $true; Preflight = $true; WhatIf = $true }
+    Test-ToolkitAssertion -Condition (-not $preflightWhatIfConflict.Success -and $preflightWhatIfConflict.Category -ceq 'Validation') -Name 'Capability preflight cannot be combined with WhatIf'
+    $deniedMissingScriptFile = Join-Path $resolvedTemporaryRoot 'must-not-be-read.ps1'
+    $deniedBeforeFileRead = Resolve-AdminAutomationRequest -Parameters @{ Action = 'CustomPowerShell'; Local = $true; PowerShellFile = $deniedMissingScriptFile; PolicyPath = $readOnlyPolicyPath }
+    Test-ToolkitAssertion -Condition (-not $deniedBeforeFileRead.Success -and $deniedBeforeFileRead.PolicyDecision.reasonCode -ceq 'ActionDenied' -and $deniedBeforeFileRead.Message -notmatch 'not found') -Name 'Policy denies an action before reading its custom input file'
+    $deniedMissingTargetList = Join-Path $resolvedTemporaryRoot 'must-not-be-read-targets.txt'
+    $deniedBeforeTargetListRead = Resolve-AdminAutomationRequest -Parameters @{ Action = 'SystemInfo'; ComputerListPath = $deniedMissingTargetList; PolicyPath = $readOnlyPolicyPath }
+    Test-ToolkitAssertion -Condition (-not $deniedBeforeTargetListRead.Success -and $deniedBeforeTargetListRead.PolicyDecision.reasonCode -ceq 'TargetModeDenied' -and $deniedBeforeTargetListRead.Message -notmatch 'not found') -Name 'Policy denies a target mode before reading its target-list file'
+    $originalEarlyPolicyTransport = $Script:State.Transport
+    try {
+        $Script:State.Transport = 'PsExec'
+        $deniedBeforePsExecValidation = Resolve-AdminAutomationRequest -Parameters @{ Action = 'SystemInfo'; ComputerName = 'server01.example.com'; Transport = 'PsExec'; PsExecPath = (Join-Path $resolvedTemporaryRoot 'missing-psexec.exe'); PolicyPath = $helpdeskPolicyPath }
+        Test-ToolkitAssertion -Condition (-not $deniedBeforePsExecValidation.Success -and $deniedBeforePsExecValidation.PolicyDecision.reasonCode -ceq 'TransportDenied' -and $deniedBeforePsExecValidation.Message -notmatch 'USE PSEXEC|executable') -Name 'Policy denies a transport before PsExec authorization or executable validation'
+    }
+    finally {
+        $Script:State.Transport = $originalEarlyPolicyTransport
+    }
+
+    $writePolicyFile = {
+        param([string]$Name, [string]$Json)
+        $path = Join-Path $resolvedTemporaryRoot $Name
+        [System.IO.File]::WriteAllText($path, $Json, $encoding)
+        return $path
+    }
+    $invalidPolicyCases = [ordered]@{
+        'Policy rejects an unsupported schema version' = '{"schemaVersion":"9.9","profileName":"Test","actions":{"allow":["SystemInfo"]},"transports":{"allow":["Local"]},"targetModes":{"allow":["Local"]},"targets":{"allow":[]}}'
+        'Policy rejects an unknown root property' = '{"schemaVersion":"1.0","profileName":"Test","actions":{"allow":["SystemInfo"]},"transports":{"allow":["Local"]},"targetModes":{"allow":["Local"]},"targets":{"allow":[]},"unexpected":true}'
+        'Policy rejects conflicting action allow and deny rules' = '{"schemaVersion":"1.0","profileName":"Test","actions":{"allow":["SystemInfo"],"deny":["SystemInfo"]},"transports":{"allow":["Local"]},"targetModes":{"allow":["Local"]},"targets":{"allow":[]}}'
+        'Policy rejects an unsupported action identifier' = '{"schemaVersion":"1.0","profileName":"Test","actions":{"allow":["NoSuchAction"]},"transports":{"allow":["Local"]},"targetModes":{"allow":["Local"]},"targets":{"allow":[]}}'
+        'Policy rejects duplicate allow values case-insensitively' = '{"schemaVersion":"1.0","profileName":"Test","actions":{"allow":["SystemInfo","systeminfo"]},"transports":{"allow":["Local"]},"targetModes":{"allow":["Local"]},"targets":{"allow":[]}}'
+        'Policy rejects an unsafe target wildcard' = '{"schemaVersion":"1.0","profileName":"Test","actions":{"allow":["SystemInfo"]},"transports":{"allow":["WinRM"]},"targetModes":{"allow":["Remote"]},"targets":{"allow":["server*.example.com"]}}'
+        'Policy rejects case-equivalent target allow and deny rules' = '{"schemaVersion":"1.0","profileName":"Test","actions":{"allow":["SystemInfo"]},"transports":{"allow":["WinRM"]},"targetModes":{"allow":["Remote"]},"targets":{"allow":["Server01.Example.com"],"deny":["server01.example.com"]}}'
+        'Policy requires a target allow pattern for remote execution' = '{"schemaVersion":"1.0","profileName":"Test","actions":{"allow":["SystemInfo"]},"transports":{"allow":["WinRM"]},"targetModes":{"allow":["Remote"]},"targets":{"allow":[]}}'
+        'Policy rejects inert target rules without remote execution' = '{"schemaVersion":"1.0","profileName":"Test","actions":{"allow":["SystemInfo"]},"transports":{"allow":["Local"]},"targetModes":{"allow":["Local"]},"targets":{"allow":["server01.example.com"]}}'
+        'Policy rejects incompatible transport and target-mode rules' = '{"schemaVersion":"1.0","profileName":"Test","actions":{"allow":["SystemInfo"]},"transports":{"allow":["WinRM"]},"targetModes":{"allow":["Local"]},"targets":{"allow":[]}}'
+        'Policy rejects an inert allowed remote mode' = '{"schemaVersion":"1.0","profileName":"Test","actions":{"allow":["SystemInfo"]},"transports":{"allow":["Local"]},"targetModes":{"allow":["Local","Remote"]},"targets":{"allow":["*.example.com"]}}'
+        'Policy rejects an inert allowed remote transport' = '{"schemaVersion":"1.0","profileName":"Test","actions":{"allow":["SystemInfo"]},"transports":{"allow":["Local","WinRM"]},"targetModes":{"allow":["Local"]},"targets":{"allow":[]}}'
+        'Policy rejects a limit above the built-in ceiling' = '{"schemaVersion":"1.0","profileName":"Test","actions":{"allow":["SystemInfo"]},"transports":{"allow":["Local"]},"targetModes":{"allow":["Local"]},"targets":{"allow":[]},"limits":{"maxConcurrentJobs":33}}'
+        'Policy rejects an input minimum above its maximum' = '{"schemaVersion":"1.0","profileName":"Test","actions":{"allow":["RunningProcesses"]},"transports":{"allow":["Local"]},"targetModes":{"allow":["Local"]},"targets":{"allow":[]},"actionInputs":{"RunningProcesses":{"TopCount":{"minimum":50,"maximum":10}}}}'
+        'Policy rejects an unknown action input' = '{"schemaVersion":"1.0","profileName":"Test","actions":{"allow":["RunningProcesses"]},"transports":{"allow":["Local"]},"targetModes":{"allow":["Local"]},"targets":{"allow":[]},"actionInputs":{"RunningProcesses":{"UnknownInput":{"maximum":10}}}}'
+        'Policy rejects incorrectly cased action input names' = '{"schemaVersion":"1.0","profileName":"Test","actions":{"allow":["RunningProcesses"]},"transports":{"allow":["Local"]},"targetModes":{"allow":["Local"]},"targets":{"allow":[]},"actionInputs":{"RunningProcesses":{"topCount":{"maximum":10}}}}'
+        'Policy rejects an unsupported input constraint' = '{"schemaVersion":"1.0","profileName":"Test","actions":{"allow":["RunningProcesses"]},"transports":{"allow":["Local"]},"targetModes":{"allow":["Local"]},"targets":{"allow":[]},"actionInputs":{"RunningProcesses":{"TopCount":{"maximumLength":10}}}}'
+        'Policy rejects input constraints for a disallowed action' = '{"schemaVersion":"1.0","profileName":"Test","actions":{"allow":["SystemInfo"]},"transports":{"allow":["Local"]},"targetModes":{"allow":["Local"]},"targets":{"allow":[]},"actionInputs":{"RunningProcesses":{"TopCount":{"maximum":10}}}}'
+        'Policy rejects conflicting allowed value and length constraints' = '{"schemaVersion":"1.0","profileName":"Test","actions":{"allow":["ServiceManagement"]},"transports":{"allow":["Local"]},"targetModes":{"allow":["Local"]},"targets":{"allow":[]},"actionInputs":{"ServiceManagement":{"ServiceName":{"maximumLength":3,"allowedValues":["Spooler"]}}}}'
+        'Policy rejects a fractional integer limit' = '{"schemaVersion":"1.0","profileName":"Test","actions":{"allow":["SystemInfo"]},"transports":{"allow":["Local"]},"targetModes":{"allow":["Local"]},"targets":{"allow":[]},"limits":{"maxTargets":1.5}}'
+    }
+    $invalidPolicyIndex = 0
+    foreach ($invalidPolicyCaseName in $invalidPolicyCases.Keys) {
+        $invalidPolicyIndex++
+        $invalidPolicyPath = & $writePolicyFile ("invalid-policy-{0}.json" -f $invalidPolicyIndex) $invalidPolicyCases[$invalidPolicyCaseName]
+        Test-ToolkitThrow -Action { Import-AdminPolicyProfile -LiteralPath $invalidPolicyPath | Out-Null } -Name $invalidPolicyCaseName
+    }
+
+    $duplicatePolicyVariants = [ordered]@{
+        'Policy rejects exact duplicate JSON properties' = '{"schemaVersion":"1.0","schemaVersion":"1.0","profileName":"Test","actions":{"allow":["SystemInfo"]},"transports":{"allow":["Local"]},"targetModes":{"allow":["Local"]},"targets":{"allow":[]}}'
+        'Policy rejects case-conflicting JSON properties' = '{"schemaVersion":"1.0","SchemaVersion":"1.0","profileName":"Test","actions":{"allow":["SystemInfo"]},"transports":{"allow":["Local"]},"targetModes":{"allow":["Local"]},"targets":{"allow":[]}}'
+        'Policy rejects escaped duplicate JSON properties' = '{"schemaVersion":"1.0","schema\u0056ersion":"1.0","profileName":"Test","actions":{"allow":["SystemInfo"]},"transports":{"allow":["Local"]},"targetModes":{"allow":["Local"]},"targets":{"allow":[]}}'
+    }
+    $duplicatePolicyIndex = 0
+    foreach ($duplicatePolicyCaseName in $duplicatePolicyVariants.Keys) {
+        $duplicatePolicyIndex++
+        $duplicatePolicyPath = & $writePolicyFile ("duplicate-policy-{0}.json" -f $duplicatePolicyIndex) $duplicatePolicyVariants[$duplicatePolicyCaseName]
+        Test-ToolkitThrow -Action { Import-AdminPolicyProfile -LiteralPath $duplicatePolicyPath | Out-Null } -Name $duplicatePolicyCaseName
+    }
+    $invalidUtf8PolicyPath = Join-Path $resolvedTemporaryRoot 'invalid-utf8-policy.json'
+    [System.IO.File]::WriteAllBytes($invalidUtf8PolicyPath, [byte[]]@(0xC3, 0x28))
+    Test-ToolkitThrow -Action { Import-AdminPolicyProfile -LiteralPath $invalidUtf8PolicyPath | Out-Null } -Name 'Policy rejects invalid UTF-8 input deterministically'
+    $oversizedPolicyPath = Join-Path $resolvedTemporaryRoot 'oversized-policy.json'
+    $oversizedPolicyStream = [System.IO.File]::Open($oversizedPolicyPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+    try { $oversizedPolicyStream.SetLength(1048577) } finally { $oversizedPolicyStream.Dispose() }
+    Test-ToolkitThrow -Action { Import-AdminPolicyProfile -LiteralPath $oversizedPolicyPath | Out-Null } -Name 'Policy rejects profiles over the 1 MiB input limit'
+    $invalidPolicyResolution = Resolve-AdminAutomationRequest -Parameters @{ Action = 'SystemInfo'; Local = $true; PolicyPath = (& $writePolicyFile 'invalid-policy-resolution.json' '{"schemaVersion":"9.9"}') }
+    Test-ToolkitAssertion -Condition (-not $invalidPolicyResolution.Success -and $invalidPolicyResolution.Category -ceq 'Validation' -and $invalidPolicyResolution.PolicyDecision.decision -ceq 'Invalid' -and $invalidPolicyResolution.PolicyDecision.reasonCode -ceq 'PolicyInvalid') -Name 'Malformed automation policy returns an explicit invalid decision'
+
     $schemaPath = Join-Path $projectRoot 'schemas\automation-result-v1.schema.json'
     $schema = Get-Content -LiteralPath $schemaPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-    Test-ToolkitAssertion -Condition ($schema.properties.schemaVersion.const -eq '1.0') -Name 'Committed JSON schema describes schema version 1.0'
-    Test-ToolkitAssertion -Condition (@($schema.required).Count -eq 22) -Name 'Committed JSON schema requires every stable root field'
+    Test-ToolkitAssertion -Condition ($schema.properties.schemaVersion.const -eq '1.1') -Name 'Committed JSON schema describes schema version 1.1'
+    Test-ToolkitAssertion -Condition (@($schema.required).Count -eq 24) -Name 'Committed JSON schema requires every stable root field'
     Test-ToolkitAssertion -Condition (@($schema.properties.exitCode.enum).Count -eq 7) -Name 'Committed JSON schema contains every stable exit code'
     Test-ToolkitAssertion -Condition (@($schema.allOf).Count -eq 7) -Name 'Committed JSON schema locks every outcome to its stable status and exit code'
     Test-ToolkitAssertion -Condition (@($schema.'$defs'.stableActionId.enum).Count -eq 20) -Name 'Committed JSON schema contains every stable action identifier'
+    Test-ToolkitAssertion -Condition (@($schema.'$defs'.policyDecision.required).Count -eq 6) -Name 'Committed JSON schema requires a complete policy decision'
+    Test-ToolkitAssertion -Condition (@($schema.'$defs'.actionDescriptor.required | Where-Object { $_ -in @('policyDecision', 'policyReasonCode') }).Count -eq 2) -Name 'Action catalog schema includes policy annotations'
+
+    $policySchemaPath = Join-Path $projectRoot 'schemas\policy-profile-v1.schema.json'
+    $policySchema = Get-Content -LiteralPath $policySchemaPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    Test-ToolkitAssertion -Condition ($policySchema.properties.schemaVersion.const -eq '1.0') -Name 'Committed policy schema describes schema version 1.0'
+    Test-ToolkitAssertion -Condition (@($policySchema.required).Count -eq 6) -Name 'Committed policy schema requires every security boundary object'
+    Test-ToolkitAssertion -Condition (@($policySchema.'$defs'.actionId.enum).Count -eq 20) -Name 'Committed policy schema contains every stable action identifier'
+    Test-ToolkitAssertion -Condition ($policySchema.'$defs'.limits.properties.maxTargets.maximum -eq 500 -and $policySchema.'$defs'.limits.properties.maxConcurrentJobs.maximum -eq 32 -and $policySchema.'$defs'.limits.properties.maxRetryCount.maximum -eq 3) -Name 'Policy schema cannot relax built-in execution ceilings'
 
     $exampleDirectory = Join-Path $projectRoot 'examples\automation\results'
     $exampleFiles = @(Get-ChildItem -LiteralPath $exampleDirectory -Filter '*.json' -File | Sort-Object -Property Name)
-    Test-ToolkitAssertion -Condition ($exampleFiles.Count -eq 6) -Name 'Repository includes six documented automation outcome examples'
-    $requiredRootFields = @('schemaVersion', 'toolkitVersion', 'runId', 'startedAtUtc', 'finishedAtUtc', 'durationMs', 'actionId', 'actionName', 'readOnly', 'stateChanging', 'targetMode', 'transport', 'status', 'outcome', 'exitCode', 'targetCount', 'recordCount', 'targets', 'warnings', 'errors', 'reportPaths', 'actions')
+    Test-ToolkitAssertion -Condition ($exampleFiles.Count -eq 8) -Name 'Repository includes eight documented automation and policy outcome examples'
+    $requiredRootFields = @('schemaVersion', 'toolkitVersion', 'runId', 'startedAtUtc', 'finishedAtUtc', 'durationMs', 'actionId', 'actionName', 'readOnly', 'stateChanging', 'preflight', 'targetMode', 'transport', 'policy', 'status', 'outcome', 'exitCode', 'targetCount', 'recordCount', 'targets', 'warnings', 'errors', 'reportPaths', 'actions')
     $expectedExampleOutcomes = @{
         'execution-failure'  = 'ExecutionFailure'
         'partial'            = 'PartialSuccess'
+        'policy-denied'      = 'AuthorizationFailure'
+        'preflight'          = 'CompleteSuccess'
         'success'            = 'CompleteSuccess'
         'timeout'            = 'Timeout'
         'validation-failure' = 'ValidationFailure'
@@ -678,12 +947,18 @@ try {
         $presentFields = @($example.PSObject.Properties.Name)
         Test-ToolkitAssertion -Condition (@($requiredRootFields | Where-Object { $_ -notin $presentFields }).Count -eq 0) -Name "Example $($exampleFile.Name) contains all stable root fields"
         Test-ToolkitAssertion -Condition ($example.outcome -eq $expectedExampleOutcomes[$exampleFile.BaseName]) -Name "Example $($exampleFile.Name) uses its documented outcome"
-        Test-ToolkitAssertion -Condition (@($example.targets).Count -eq [int]$example.targetCount) -Name "Example $($exampleFile.Name) preserves target arrays"
+        Test-ToolkitAssertion -Condition (@($example.targets).Count -le [int]$example.targetCount) -Name "Example $($exampleFile.Name) preserves bounded target arrays"
+        Test-ToolkitAssertion -Condition ($example.schemaVersion -ceq '1.1' -and $example.toolkitVersion -ceq '2.2.0') -Name "Example $($exampleFile.Name) uses the current public versions"
+        Test-ToolkitAssertion -Condition (@($example.policy.PSObject.Properties.Name | Where-Object { $_ -in @('applied', 'schemaVersion', 'profileName', 'decision', 'reasonCode', 'reason') }).Count -eq 6) -Name "Example $($exampleFile.Name) contains a complete policy decision"
     }
+    $preflightExample = Get-Content -LiteralPath (Join-Path $exampleDirectory 'preflight.json') -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    Test-ToolkitAssertion -Condition ([bool]$preflightExample.preflight -and $preflightExample.targets[0].data[0].RequestedActionId -ceq 'SystemInfo') -Name 'Preflight example identifies the assessed action without executing it'
 
     $currentEnginePath = (Get-Process -Id $PID -ErrorAction Stop).Path
     $automationLogPath = Join-Path $resolvedTemporaryRoot 'automation-tests.log'
     $escapedAutomationLogPath = $automationLogPath.Replace("'", "''")
+    $escapedReadOnlyPolicyPath = $readOnlyPolicyPath.Replace("'", "''")
+    $escapedHelpdeskPolicyPath = $helpdeskPolicyPath.Replace("'", "''")
 
     $successProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -Action SystemInfo -Local -LogFile '$escapedAutomationLogPath'"
     $successJsonText = $successProcess.StdOut.Trim()
@@ -691,9 +966,10 @@ try {
     try { $successEnvelope = ConvertFrom-Json -InputObject $successJsonText -ErrorAction Stop } catch { Write-Verbose $_.Exception.Message }
     Test-ToolkitAssertion -Condition ($successProcess.ExitCode -eq 0) -Name 'Automation child process returns exit code 0 for complete success'
     Test-ToolkitAssertion -Condition ($null -ne $successEnvelope -and $successJsonText.StartsWith('{') -and $successJsonText.EndsWith('}')) -Name 'Automation stdout contains exactly one parseable JSON document'
-    Test-ToolkitAssertion -Condition ($successJsonText -match '^\{"schemaVersion":"1\.0","toolkitVersion":"2\.1\.0"') -Name 'Automation JSON root field ordering is deterministic'
+    Test-ToolkitAssertion -Condition ($successJsonText -match '^\{"schemaVersion":"1\.1","toolkitVersion":"2\.2\.0"') -Name 'Automation JSON root field ordering is deterministic'
     Test-ToolkitAssertion -Condition ($successEnvelope.outcome -eq 'CompleteSuccess' -and $successEnvelope.exitCode -eq 0) -Name 'Automation success envelope agrees with the process exit code'
     Test-ToolkitAssertion -Condition (@($successEnvelope.targets).Count -eq 1 -and @($successEnvelope.targets[0].data).Count -eq 1) -Name 'Automation success preserves target and data arrays for one item'
+    Test-ToolkitAssertion -Condition (-not [bool]$successEnvelope.preflight -and $successEnvelope.policy.decision -ceq 'NotApplied' -and $successEnvelope.policy.reasonCode -ceq 'NoPolicy') -Name 'Automation success reports preflight and no-policy state explicitly'
     Test-ToolkitAssertion -Condition ($successJsonText -match '"startedAtUtc":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z"') -Name 'Automation success uses a normalized UTC start timestamp'
     Test-ToolkitAssertion -Condition ($successJsonText -notmatch 'PSComputerName|RunspaceId|PSShowComputerName|Credential|SecureString|ScriptBlock') -Name 'Automation success excludes sensitive and remoting metadata'
 
@@ -705,6 +981,61 @@ try {
     $catalogEnvelope = ConvertFrom-Json -InputObject $catalogProcess.StdOut.Trim() -ErrorAction Stop
     Test-ToolkitAssertion -Condition ($catalogProcess.ExitCode -eq 0 -and @($catalogEnvelope.actions).Count -eq 20) -Name 'ListActions returns all stable actions without execution'
     Test-ToolkitAssertion -Condition (@($catalogEnvelope.targets).Count -eq 0 -and $catalogEnvelope.targetCount -eq 0) -Name 'ListActions does not create target results'
+    Test-ToolkitAssertion -Condition (@($catalogEnvelope.actions | Where-Object { $_.policyDecision -ne 'NotApplied' -or $_.policyReasonCode -ne 'NoPolicy' }).Count -eq 0) -Name 'ListActions reports that no policy was applied by default'
+
+    $policyCatalogProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -ListActions -PolicyPath '$escapedReadOnlyPolicyPath'"
+    $policyCatalogEnvelope = ConvertFrom-Json -InputObject $policyCatalogProcess.StdOut.Trim() -ErrorAction Stop
+    Test-ToolkitAssertion -Condition ($policyCatalogProcess.ExitCode -eq 0 -and $policyCatalogEnvelope.policy.decision -ceq 'Allowed' -and $policyCatalogEnvelope.policy.reasonCode -ceq 'PolicyLoaded') -Name 'ListActions validates and reports a supplied policy profile'
+    Test-ToolkitAssertion -Condition (@($policyCatalogEnvelope.actions | Where-Object { $_.policyDecision -eq 'Allowed' }).Count -eq 14 -and @($policyCatalogEnvelope.actions | Where-Object { $_.policyDecision -eq 'Denied' }).Count -eq 6) -Name 'ListActions annotates all actions with supplied policy decisions'
+
+    $policyAllowedProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -Action SystemInfo -Local -PolicyPath '$escapedReadOnlyPolicyPath' -LogFile '$escapedAutomationLogPath'"
+    $policyAllowedEnvelope = ConvertFrom-Json -InputObject $policyAllowedProcess.StdOut.Trim() -ErrorAction Stop
+    Test-ToolkitAssertion -Condition ($policyAllowedProcess.ExitCode -eq 0 -and $policyAllowedEnvelope.policy.applied -and $policyAllowedEnvelope.policy.schemaVersion -ceq '1.0' -and $policyAllowedEnvelope.policy.decision -ceq 'Allowed') -Name 'Native automation emits a complete allowed policy decision'
+
+    $policyDeniedProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -Action WindowsUpdate -Local -WhatIf -PolicyPath '$escapedReadOnlyPolicyPath' -LogFile '$escapedAutomationLogPath'"
+    $policyDeniedEnvelope = ConvertFrom-Json -InputObject $policyDeniedProcess.StdOut.Trim() -ErrorAction Stop
+    Test-ToolkitAssertion -Condition ($policyDeniedProcess.ExitCode -eq 3 -and $policyDeniedEnvelope.outcome -ceq 'AuthorizationFailure' -and $policyDeniedEnvelope.policy.decision -ceq 'Denied' -and $policyDeniedEnvelope.policy.reasonCode -ceq 'ActionDenied') -Name 'Native policy denial returns stable authorization exit code 3'
+    Test-ToolkitAssertion -Condition ($policyDeniedEnvelope.targetCount -eq 1 -and @($policyDeniedEnvelope.targets).Count -eq 0) -Name 'Policy denial occurs before any target result is created'
+    Test-ToolkitAssertion -Condition ((Get-Content -LiteralPath $automationLogPath -Raw -ErrorAction Stop) -match 'policy decision: Denied \(ActionDenied\)') -Name 'Policy denial writes its decision and reason code to the safe log'
+
+    $escapedInvalidPolicyResolutionPath = (Join-Path $resolvedTemporaryRoot 'invalid-policy-resolution.json').Replace("'", "''")
+    $invalidPolicyProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -Action SystemInfo -Local -PolicyPath '$escapedInvalidPolicyResolutionPath' -LogFile '$escapedAutomationLogPath'"
+    $invalidPolicyEnvelope = ConvertFrom-Json -InputObject $invalidPolicyProcess.StdOut.Trim() -ErrorAction Stop
+    Test-ToolkitAssertion -Condition ($invalidPolicyProcess.ExitCode -eq 2 -and $invalidPolicyEnvelope.outcome -ceq 'ValidationFailure' -and $invalidPolicyEnvelope.policy.decision -ceq 'Invalid' -and $invalidPolicyEnvelope.policy.reasonCode -ceq 'PolicyInvalid') -Name 'Native malformed policy returns validation exit code 2 and an invalid decision'
+
+    $preflightProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -Action SystemInfo -Local -Preflight -PolicyPath '$escapedReadOnlyPolicyPath' -LogFile '$escapedAutomationLogPath'"
+    $preflightEnvelope = ConvertFrom-Json -InputObject $preflightProcess.StdOut.Trim() -ErrorAction Stop
+    Test-ToolkitAssertion -Condition ($preflightProcess.ExitCode -eq 0 -and $preflightEnvelope.preflight -and $preflightEnvelope.policy.decision -ceq 'Allowed' -and $preflightEnvelope.targets[0].data[0].RequestedActionId -ceq 'SystemInfo') -Name 'Native capability preflight reports its requested action and policy decision'
+    Test-ToolkitAssertion -Condition ($null -ne $preflightEnvelope.targets[0].data[0].CanRun -and $preflightEnvelope.warnings[0] -match 'without executing') -Name 'Capability preflight emits readiness data and a no-execution warning'
+
+    $preflightMarkerPath = Join-Path $resolvedTemporaryRoot 'preflight-must-not-execute.txt'
+    $escapedPreflightMarkerPath = $preflightMarkerPath.Replace("'", "''")
+    $preflightCode = "[System.IO.File]::WriteAllText('$escapedPreflightMarkerPath','executed')"
+    $escapedPreflightCode = $preflightCode.Replace("'", "''")
+    $customPreflightProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -Action CustomPowerShell -Local -PowerShellText '$escapedPreflightCode' -Preflight -LogFile '$escapedAutomationLogPath'"
+    $customPreflightEnvelope = ConvertFrom-Json -InputObject $customPreflightProcess.StdOut.Trim() -ErrorAction Stop
+    Test-ToolkitAssertion -Condition ($customPreflightProcess.ExitCode -eq 0 -and $customPreflightEnvelope.preflight -and $customPreflightEnvelope.stateChanging -and $customPreflightEnvelope.targets[0].data[0].RequestedActionId -ceq 'CustomPowerShell') -Name 'State-changing expert action supports confirmation-free capability preflight'
+    Test-ToolkitAssertion -Condition (-not (Test-Path -LiteralPath $preflightMarkerPath)) -Name 'Capability preflight never executes supplied custom PowerShell'
+    $preflightLogText = Get-Content -LiteralPath $automationLogPath -Raw -ErrorAction Stop
+    Test-ToolkitAssertion -Condition ($preflightLogText -notmatch [regex]::Escape($preflightCode) -and $preflightLogText -notmatch [regex]::Escape($preflightMarkerPath)) -Name 'Capability preflight log excludes custom code and its file path'
+
+    $preflightWhatIfProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText '-Automation -Action SystemInfo -Local -Preflight -WhatIf'
+    $preflightWhatIfEnvelope = ConvertFrom-Json -InputObject $preflightWhatIfProcess.StdOut.Trim() -ErrorAction Stop
+    Test-ToolkitAssertion -Condition ($preflightWhatIfProcess.ExitCode -eq 2 -and $preflightWhatIfEnvelope.outcome -ceq 'ValidationFailure' -and $preflightWhatIfEnvelope.preflight) -Name 'Native capability preflight rejects WhatIf with a validation envelope'
+
+    $targetDeniedProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -Action SystemInfo -ComputerName restricted.example.com -PolicyPath '$escapedHelpdeskPolicyPath' -LogFile '$escapedAutomationLogPath'"
+    $targetDeniedEnvelope = ConvertFrom-Json -InputObject $targetDeniedProcess.StdOut.Trim() -ErrorAction Stop
+    Test-ToolkitAssertion -Condition ($targetDeniedProcess.ExitCode -eq 3 -and $targetDeniedEnvelope.policy.reasonCode -ceq 'TargetDenied' -and @($targetDeniedEnvelope.targets).Count -eq 0) -Name 'Native explicit target denial happens before connectivity work'
+    $missingPsExecPath = (Join-Path $resolvedTemporaryRoot 'native-missing-psexec.exe').Replace("'", "''")
+    $transportDeniedProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -Action SystemInfo -ComputerName server01.example.com -Transport PsExec -PsExecPath '$missingPsExecPath' -PolicyPath '$escapedHelpdeskPolicyPath' -LogFile '$escapedAutomationLogPath'"
+    $transportDeniedEnvelope = ConvertFrom-Json -InputObject $transportDeniedProcess.StdOut.Trim() -ErrorAction Stop
+    Test-ToolkitAssertion -Condition ($transportDeniedProcess.ExitCode -eq 3 -and $transportDeniedEnvelope.policy.reasonCode -ceq 'TransportDenied' -and $transportDeniedEnvelope.errors[0].message -notmatch 'USE PSEXEC|executable') -Name 'Native transport policy denial precedes PsExec authorization and executable validation'
+    $targetOutsideProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -Action SystemInfo -ComputerName server01.example.net -PolicyPath '$escapedHelpdeskPolicyPath' -LogFile '$escapedAutomationLogPath'"
+    $targetOutsideEnvelope = ConvertFrom-Json -InputObject $targetOutsideProcess.StdOut.Trim() -ErrorAction Stop
+    Test-ToolkitAssertion -Condition ($targetOutsideProcess.ExitCode -eq 3 -and $targetOutsideEnvelope.policy.reasonCode -ceq 'TargetNotAllowed' -and @($targetOutsideEnvelope.targets).Count -eq 0) -Name 'Native target outside policy allow patterns fails before connectivity work'
+    $runtimeDeniedProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -Action SystemInfo -ComputerName server01.example.com -MaxConcurrentJobs 5 -PolicyPath '$escapedHelpdeskPolicyPath' -LogFile '$escapedAutomationLogPath'"
+    $runtimeDeniedEnvelope = ConvertFrom-Json -InputObject $runtimeDeniedProcess.StdOut.Trim() -ErrorAction Stop
+    Test-ToolkitAssertion -Condition ($runtimeDeniedProcess.ExitCode -eq 3 -and $runtimeDeniedEnvelope.policy.reasonCode -ceq 'RuntimeLimitExceeded' -and @($runtimeDeniedEnvelope.targets).Count -eq 0) -Name 'Native explicit runtime limit violation fails before connectivity work'
 
     $catalogActionProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -ListActions -Action ''"
     $catalogActionEnvelope = ConvertFrom-Json -InputObject $catalogActionProcess.StdOut.Trim() -ErrorAction Stop

@@ -9,6 +9,7 @@ Use this software only on systems that you own or are explicitly authorized to a
 ## Review changes before execution
 
 - Use `-WhatIf` when evaluating state-changing workflows.
+- Use `-Preflight` to assess the selected action, identity, endpoint, and dependencies before execution.
 - Start with one non-production target before operating on a larger list.
 - Review the selected target count, action, and exact confirmation phrase.
 - Confirm that backups, rollback procedures, and monitoring are appropriate for the intended change.
@@ -20,6 +21,7 @@ Use this software only on systems that you own or are explicitly authorized to a
 - Do not weaken firewall, WinRM, TrustedHosts, or authentication policies solely to make the toolkit connect.
 - Use a least-privileged administrative identity appropriate for the requested action.
 - Use PsExec only when your organization permits its SMB and temporary-service model.
+- When using JEA, design and test the endpoint separately with only the commands, providers, paths, and identity rights the approved actions need. The toolkit does not configure JEA.
 
 ## Custom execution
 
@@ -36,7 +38,16 @@ Custom CMD commands and PowerShell code run as supplied with the privileges of t
 - Give every run a new JSON destination or use a separately reviewed retention process. The toolkit refuses to overwrite earlier evidence.
 - Keep explicit working directories and absolute output paths in scheduled tasks so execution does not depend on an account's profile directory.
 - Protect target lists and PowerShell files from unapproved modification. Both are security-sensitive inputs.
+- Apply a reviewed least-privilege `PolicyPath` where practical. Restrict who can edit the profile, and treat policy denial as an authorization result that should not be bypassed by rerunning without the profile.
 - Do not place credentials in command text, custom PowerShell, environment-specific examples, logs, or report paths.
+
+## Policy and preflight
+
+A policy profile narrows toolkit behavior but does not prove that a caller is authorized by Windows or by the organization. Keep operating-system permissions, JEA role design, RMM controls, change approval, exact confirmation phrases, and `ShouldProcess` in place.
+
+Review policy action, transport, target-mode, target-pattern, runtime, and action-input decisions before production use. Test a profile with `-ListActions -PolicyPath` and then run `-Preflight` against a nonproduction target. Never place credentials in the policy file.
+
+Capability preflight reports observable readiness, not a guarantee that every later operating-system operation will succeed. Target state, network state, permissions, dependencies, and policy may change after the assessment. Preflight for custom CMD or PowerShell cannot infer dependencies inside operator-supplied content.
 
 ## Reports and logs
 

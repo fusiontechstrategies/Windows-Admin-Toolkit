@@ -107,6 +107,37 @@ The RMM policy should separately restrict who can edit or launch this job. The c
 
 No confirmation text is required for the preview, and no target connection is opened.
 
+## Apply a read-only local policy
+
+```powershell
+.\WindowsAdminToolkit.ps1 `
+  -Automation `
+  -Action RunningProcesses `
+  -Local `
+  -TopCount 25 `
+  -PolicyPath .\examples\policies\read-only-local.json `
+  -JsonOutputPath -
+```
+
+The example profile permits selected local query actions, denies state-changing and expert actions, and narrows runtime and action-input limits. Protect production policy files with least-privilege NTFS permissions.
+
+## Remote capability preflight under policy
+
+```powershell
+.\WindowsAdminToolkit.ps1 `
+  -Automation `
+  -Action EventLogQuery `
+  -ComputerName server01.example.com `
+  -Transport WinRM `
+  -EventLogName System `
+  -EntryCount 50 `
+  -PolicyPath .\examples\policies\helpdesk-winrm.json `
+  -Preflight `
+  -JsonOutputPath -
+```
+
+This validates the complete request, evaluates policy, checks connectivity, and discovers capabilities in the selected execution context. It does not execute the Event Log Query action.
+
 ## Windows scheduled task
 
 This registration example uses an explicit working directory and a unique output path. Create the two directories and grant the scheduled-task identity only the access it needs before registering the task.
@@ -173,3 +204,17 @@ Exit code 1 is partial success and must not be treated as a passing CI result.
 ```
 
 The action catalog is also available on stdout by replacing the path with `-`.
+
+Apply `-PolicyPath` to annotate every catalog entry with its allow or deny decision:
+
+```powershell
+.\WindowsAdminToolkit.ps1 `
+  -Automation `
+  -ListActions `
+  -PolicyPath .\examples\policies\read-only-local.json `
+  -JsonOutputPath -
+```
+
+## Committed result examples
+
+The [`results`](results) directory contains schema version 1.1 examples for complete success, partial success, validation failure, execution failure, timeout, `WhatIf`, policy denial, and capability preflight. The examples use synthetic hostnames and contain no credentials or private environment data.
