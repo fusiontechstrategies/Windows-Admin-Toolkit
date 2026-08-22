@@ -1,6 +1,6 @@
 # Automation interface
 
-Windows Admin Toolkit 2.2.0 can run one named action without menus, prompts, or credential UI. Automation mode uses the same 20 action implementations as the interactive menu and returns a versioned JSON result with a stable process exit code. Optional policy profiles narrow the request, and capability preflight assesses readiness without executing the requested action.
+Windows Admin Toolkit 2.3.0 can run one named action without menus, prompts, or credential UI. Automation mode uses the same 20 action implementations as the interactive menu and returns a versioned JSON result with a stable process exit code. Optional policy profiles narrow the request, capability preflight assesses readiness without executing the requested action, and opt-in enterprise audit sinks record bounded lifecycle evidence.
 
 Use automation mode only in an already authorized Windows administration context. The toolkit does not enable WinRM, alter TrustedHosts, open firewall ports, bypass execution policy, or place passwords in process arguments.
 
@@ -15,7 +15,7 @@ Every action run requires:
 - Any inputs required by the selected action
 - The exact `-ConfirmationText` for an actual state-changing action
 
-Optional controls include `-PolicyPath <literal .json path>` and `-Preflight`. Policy and preflight behavior is documented in [POLICY.md](POLICY.md).
+Optional controls include `-PolicyPath <literal .json path>`, `-Preflight`, `-AuditPath <new literal .jsonl path>`, and `-AuditEventLog`. Policy and preflight behavior is documented in [POLICY.md](POLICY.md). Audit records, stable target IDs, summary hashing, Event Log behavior, and sink failures are documented in [AUDITING.md](AUDITING.md).
 
 This local inventory command writes exactly one compressed JSON document to stdout:
 
@@ -122,7 +122,7 @@ Custom CMD and custom PowerShell remain unsandboxed expert actions. Their source
 
 ## Result schema
 
-The machine contract is JSON Schema Draft 2020-12 in [`schemas/automation-result-v1.schema.json`](schemas/automation-result-v1.schema.json). Schema version `1.1` has 24 stable root fields:
+The machine contract is JSON Schema Draft 2020-12 in [`schemas/automation-result-v1.schema.json`](schemas/automation-result-v1.schema.json). Schema version `1.2` has 25 stable root fields:
 
 | Field | Meaning |
 | --- | --- |
@@ -135,16 +135,17 @@ The machine contract is JSON Schema Draft 2020-12 in [`schemas/automation-result
 | `targetMode` | `Local`, `Remote`, or null before target resolution |
 | `transport` | Canonical name, authentication mechanism, and SSL flag without secrets |
 | `policy` | Applied state, policy schema and profile, decision, reason code, and safe reason |
+| `audit` | Sink state, audit schema, resolved path, record count, completion state, and summary-hash metadata |
 | `status`, `outcome`, `exitCode` | Overall machine-readable result |
 | `targetCount`, `recordCount` | Requested targets and returned data records |
-| `targets` | Deterministically ordered per-target status, timings, attempts, normalized error, and data array |
+| `targets` | Deterministically ordered stable target ID, target name, status, timings, attempts, normalized error, and data array |
 | `warnings`, `errors` | Safe summaries for incomplete, preview, and failed runs |
 | `reportPaths` | JSON paths actually created |
 | `actions` | Policy-annotated catalog descriptors for `-ListActions`, otherwise an empty array |
 
 Arrays remain arrays even when empty or when they contain one item. Dates are formatted as `yyyy-MM-ddTHH:mm:ss.fffZ`. Credentials, secure strings, scriptblocks, raw exceptions, invocation details, and remoting metadata are excluded. Nested output is bounded to a safe serialization depth.
 
-Examples for success, partial success, validation failure, timeout, `WhatIf`, execution failure, policy denial, and capability preflight are in [`examples/automation/results`](examples/automation/results).
+Examples for success, audited success, partial success, validation failure, timeout, `WhatIf`, execution failure, policy denial, and capability preflight are in [`examples/automation/results`](examples/automation/results). A complete JSON Lines example is in [`examples/audit`](examples/audit).
 
 ## Exit codes
 
@@ -158,7 +159,7 @@ Examples for success, partial success, validation failure, timeout, `WhatIf`, ex
 | 5 | `Timeout` | Every attempted target timed out |
 | 10 | `InternalFailure` | The toolkit encountered an unhandled failure or best-effort cancellation |
 
-If target execution finishes but the requested JSON sink fails afterward, the exit code is 10 and the fallback envelope is written to stderr. It preserves the completed target results, clears `reportPaths`, and warns the caller to review those results before retrying a state-changing action.
+If target execution finishes but the requested JSON sink fails afterward, the exit code is 10 and the fallback envelope is written to stderr. It preserves the completed target results, clears `reportPaths`, and warns the caller to review those results before retrying a state-changing action. When auditing is enabled and still writable, the toolkit appends an explicit `audit.failure` event and an authoritative replacement `run.summary` for the final internal-failure outcome.
 
 A failed target in a multi-target run is never reported as complete success. Unreachable targets use normalized `Connectivity` errors. Concurrent results are restored to validated input order before serialization.
 
@@ -166,4 +167,4 @@ A timeout means the toolkit stopped waiting for a definitive result; it does not
 
 ## Operational examples
 
-Copy-pasteable WinRM, target-list, RMM, scheduled-task, CI, `WhatIf`, policy, and preflight examples are in [`examples/automation/README.md`](examples/automation/README.md).
+Copy-pasteable WinRM, target-list, RMM, scheduled-task, CI, `WhatIf`, policy, preflight, and audit examples are in [`examples/automation/README.md`](examples/automation/README.md).

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/fusiontechstrategies/Windows-Admin-Toolkit/schemas/automation-result-v1.schema.json",
   "title": "Windows Admin Toolkit automation result",
-  "description": "Version 1.1 machine-readable result envelope for Windows Admin Toolkit 2.2.0 automation runs.",
+  "description": "Version 1.2 machine-readable result envelope for Windows Admin Toolkit 2.3.0 automation runs.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -20,6 +20,7 @@
     "targetMode",
     "transport",
     "policy",
+    "audit",
     "status",
     "outcome",
     "exitCode",
@@ -33,7 +34,7 @@
   ],
   "properties": {
     "schemaVersion": {
-      "const": "1.1"
+      "const": "1.2"
     },
     "toolkitVersion": {
       "type": "string",
@@ -95,6 +96,9 @@
     },
     "policy": {
       "$ref": "#/$defs/policyDecision"
+    },
+    "audit": {
+      "$ref": "#/$defs/auditMetadata"
     },
     "status": {
       "type": "string",
@@ -229,6 +233,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "targetId",
         "target",
         "status",
         "startedAtUtc",
@@ -240,6 +245,10 @@
         "data"
       ],
       "properties": {
+        "targetId": {
+          "type": "string",
+          "pattern": "^t-[0-9a-f]{24}$"
+        },
         "target": {
           "type": "string"
         },
@@ -352,6 +361,69 @@
         {
           "if": {"properties": {"decision": {"const": "Invalid"}}, "required": ["decision"]},
           "then": {"properties": {"applied": {"const": true}}}
+        }
+      ]
+    },
+    "auditMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "schemaVersion",
+        "path",
+        "eventLog",
+        "eventSource",
+        "recordCount",
+        "complete",
+        "hashAlgorithm",
+        "canonicalization",
+        "summaryHash"
+      ],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "schemaVersion": { "type": ["string", "null"], "enum": ["1.0", null] },
+        "path": { "type": ["string", "null"] },
+        "eventLog": { "type": "boolean" },
+        "eventSource": { "type": ["string", "null"], "maxLength": 128 },
+        "recordCount": { "type": "integer", "minimum": 0, "maximum": 1006 },
+        "complete": { "type": "boolean" },
+        "hashAlgorithm": { "type": ["string", "null"], "enum": ["SHA-256", null] },
+        "canonicalization": { "type": ["string", "null"], "enum": ["WAT-AUDIT-SUMMARY-1", null] },
+        "summaryHash": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "enabled": { "const": false } }, "required": ["enabled"] },
+          "then": {
+            "properties": {
+              "schemaVersion": { "type": "null" },
+              "path": { "type": "null" },
+              "eventLog": { "const": false },
+              "eventSource": { "type": "null" },
+              "recordCount": { "const": 0 },
+              "complete": { "const": false },
+              "hashAlgorithm": { "type": "null" },
+              "canonicalization": { "type": "null" },
+              "summaryHash": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "complete": { "const": true } }, "required": ["complete"] },
+          "then": {
+            "properties": {
+              "enabled": { "const": true },
+              "schemaVersion": { "const": "1.0" },
+              "recordCount": { "minimum": 4 },
+              "hashAlgorithm": { "const": "SHA-256" },
+              "canonicalization": { "const": "WAT-AUDIT-SUMMARY-1" },
+              "summaryHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "eventLog": { "const": true } }, "required": ["eventLog"] },
+          "then": { "properties": { "eventSource": { "type": "string", "minLength": 1 } } }
         }
       ]
     },

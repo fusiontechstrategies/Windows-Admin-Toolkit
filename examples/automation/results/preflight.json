@@ -1,6 +1,6 @@
 {
-  "schemaVersion": "1.1",
-  "toolkitVersion": "2.2.0",
+  "schemaVersion": "1.2",
+  "toolkitVersion": "2.3.0",
   "runId": "77777777-7777-4777-8777-777777777777",
   "startedAtUtc": "2026-08-22T14:06:00.000Z",
   "finishedAtUtc": "2026-08-22T14:06:00.125Z",
@@ -13,6 +13,7 @@
   "targetMode": "Local",
   "transport": { "name": "Local", "authentication": null, "useSsl": false },
   "policy": { "applied": true, "schemaVersion": "1.0", "profileName": "Read-only local operations", "decision": "Allowed", "reasonCode": "PolicyAllowed", "reason": "The request satisfies the supplied policy profile." },
+  "audit": { "enabled": false, "schemaVersion": null, "path": null, "eventLog": false, "eventSource": null, "recordCount": 0, "complete": false, "hashAlgorithm": null, "canonicalization": null, "summaryHash": null },
   "status": "Succeeded",
   "outcome": "CompleteSuccess",
   "exitCode": 0,
@@ -20,6 +21,7 @@
   "recordCount": 1,
   "targets": [
     {
+      "targetId": "t-e80f263f9fedd8fa75de514f",
       "target": "ADMIN-WS01",
       "status": "Success",
       "startedAtUtc": "2026-08-22T14:06:00.025Z",

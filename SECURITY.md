@@ -28,6 +28,7 @@ Reports will be acknowledged as soon as practical. Valid reports will be investi
 - Custom CMD and PowerShell actions are intentionally unsandboxed and require explicit confirmation.
 - The toolkit does not automatically enable WinRM, open firewall ports, change TrustedHosts, or bypass execution policy.
 - Optional policy profiles are local security configuration. They narrow toolkit behavior but do not grant Windows authorization.
+- Audit sinks are opt-in evidence destinations. They do not authorize an action or configure Windows security services.
 
 ## Automation security
 
@@ -62,6 +63,21 @@ Policy profiles use strict schema version 1.0 parsing and fail closed. The toolk
 
 Restrict write access to policy files. An identity that can edit an applied profile can change its allow rules up to the toolkit's built-in ceilings. Review [POLICY.md](POLICY.md) for the complete precedence, target, result-decision, preflight, and JEA-oriented deployment contract.
 
-The JSON schema and stable exit codes are documented in [AUTOMATION.md](AUTOMATION.md). Treat changes to action IDs, classifications, confirmation phrases, result schema version 1.1, policy schema version 1.0, or exit-code meanings as security-sensitive public-interface changes.
+## Audit security
+
+Audit schema version 1.0 records bounded run, request, policy, target, failure, and summary events. Records intentionally omit credentials, secure strings, custom action source, raw action output, raw exceptions, invocation details, and remoting metadata.
+
+- Each `AuditPath` must be a new literal `.jsonl` file and cannot collide with another configured output. The toolkit never appends to or overwrites an existing audit file.
+- A target-start record is flushed before connectivity or requested-action execution. Unexpected file-length changes fail closed.
+- Per-run audit files have a 16 MiB hard ceiling. The toolkit performs no rotation, retention deletion, or log truncation.
+- Windows Event Log forwarding is off by default and requires a pre-registered source. The toolkit never creates a source or changes Event Log configuration.
+- A configured audit sink failure is visible as a validation failure before execution or internal failure after initialization. Completed target evidence is preserved without claiming audit completion.
+- Stable target IDs are deterministic join keys derived from canonical target names. They are not anonymous identifiers.
+- The SHA-256 run-summary hash detects changes to bounded summary evidence but is not a signature or proof of operator identity.
+- If the JSON result destination fails after target execution, a still-writable audit sink receives `audit.failure` and an authoritative replacement `run.summary`.
+
+Restrict read and write access to audit files because they may contain target names, policy profile names, action IDs, outcomes, timings, and normalized errors. Move completed files and expected hashes to an access-controlled external collector when stronger retention or immutability is required. Review [AUDITING.md](AUDITING.md) for the complete event, canonicalization, data-minimization, and sink-failure contract.
+
+The JSON schema and stable exit codes are documented in [AUTOMATION.md](AUTOMATION.md). Treat changes to action IDs, classifications, confirmation phrases, result schema version 1.2, policy schema version 1.0, audit schema version 1.0, canonicalization identifier, or exit-code meanings as security-sensitive public-interface changes.
 
 See [RESPONSIBLE_USE.md](RESPONSIBLE_USE.md) for operational guidance.

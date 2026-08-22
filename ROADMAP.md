@@ -30,10 +30,14 @@ Implementation status: complete for release review.
 
 ## 2.3.0: Enterprise auditability
 
-- JSON Lines audit logs with run IDs, target IDs, timings, and outcomes
-- Optional Windows Event Log integration
-- Tamper-evident run-summary hashes
-- Machine-readable summaries for SIEM, RMM, and ticketing ingestion
+Implementation status: complete for release review.
+
+- New per-run JSON Lines audit logs with unique run IDs, stable cross-run target IDs, UTC timings, lifecycle stages, outcomes, and normalized errors
+- Explicit policy-decision events and bounded target start or completion events without raw action data
+- Optional Windows Event Log integration that is off by default and requires an existing source
+- SHA-256 run-summary hashes under the documented `WAT-AUDIT-SUMMARY-1` canonicalization method
+- Machine-readable terminal summaries for SIEM, RMM, and ticketing ingestion
+- Bounded file behavior, unexpected-mutation detection, and visible audit-sink failure semantics
 
 ## 3.0.0: Controlled orchestration
 

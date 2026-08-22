@@ -1,6 +1,6 @@
 {
-  "schemaVersion": "1.1",
-  "toolkitVersion": "2.2.0",
+  "schemaVersion": "1.2",
+  "toolkitVersion": "2.3.0",
   "runId": "66666666-6666-4666-8666-666666666666",
   "startedAtUtc": "2026-08-22T14:05:00.000Z",
   "finishedAtUtc": "2026-08-22T14:05:00.800Z",
@@ -13,6 +13,7 @@
   "targetMode": "Remote",
   "transport": { "name": "WinRM", "authentication": "Kerberos", "useSsl": false },
   "policy": { "applied": false, "schemaVersion": null, "profileName": null, "decision": "NotApplied", "reasonCode": "NoPolicy", "reason": "No policy profile was supplied." },
+  "audit": { "enabled": false, "schemaVersion": null, "path": null, "eventLog": false, "eventSource": null, "recordCount": 0, "complete": false, "hashAlgorithm": null, "canonicalization": null, "summaryHash": null },
   "status": "Failed",
   "outcome": "ExecutionFailure",
   "exitCode": 4,
@@ -20,6 +21,7 @@
   "recordCount": 0,
   "targets": [
     {
+      "targetId": "t-75cd4f8be6ca9240242e8aa6",
       "target": "server04.example.com",
       "status": "Failed",
       "startedAtUtc": "2026-08-22T14:05:00.050Z",

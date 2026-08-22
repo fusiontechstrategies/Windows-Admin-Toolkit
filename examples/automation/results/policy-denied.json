@@ -1,6 +1,6 @@
 {
-  "schemaVersion": "1.1",
-  "toolkitVersion": "2.2.0",
+  "schemaVersion": "1.2",
+  "toolkitVersion": "2.3.0",
   "runId": "88888888-8888-4888-8888-888888888888",
   "startedAtUtc": "2026-08-22T14:07:00.000Z",
   "finishedAtUtc": "2026-08-22T14:07:00.010Z",
@@ -13,6 +13,7 @@
   "targetMode": "Local",
   "transport": { "name": "Local", "authentication": null, "useSsl": false },
   "policy": { "applied": true, "schemaVersion": "1.0", "profileName": "Read-only local operations", "decision": "Denied", "reasonCode": "ActionDenied", "reason": "The policy explicitly denies the requested action." },
+  "audit": { "enabled": false, "schemaVersion": null, "path": null, "eventLog": false, "eventSource": null, "recordCount": 0, "complete": false, "hashAlgorithm": null, "canonicalization": null, "summaryHash": null },
   "status": "AuthorizationFailed",
   "outcome": "AuthorizationFailure",
   "exitCode": 3,

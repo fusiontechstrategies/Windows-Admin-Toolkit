@@ -11,22 +11,26 @@ The format follows Keep a Changelog principles, and the project uses Semantic Ve
 - Noninteractive `-Automation` mode with 20 stable named action identifiers
 - Explicit local, single-remote-target, and validated target-list selectors
 - Action-specific noninteractive inputs with complete pre-execution validation
-- JSON result schema version 1.1 with deterministic root fields, target ordering, UTC timestamps, array stability, safe serialization, policy decisions, preflight state, and outcome-to-exit-code constraints
+- JSON result schema version 1.2 with deterministic root fields, stable target IDs, target ordering, UTC timestamps, array stability, safe serialization, policy decisions, audit metadata, preflight state, and outcome-to-exit-code constraints
 - Stable exit codes for complete success, partial success, validation, authorization, execution, timeout, and internal failures
-- Clean stdout JSON with `-` and native `STDOUT` selectors, atomic file output, overwrite refusal, and eight committed result examples
+- Clean stdout JSON with `-` and native `STDOUT` selectors, atomic file output, overwrite refusal, and nine committed result examples
 - `-ListActions` catalog discovery for action metadata, input requirements, and optional policy annotations
 - Optional strict policy profiles for actions, transports, target modes, target patterns, runtime caps, and supported action-input constraints
 - Policy schema version 1.0 and two synthetic least-privilege example profiles
 - `-Preflight` capability discovery for commands, executables, COM components, administrator status, PowerShell environment, and language mode without requested-action execution
 - RMM, scheduled-task, WinRM, target-list, CI, `WhatIf`, policy, preflight, and JEA-oriented examples and guidance
+- Opt-in per-run JSON Lines auditing with unique run IDs, sequenced lifecycle events, stable cross-run target IDs, UTC timings, normalized outcomes, and explicit policy decisions
+- Optional Windows Event Log audit forwarding that requires an existing source and never changes Event Log configuration
+- Audit schema version 1.0, SIEM-oriented terminal summaries, and documented `WAT-AUDIT-SUMMARY-1` SHA-256 canonicalization
+- A complete synthetic audited result and six-record JSON Lines lifecycle example
 - Automation regression coverage under Windows PowerShell 5.1 and PowerShell 7.x
 
 ### Changed
 
 - Refactored interactive and automation modes to share one action catalog and one execution implementation
 - Added deterministic per-target timing, attempts, normalized errors, and concurrency-order restoration
-- Increased the dependency-free native suite to 504 deterministic checks per PowerShell edition
-- Updated the toolkit version to 2.2.0 and the automation result contract to schema version 1.1
+- Increased the dependency-free native suite to 570 deterministic checks per PowerShell edition
+- Updated the toolkit version to 2.3.0 and the automation result contract to schema version 1.2
 
 ### Fixed
 
@@ -36,6 +40,7 @@ The format follows Keep a Changelog principles, and the project uses Semantic Ve
 - Mapped pending-reboot check errors to partial results instead of complete success
 - Treated unhandled PowerShell error records from the custom expert action as execution failures
 - Preserved completed target evidence in stderr fallback envelopes when a JSON output sink fails after execution
+- Appended an explicit audit failure and authoritative replacement summary when JSON result delivery fails after an audited execution
 - Wrote automation JSON files as interoperable UTF-8 without a byte-order mark while preserving BOM behavior for interactive exports
 - Removed the optional local PsExec binary from the deterministic test count while retaining its validation when available
 
@@ -57,6 +62,10 @@ The format follows Keep a Changelog principles, and the project uses Semantic Ve
 - Evaluated target deny rules before allow patterns and stopped known denied actions before target-list or custom-source file reads
 - Kept policy files credential-free and preserved every existing confirmation, `ShouldProcess`, target-count, transport, protected-process, and no-retry safeguard
 - Proved through native child-process tests that capability preflight does not execute or log supplied custom PowerShell
+- Made every audit destination a new literal `.jsonl` file with no append or overwrite behavior, a 16 MiB per-run ceiling, unexpected-mutation detection, and no automatic rotation or deletion
+- Flushed target-start evidence before connectivity or requested-action execution and converted configured audit-sink failures into visible non-success results
+- Excluded credentials, custom source, raw action data, and raw custom output from audit records
+- Kept Windows Event Log integration off by default and prohibited automatic source registration or configuration changes
 
 ## [2.0.0] - 2026-08-12
 

@@ -138,18 +138,77 @@ The example profile permits selected local query actions, denies state-changing 
 
 This validates the complete request, evaluates policy, checks connectivity, and discovers capabilities in the selected execution context. It does not execute the Event Log Query action.
 
+## Per-run enterprise audit
+
+Create a unique result and JSON Lines audit file for each run:
+
+```powershell
+$runSuffix = '{0}-{1}' -f (Get-Date -Format 'yyyyMMdd-HHmmss-fff'), ([guid]::NewGuid().ToString('N').Substring(0, 8))
+
+.\WindowsAdminToolkit.ps1 `
+  -Automation `
+  -Action SystemInfo `
+  -Local `
+  -AuditPath "C:\Ops\Audit\system-info-$runSuffix.jsonl" `
+  -JsonOutputPath "C:\Ops\Results\system-info-$runSuffix.json"
+```
+
+The audit path must be a new `.jsonl` file. The result's `audit.complete` must be true before a collector treats the terminal summary as complete. Each target uses the same stable `targetId` across the result envelope and every target-specific audit event.
+
+## Existing Windows Event Log source
+
+When an administrator has separately pre-registered and approved the `WindowsAdminToolkit` source, bounded audit events can be sent to it as well:
+
+```powershell
+.\WindowsAdminToolkit.ps1 `
+  -Automation `
+  -Action SystemInfo `
+  -Local `
+  -AuditPath C:\Ops\Audit\system-info-20260822.jsonl `
+  -AuditEventLog `
+  -AuditEventSource WindowsAdminToolkit `
+  -JsonOutputPath -
+```
+
+The toolkit does not register the source or change Windows Event Log configuration. If either explicitly configured sink fails, the run cannot report complete audit delivery.
+
+## Select the authoritative SIEM summary
+
+A normal run has one `run.summary`. A post-execution JSON result-delivery failure can append `audit.failure` and a replacement summary, so collectors should select the highest sequence:
+
+```powershell
+$records = Get-Content -LiteralPath C:\Ops\Audit\system-info-20260822.jsonl |
+  Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+  ForEach-Object { $_ | ConvertFrom-Json }
+
+$summary = $records |
+  Where-Object eventType -eq 'run.summary' |
+  Sort-Object sequence |
+  Select-Object -Last 1
+
+if (-not $summary -or $summary.summary.outcome -ne 'CompleteSuccess') {
+  throw 'The authoritative audit summary is missing or unsuccessful.'
+}
+```
+
+Verify sequence continuity and the documented summary hash before long-term ingestion. See [../../AUDITING.md](../../AUDITING.md).
+
 ## Windows scheduled task
 
-This registration example uses an explicit working directory and a unique output path. Create the two directories and grant the scheduled-task identity only the access it needs before registering the task.
+This registration example uses an explicit working directory plus unique result and audit paths. Create the directories and grant the scheduled-task identity only the access it needs before registering the task.
 
 ```powershell
 $toolkitDirectory = 'C:\Program Files\WindowsAdminToolkit'
 $powerShellPath = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
 $taskCommand = @'
 $resultDirectory = 'C:\ProgramData\WindowsAdminToolkit\Results'
-$resultName = 'nightly-system-info-{0}-{1}.json' -f (Get-Date -Format 'yyyyMMdd-HHmmss-fff'), ([guid]::NewGuid().ToString('N').Substring(0, 8))
+$auditDirectory = 'C:\ProgramData\WindowsAdminToolkit\Audit'
+$runSuffix = '{0}-{1}' -f (Get-Date -Format 'yyyyMMdd-HHmmss-fff'), ([guid]::NewGuid().ToString('N').Substring(0, 8))
+$resultName = "nightly-system-info-$runSuffix.json"
+$auditName = "nightly-system-info-$runSuffix.jsonl"
 $resultPath = Join-Path $resultDirectory $resultName
-& '.\WindowsAdminToolkit.ps1' -Automation -Action SystemInfo -Local -JsonOutputPath $resultPath
+$auditPath = Join-Path $auditDirectory $auditName
+& '.\WindowsAdminToolkit.ps1' -Automation -Action SystemInfo -Local -AuditPath $auditPath -JsonOutputPath $resultPath
 exit $LASTEXITCODE
 '@
 $encodedTaskCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($taskCommand))
@@ -168,7 +227,7 @@ Register-ScheduledTask `
   -User 'EXAMPLE\AuthorizedAutomationAccount'
 ```
 
-The task creates a timestamped result with a random suffix on every run. The toolkit still refuses to overwrite an existing JSON file. Archive or remove old results only through a separately reviewed retention job.
+The task creates timestamped result and audit files with a random suffix on every run. The toolkit refuses to overwrite either file. Archive or remove old evidence only through a separately reviewed retention job.
 
 ## CI failure on partial or failed results
 
@@ -217,4 +276,4 @@ Apply `-PolicyPath` to annotate every catalog entry with its allow or deny decis
 
 ## Committed result examples
 
-The [`results`](results) directory contains schema version 1.1 examples for complete success, partial success, validation failure, execution failure, timeout, `WhatIf`, policy denial, and capability preflight. The examples use synthetic hostnames and contain no credentials or private environment data.
+The [`results`](results) directory contains schema version 1.2 examples for complete success, audited success, partial success, validation failure, execution failure, timeout, `WhatIf`, policy denial, and capability preflight. The complete audit stream for the audited result is in [`../audit/audited-success.jsonl`](../audit/audited-success.jsonl). The examples use synthetic hostnames and contain no credentials or private environment data.
