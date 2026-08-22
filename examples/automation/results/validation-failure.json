@@ -1,0 +1,26 @@
+{
+  "schemaVersion": "1.0",
+  "toolkitVersion": "2.1.0",
+  "runId": "33333333-3333-4333-8333-333333333333",
+  "startedAtUtc": "2026-08-22T14:02:00.000Z",
+  "finishedAtUtc": "2026-08-22T14:02:00.010Z",
+  "durationMs": 10,
+  "actionId": null,
+  "actionName": null,
+  "readOnly": null,
+  "stateChanging": null,
+  "targetMode": null,
+  "transport": { "name": null, "authentication": null, "useSsl": false },
+  "status": "ValidationFailed",
+  "outcome": "ValidationFailure",
+  "exitCode": 2,
+  "targetCount": 0,
+  "recordCount": 0,
+  "targets": [],
+  "warnings": [],
+  "errors": [
+    { "category": "Validation", "message": "Unknown action identifier: NoSuchAction" }
+  ],
+  "reportPaths": [],
+  "actions": []
+}

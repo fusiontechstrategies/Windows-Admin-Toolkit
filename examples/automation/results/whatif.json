@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "1.0",
+  "toolkitVersion": "2.1.0",
+  "runId": "55555555-5555-4555-8555-555555555555",
+  "startedAtUtc": "2026-08-22T14:04:00.000Z",
+  "finishedAtUtc": "2026-08-22T14:04:00.050Z",
+  "durationMs": 50,
+  "actionId": "ScheduleReboot",
+  "actionName": "Schedule Reboot",
+  "readOnly": false,
+  "stateChanging": true,
+  "targetMode": "Local",
+  "transport": { "name": "Local", "authentication": null, "useSsl": false },
+  "status": "WhatIf",
+  "outcome": "CompleteSuccess",
+  "exitCode": 0,
+  "targetCount": 1,
+  "recordCount": 0,
+  "targets": [
+    {
+      "target": "ADMIN-WS01",
+      "status": "WhatIf",
+      "startedAtUtc": "2026-08-22T14:04:00.040Z",
+      "finishedAtUtc": "2026-08-22T14:04:00.040Z",
+      "durationMs": 0,
+      "attempts": 0,
+      "errorCategory": null,
+      "errorMessage": null,
+      "data": []
+    }
+  ],
+  "warnings": ["WhatIf preview completed. No target operation was started."],
+  "errors": [],
+  "reportPaths": [],
+  "actions": []
+}

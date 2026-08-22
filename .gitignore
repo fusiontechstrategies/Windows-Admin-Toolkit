@@ -6,6 +6,8 @@ logs/
 reports/
 exports/
 results/
+!examples/automation/results/
+!examples/automation/results/*.json
 WindowsAdminToolkit_*.csv
 WindowsAdminToolkit_*.json
 WindowsAdminToolkit_*.html

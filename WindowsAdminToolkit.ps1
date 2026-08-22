@@ -1,9 +1,9 @@
 <#
 .SYNOPSIS
-    Provides an interactive toolkit for authorized Windows administration.
+    Provides interactive and noninteractive tools for authorized Windows administration.
 
 .DESCRIPTION
-    Windows Admin Toolkit 2.0 supports local administration and
+    Windows Admin Toolkit 2.1 supports local administration and
     bounded remote execution through PowerShell Remoting or PsExec. PowerShell
     Remoting is the default because it does not place passwords on process
     command lines. The optional PsExec transport uses only the current Windows
@@ -19,9 +19,12 @@
 .PARAMETER PsExecPath
     Path or command name for a Microsoft-signed PsExec 2.43 or newer executable.
 
-.PARAMETER Credential
-    Optional credential for WinRM. PsExec deliberately uses only the current
-    Windows identity to prevent command-line password exposure.
+.PARAMETER WinRmIdentity
+    Optional in-memory PSCredential object for WinRM. Automation mode rejects
+    username strings so native parameter binding cannot open credential UI.
+    Credential remains a backward-compatible parameter alias.
+    PsExec deliberately uses only the current Windows identity to prevent
+    command-line password exposure.
 
 .PARAMETER MaxConcurrentJobs
     Maximum number of remote targets processed at one time.
@@ -57,6 +60,94 @@
     Skips the remote preflight check. The actual operation still enforces its
     timeout and reports connection failures.
 
+.PARAMETER Automation
+    Runs one named action without menus or prompts and returns a versioned JSON
+    result envelope.
+
+.PARAMETER Action
+    Stable action identifier used by automation mode.
+
+.PARAMETER ListActions
+    Returns the stable action catalog and input requirements without executing
+    an action.
+
+.PARAMETER Local
+    Selects the local computer for automation mode.
+
+.PARAMETER ComputerName
+    Selects one validated remote computer for automation mode.
+
+.PARAMETER ComputerListPath
+    Selects a validated remote computer-list file for automation mode.
+
+.PARAMETER JsonOutputPath
+    JSON result destination for automation mode. Use a single hyphen or STDOUT
+    for stdout. STDOUT is recommended with powershell.exe -File.
+
+.PARAMETER ConfirmationText
+    Exact action-specific authorization text for an actual state-changing run.
+
+.PARAMETER TargetListConfirmationText
+    Exact USE TARGET LIST authorization text required for more than 25 targets.
+
+.PARAMETER PsExecConfirmationText
+    Exact USE PSEXEC authorization text required for the optional PsExec transport.
+
+.PARAMETER TopCount
+    Maximum processes returned by the RunningProcesses automation action.
+
+.PARAMETER IncludeKB
+    Optional KB identifiers for the WindowsUpdate automation action. An empty
+    array selects all applicable software updates.
+
+.PARAMETER RebootDelaySeconds
+    Delay before the ScheduleReboot automation action requests a reboot.
+
+.PARAMETER ServiceName
+    Validated service name for the ServiceManagement automation action.
+
+.PARAMETER ServiceAction
+    Query, Start, Stop, or Restart for the ServiceManagement automation action.
+
+.PARAMETER ProcessName
+    Exact process name for the TerminateProcess automation action.
+
+.PARAMETER MinimumAgeDays
+    Minimum age of files eligible for the ClearTempFiles automation action.
+
+.PARAMETER MaximumFiles
+    Maximum files examined by ClearTempFiles on each target.
+
+.PARAMETER TaskPath
+    Validated scheduled-task path prefix for the ScheduledTasks automation action.
+
+.PARAMETER MaximumTasks
+    Maximum scheduled tasks returned per target.
+
+.PARAMETER EventLogName
+    Validated event-log channel for the EventLogQuery automation action.
+
+.PARAMETER EntryCount
+    Maximum event-log entries returned per target.
+
+.PARAMETER EventLevel
+    One or more event levels for the EventLogQuery automation action.
+
+.PARAMETER RegistryPath
+    Validated registry provider or hive path for the RegistryRead automation action.
+
+.PARAMETER RegistryValueName
+    Optional registry value name. An empty value lists all values.
+
+.PARAMETER CommandText
+    Unsandboxed command text for the CustomCommand automation action.
+
+.PARAMETER PowerShellText
+    Unsandboxed source text for the CustomPowerShell automation action.
+
+.PARAMETER PowerShellFile
+    Literal local .ps1 path for the CustomPowerShell automation action.
+
 .EXAMPLE
     .\WindowsAdminToolkit.ps1
 
@@ -66,8 +157,14 @@
 .EXAMPLE
     .\WindowsAdminToolkit.ps1 -Transport PsExec -PsExecPath C:\Tools\PsExec64.exe
 
+.EXAMPLE
+    .\WindowsAdminToolkit.ps1 -Automation -Action SystemInfo -Local -JsonOutputPath -
+
+.EXAMPLE
+    .\WindowsAdminToolkit.ps1 -Automation -ListActions -JsonOutputPath -
+
 .NOTES
-    Version: 2.0.0
+    Version: 2.1.0
     License: MIT
     Use only on systems you own or are explicitly authorized to administer.
 #>
@@ -77,34 +174,29 @@
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
 param(
     [Parameter()]
-    [ValidateSet('WinRM', 'PsExec')]
     [string]$Transport = 'WinRM',
 
     [Parameter()]
-    [ValidateNotNullOrEmpty()]
     [string]$PsExecPath = 'PsExec64.exe',
 
     [Parameter()]
-    [System.Management.Automation.PSCredential]$Credential,
+    [AllowNull()]
+    [Alias('Credential')]
+    [object]$WinRmIdentity,
 
     [Parameter()]
-    [ValidateRange(1, 32)]
     [int]$MaxConcurrentJobs = 8,
 
     [Parameter()]
-    [ValidateRange(0, 3)]
     [int]$RetryCount = 1,
 
     [Parameter()]
-    [ValidateRange(1, 60)]
     [int]$RetryDelaySeconds = 3,
 
     [Parameter()]
-    [ValidateRange(1, 180)]
     [int]$OperationTimeoutMinutes = 30,
 
     [Parameter()]
-    [ValidateRange(1, 60)]
     [int]$ConnectivityTimeoutSeconds = 5,
 
     [Parameter()]
@@ -114,33 +206,139 @@ param(
     [switch]$UseSsl,
 
     [Parameter()]
-    [ValidateSet('Default', 'Kerberos', 'Negotiate')]
     [string]$Authentication = 'Default',
 
     [Parameter()]
     [switch]$Quiet,
 
     [Parameter()]
-    [switch]$SkipConnectivityCheck
+    [switch]$SkipConnectivityCheck,
+
+    [Parameter()]
+    [switch]$Automation,
+
+    [Parameter()]
+    [AllowEmptyString()]
+    [string]$Action = '',
+
+    [Parameter()]
+    [switch]$ListActions,
+
+    [Parameter()]
+    [switch]$Local,
+
+    [Parameter()]
+    [AllowEmptyString()]
+    [string]$ComputerName = '',
+
+    [Parameter()]
+    [AllowEmptyString()]
+    [string]$ComputerListPath = '',
+
+    [Parameter()]
+    [string]$JsonOutputPath = '-',
+
+    [Parameter()]
+    [AllowEmptyString()]
+    [string]$ConfirmationText = '',
+
+    [Parameter()]
+    [AllowEmptyString()]
+    [string]$TargetListConfirmationText = '',
+
+    [Parameter()]
+    [AllowEmptyString()]
+    [string]$PsExecConfirmationText = '',
+
+    [Parameter()]
+    [int]$TopCount = 20,
+
+    [Parameter()]
+    [string[]]$IncludeKB = @(),
+
+    [Parameter()]
+    [int]$RebootDelaySeconds = 60,
+
+    [Parameter()]
+    [AllowEmptyString()]
+    [string]$ServiceName = '',
+
+    [Parameter()]
+    [AllowEmptyString()]
+    [string]$ServiceAction = 'Query',
+
+    [Parameter()]
+    [AllowEmptyString()]
+    [string]$ProcessName = '',
+
+    [Parameter()]
+    [int]$MinimumAgeDays = 2,
+
+    [Parameter()]
+    [int]$MaximumFiles = 50000,
+
+    [Parameter()]
+    [AllowEmptyString()]
+    [string]$TaskPath = '\',
+
+    [Parameter()]
+    [int]$MaximumTasks = 50,
+
+    [Parameter()]
+    [AllowEmptyString()]
+    [string]$EventLogName = 'System',
+
+    [Parameter()]
+    [int]$EntryCount = 20,
+
+    [Parameter()]
+    [string[]]$EventLevel = @('Error', 'Warning'),
+
+    [Parameter()]
+    [AllowEmptyString()]
+    [string]$RegistryPath = '',
+
+    [Parameter()]
+    [AllowEmptyString()]
+    [string]$RegistryValueName = '',
+
+    [Parameter()]
+    [AllowEmptyString()]
+    [string]$CommandText = '',
+
+    [Parameter()]
+    [AllowEmptyString()]
+    [string]$PowerShellText = '',
+
+    [Parameter()]
+    [AllowEmptyString()]
+    [string]$PowerShellFile = ''
 )
 
-$Script:ToolkitVersion = '2.0.0'
+$Script:ToolkitVersion = '2.1.0'
 $Script:WasDotSourced = $MyInvocation.InvocationName -eq '.'
 $Script:ToolkitPath = $PSCommandPath
+$Script:InvocationParameters = @{}
+foreach ($boundName in $PSBoundParameters.Keys) {
+    $canonicalBoundName = if ($boundName -eq 'WinRmIdentity') { 'Credential' } else { $boundName }
+    $Script:InvocationParameters[$canonicalBoundName] = $PSBoundParameters[$boundName]
+}
+$normalizedTransport = if ($Transport -ieq 'WinRM') { 'WinRM' } elseif ($Transport -ieq 'PsExec') { 'PsExec' } else { $Transport }
+$normalizedAuthentication = if ($Authentication -ieq 'Default') { 'Default' } elseif ($Authentication -ieq 'Kerberos') { 'Kerberos' } elseif ($Authentication -ieq 'Negotiate') { 'Negotiate' } else { $Authentication }
 $Script:State = [ordered]@{
     LogFile                    = $null
     Quiet                      = [bool]$Quiet
-    Transport                  = $Transport
+    Transport                  = $normalizedTransport
     PsExecPath                 = $PsExecPath
     PsExecFullPath             = $null
-    Credential                 = $Credential
+    Credential                 = $WinRmIdentity
     MaxConcurrentJobs          = $MaxConcurrentJobs
     RetryCount                 = $RetryCount
     RetryDelaySeconds          = $RetryDelaySeconds
     OperationTimeoutMinutes    = $OperationTimeoutMinutes
     ConnectivityTimeoutSeconds = $ConnectivityTimeoutSeconds
     UseSsl                     = [bool]$UseSsl
-    Authentication             = $Authentication
+    Authentication             = $normalizedAuthentication
     SkipConnectivityCheck      = [bool]$SkipConnectivityCheck
 }
 
@@ -149,6 +347,144 @@ function Test-WindowsPlatform {
     param()
 
     return $env:OS -eq 'Windows_NT'
+}
+
+function Test-AdminLiteralFilePathText {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$LiteralPath
+    )
+
+    if ([string]::IsNullOrWhiteSpace($LiteralPath) -or
+        $LiteralPath -match '[\x00-\x1F\x7F]' -or
+        $LiteralPath -match '(?i)^\\\\[.?]\\' -or
+        $LiteralPath -match '(?i)^\\\\[^\\]+\\(?:pipe|mailslot)(?:\\|$)' -or
+        [System.Management.Automation.WildcardPattern]::ContainsWildcardCharacters($LiteralPath)) {
+        return $false
+    }
+
+    $pathWithoutDrive = if ($LiteralPath -match '^[A-Za-z]:') { $LiteralPath.Substring(2) } else { $LiteralPath }
+    if ($pathWithoutDrive.Contains(':')) {
+        return $false
+    }
+
+    foreach ($segment in @($LiteralPath -split '[\\/]')) {
+        if ([string]::IsNullOrEmpty($segment) -or $segment -eq '.' -or $segment -match '^[A-Za-z]:$') {
+            continue
+        }
+        if ($segment -eq '..' -or $segment.Length -gt 255 -or $segment.TrimEnd(' ', '.') -cne $segment) {
+            return $false
+        }
+        if ($segment.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -ge 0) {
+            return $false
+        }
+        $deviceName = @($segment -split '\.', 2)[0].TrimEnd(' ', '.')
+        if ($deviceName -match '^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$') {
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Read-AdminBoundedUtf8File {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$LiteralPath,
+
+        [Parameter()]
+        [ValidateRange(1, 16777216)]
+        [int]$MaximumBytes = 1048576
+    )
+
+    if (-not (Test-Path -LiteralPath $LiteralPath -PathType Leaf)) {
+        throw "Input file not found: $LiteralPath"
+    }
+
+    $stream = $null
+    try {
+        $stream = [System.IO.File]::Open($LiteralPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+        $fileLength = $stream.Length
+        if ($fileLength -gt $MaximumBytes) {
+            throw "The input file exceeds the $MaximumBytes byte limit."
+        }
+
+        $bytes = New-Object 'byte[]' ([int]$fileLength)
+        $offset = 0
+        while ($offset -lt $bytes.Length) {
+            $readCount = $stream.Read($bytes, $offset, $bytes.Length - $offset)
+            if ($readCount -le 0) {
+                throw 'The input file ended before it could be read completely.'
+            }
+            $offset += $readCount
+        }
+    }
+    finally {
+        if ($stream) {
+            $stream.Dispose()
+        }
+    }
+
+    $textOffset = 0
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+        $textOffset = 3
+    }
+    try {
+        $strictUtf8 = New-Object System.Text.UTF8Encoding($false, $true)
+        return $strictUtf8.GetString($bytes, $textOffset, $bytes.Length - $textOffset)
+    }
+    catch [System.Text.DecoderFallbackException] {
+        throw 'The input file must contain valid UTF-8 text.'
+    }
+}
+
+function Get-AdminRuntimeConfigurationError {
+    [CmdletBinding()]
+    param()
+
+    if ($Script:State.Transport -notin @('WinRM', 'PsExec')) {
+        return "Unsupported transport: $($Script:State.Transport)"
+    }
+    if ($Script:State.Authentication -notin @('Default', 'Kerberos', 'Negotiate')) {
+        return "Unsupported WinRM authentication value: $($Script:State.Authentication)"
+    }
+    if ($Script:State.Transport -eq 'PsExec') {
+        foreach ($winRmOnlyParameter in @('Authentication', 'UseSsl')) {
+            if (Test-AdminParameterBound -Parameters $Script:InvocationParameters -Name $winRmOnlyParameter) {
+                return "Parameter -$winRmOnlyParameter is valid only with the WinRM transport."
+            }
+        }
+    }
+    elseif (Test-AdminParameterBound -Parameters $Script:InvocationParameters -Name 'PsExecPath') {
+        return 'Parameter -PsExecPath is valid only with the PsExec transport.'
+    }
+    if ($null -ne $Script:State.Credential -and $Script:State.Credential -isnot [System.Management.Automation.PSCredential]) {
+        return 'Credential must be supplied as an in-memory PSCredential object. Username strings are rejected in automation mode to prevent credential prompts.'
+    }
+    if ($Script:State.MaxConcurrentJobs -lt 1 -or $Script:State.MaxConcurrentJobs -gt 32) {
+        return 'MaxConcurrentJobs must be from 1 through 32.'
+    }
+    if ($Script:State.RetryCount -lt 0 -or $Script:State.RetryCount -gt 3) {
+        return 'RetryCount must be from 0 through 3.'
+    }
+    if ($Script:State.RetryDelaySeconds -lt 1 -or $Script:State.RetryDelaySeconds -gt 60) {
+        return 'RetryDelaySeconds must be from 1 through 60.'
+    }
+    if ($Script:State.OperationTimeoutMinutes -lt 1 -or $Script:State.OperationTimeoutMinutes -gt 180) {
+        return 'OperationTimeoutMinutes must be from 1 through 180.'
+    }
+    if ($Script:State.ConnectivityTimeoutSeconds -lt 1 -or $Script:State.ConnectivityTimeoutSeconds -gt 60) {
+        return 'ConnectivityTimeoutSeconds must be from 1 through 60.'
+    }
+    if ($Script:State.Transport -eq 'PsExec' -and $Script:State.Credential) {
+        return 'PsExec does not accept alternate credentials in this toolkit.'
+    }
+
+    return $null
 }
 
 function Initialize-AdminLog {
@@ -165,7 +501,11 @@ function Initialize-AdminLog {
         }
 
         $logDirectory = Join-Path $basePath 'WindowsAdminToolkit\Logs'
-        $RequestedPath = Join-Path $logDirectory ("WindowsAdminToolkit_{0}.log" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+        $RequestedPath = Join-Path $logDirectory ("WindowsAdminToolkit_{0}_{1}.log" -f (Get-Date -Format 'yyyyMMdd_HHmmss_fff'), [guid]::NewGuid().ToString('N').Substring(0, 8))
+    }
+
+    if (-not (Test-AdminLiteralFilePathText -LiteralPath $RequestedPath)) {
+        throw 'The log path contains an unsafe or unsupported component.'
     }
 
     $fullPath = [System.IO.Path]::GetFullPath($RequestedPath)
@@ -175,11 +515,21 @@ function Initialize-AdminLog {
     }
 
     if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
-        New-Item -ItemType Directory -Path $parent -Force -ErrorAction Stop | Out-Null
+        [void][System.IO.Directory]::CreateDirectory($parent)
     }
 
     if (Test-Path -LiteralPath $fullPath -PathType Container) {
         throw "The log path points to a directory: $fullPath"
+    }
+
+    $logProbe = $null
+    try {
+        $logProbe = [System.IO.File]::Open($fullPath, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)
+    }
+    finally {
+        if ($logProbe) {
+            $logProbe.Dispose()
+        }
     }
 
     $Script:State.LogFile = $fullPath
@@ -311,7 +661,8 @@ function Import-AdminComputerList {
         throw "Computer list not found: $LiteralPath"
     }
 
-    $rawLines = @(Get-Content -LiteralPath $LiteralPath -ErrorAction Stop)
+    $rawText = Read-AdminBoundedUtf8File -LiteralPath $LiteralPath -MaximumBytes 1048576
+    $rawLines = @($rawText -split '\r\n|\n|\r')
     $valid = New-Object 'System.Collections.Generic.List[string]'
     $invalidLines = New-Object 'System.Collections.Generic.List[int]'
     $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
@@ -390,7 +741,8 @@ function Test-AdminRegistryPath {
         return $false
     }
 
-    return $value -match '^(?i)(?:(?:HKLM|HKCU|HKCR|HKU|HKCC):(?:\\[^\r\n]*)?|(?:HKEY_LOCAL_MACHINE|HKEY_CURRENT_USER|HKEY_CLASSES_ROOT|HKEY_USERS|HKEY_CURRENT_CONFIG)(?:\\[^\r\n]*)?)$'
+    return $value -match '^(?i)(?:(?:HKLM|HKCU|HKCR|HKU|HKCC):(?:\\[^\r\n]*)?|(?:HKEY_LOCAL_MACHINE|HKEY_CURRENT_USER|HKEY_CLASSES_ROOT|HKEY_USERS|HKEY_CURRENT_CONFIG)(?:\\[^\r\n]*)?)$' -and
+        $value -notmatch '(?:^|\\)\.\.(?:\\|$)'
 }
 
 function Test-AdminRegistryValueName {
@@ -556,7 +908,10 @@ function Write-AdminUtf8File {
 
         [Parameter(Mandatory = $true)]
         [AllowEmptyString()]
-        [string]$Content
+        [string]$Content,
+
+        [Parameter()]
+        [bool]$EmitBom = $true
     )
 
     $fullPath = [System.IO.Path]::GetFullPath($LiteralPath)
@@ -566,18 +921,18 @@ function Write-AdminUtf8File {
 
     $parent = Split-Path -Parent $fullPath
     if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
-        New-Item -ItemType Directory -Path $parent -Force -ErrorAction Stop | Out-Null
+        [void][System.IO.Directory]::CreateDirectory($parent)
     }
 
     $temporaryPath = Join-Path $parent ('.admin-export-{0}.tmp' -f [guid]::NewGuid().ToString('N'))
     try {
-        $encoding = New-Object System.Text.UTF8Encoding($true)
+        $encoding = New-Object System.Text.UTF8Encoding($EmitBom)
         [System.IO.File]::WriteAllText($temporaryPath, $Content, $encoding)
-        Move-Item -LiteralPath $temporaryPath -Destination $fullPath -ErrorAction Stop
+        [System.IO.File]::Move($temporaryPath, $fullPath)
     }
     finally {
         if (Test-Path -LiteralPath $temporaryPath) {
-            Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+            [System.IO.File]::Delete($temporaryPath)
         }
     }
 
@@ -1385,7 +1740,11 @@ $Script:ActionScripts.CustomPowerShell = {
     }
 
     $customBlock = [scriptblock]::Create($ScriptText)
-    $output = & $customBlock *>&1 | Out-String -Width 4096
+    $output = & {
+        param([scriptblock]$Block)
+        $ErrorActionPreference = 'Stop'
+        & $Block
+    } $customBlock *>&1 | Out-String -Width 4096
     $truncated = $false
     if ($output.Length -gt 1048576) {
         $output = $output.Substring(0, 1048576)
@@ -1422,6 +1781,267 @@ $Script:ActionCatalog = [ordered]@{
     18 = [pscustomobject]@{ Name = 'Registry Read'; Script = 'RegistryRead'; ReadOnly = $true }
     19 = [pscustomobject]@{ Name = 'Custom CMD Command'; Script = 'CustomCommand'; ReadOnly = $false }
     20 = [pscustomobject]@{ Name = 'Custom PowerShell'; Script = 'CustomPowerShell'; ReadOnly = $false }
+}
+
+$Script:AutomationSchemaVersion = '1.0'
+$Script:AutomationExitCodes = [ordered]@{
+    CompleteSuccess      = 0
+    PartialSuccess       = 1
+    ValidationFailure    = 2
+    AuthorizationFailure = 3
+    ExecutionFailure     = 4
+    Timeout              = 5
+    InternalFailure      = 10
+}
+$Script:AutomationInputNames = @(
+    'TopCount',
+    'IncludeKB',
+    'RebootDelaySeconds',
+    'ServiceName',
+    'ServiceAction',
+    'ProcessName',
+    'MinimumAgeDays',
+    'MaximumFiles',
+    'TaskPath',
+    'MaximumTasks',
+    'EventLogName',
+    'EntryCount',
+    'EventLevel',
+    'RegistryPath',
+    'RegistryValueName',
+    'CommandText',
+    'PowerShellText',
+    'PowerShellFile'
+)
+$Script:AutomationActionInputs = [ordered]@{
+    SystemInfo        = @()
+    DiskSpace         = @()
+    HardwareInfo      = @()
+    NetworkConfig     = @()
+    LoggedOnUsers     = @()
+    RunningProcesses  = @('TopCount')
+    SoftwareInventory = @()
+    LicenseStatus     = @()
+    WindowsUpdate     = @('IncludeKB')
+    ScheduleReboot    = @('RebootDelaySeconds')
+    PendingReboot     = @()
+    ServiceManagement = @('ServiceName', 'ServiceAction')
+    TerminateProcess  = @('ProcessName')
+    ClearTempFiles    = @('MinimumAgeDays', 'MaximumFiles')
+    ScheduledTasks    = @('TaskPath', 'MaximumTasks')
+    FirewallStatus    = @()
+    EventLogQuery     = @('EventLogName', 'EntryCount', 'EventLevel')
+    RegistryRead      = @('RegistryPath', 'RegistryValueName')
+    CustomCommand     = @('CommandText')
+    CustomPowerShell  = @('PowerShellText', 'PowerShellFile')
+}
+$Script:AutomationConfirmations = [ordered]@{
+    WindowsUpdate     = 'INSTALL UPDATES'
+    ScheduleReboot    = 'SCHEDULE REBOOT'
+    ServiceManagement = 'CHANGE SERVICE'
+    TerminateProcess  = 'TERMINATE PROCESS'
+    ClearTempFiles    = 'DELETE TEMP FILES'
+    CustomCommand     = 'RUN COMMAND'
+    CustomPowerShell  = 'RUN SCRIPT'
+}
+
+foreach ($catalogEntry in $Script:ActionCatalog.GetEnumerator()) {
+    $classification = if ($catalogEntry.Value.Script -eq 'ServiceManagement') {
+        'Conditional'
+    }
+    elseif ($catalogEntry.Value.ReadOnly) {
+        'ReadOnly'
+    }
+    else {
+        'StateChanging'
+    }
+    $confirmation = if ($Script:AutomationConfirmations.Contains($catalogEntry.Value.Script)) {
+        $Script:AutomationConfirmations[$catalogEntry.Value.Script]
+    }
+    else {
+        $null
+    }
+
+    $catalogEntry.Value | Add-Member -NotePropertyName Id -NotePropertyValue $catalogEntry.Value.Script -Force
+    $catalogEntry.Value | Add-Member -NotePropertyName Classification -NotePropertyValue $classification -Force
+    $catalogEntry.Value | Add-Member -NotePropertyName ConfirmationText -NotePropertyValue $confirmation -Force
+}
+
+function Get-AdminActionCatalogItem {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$ActionId
+    )
+
+    foreach ($catalogEntry in $Script:ActionCatalog.GetEnumerator()) {
+        if ($catalogEntry.Value.Id -ieq $ActionId) {
+            return $catalogEntry.Value
+        }
+    }
+
+    return $null
+}
+
+function Get-AdminSafeActionId {
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$ActionId
+    )
+
+    $value = if ($null -eq $ActionId) { '' } else { $ActionId.Trim() }
+    if ($value -notmatch '^[A-Za-z][A-Za-z0-9]{0,63}$') {
+        return $null
+    }
+    return $value
+}
+
+function Get-AdminActionCatalogItemByMenuNumber {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(1, 20)]
+        [int]$MenuNumber
+    )
+
+    foreach ($catalogEntry in $Script:ActionCatalog.GetEnumerator()) {
+        if ([int]$catalogEntry.Key -eq $MenuNumber) {
+            return $catalogEntry.Value
+        }
+    }
+
+    return $null
+}
+
+function ConvertTo-AdminAutomationInputDescriptor {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Type,
+
+        [Parameter()]
+        [bool]$Required = $false,
+
+        [Parameter()]
+        [AllowNull()]
+        $DefaultValue = $null,
+
+        [Parameter()]
+        [AllowEmptyCollection()]
+        [object[]]$AllowedValues = @(),
+
+        [Parameter()]
+        [AllowNull()]
+        $Minimum = $null,
+
+        [Parameter()]
+        [AllowNull()]
+        $Maximum = $null,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Description
+    )
+
+    return [pscustomobject][ordered]@{
+        name          = $Name
+        type          = $Type
+        required      = $Required
+        default       = $DefaultValue
+        allowedValues = @($AllowedValues)
+        minimum       = $Minimum
+        maximum       = $Maximum
+        description   = $Description
+    }
+}
+
+function Get-AdminAutomationActionDescriptor {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$CatalogItem
+    )
+
+    $inputs = @()
+    switch ($CatalogItem.Id) {
+        'RunningProcesses' {
+            $inputs = @(ConvertTo-AdminAutomationInputDescriptor -Name 'TopCount' -Type 'integer' -DefaultValue 20 -Minimum 1 -Maximum 100 -Description 'Maximum processes returned by working-set size.')
+        }
+        'WindowsUpdate' {
+            $inputs = @(ConvertTo-AdminAutomationInputDescriptor -Name 'IncludeKB' -Type 'string[]' -DefaultValue @() -Description 'Up to 100 optional KB identifiers. An empty array selects all applicable software updates.')
+        }
+        'ScheduleReboot' {
+            $inputs = @(ConvertTo-AdminAutomationInputDescriptor -Name 'RebootDelaySeconds' -Type 'integer' -DefaultValue 60 -Minimum 30 -Maximum 3600 -Description 'Delay before the requested reboot.')
+        }
+        'ServiceManagement' {
+            $inputs = @(
+                ConvertTo-AdminAutomationInputDescriptor -Name 'ServiceName' -Type 'string' -Required $true -Description 'Validated Windows service name.'
+                ConvertTo-AdminAutomationInputDescriptor -Name 'ServiceAction' -Type 'string' -DefaultValue 'Query' -AllowedValues @('Query', 'Start', 'Stop', 'Restart') -Description 'Query is read-only. Other values are state-changing.'
+            )
+        }
+        'TerminateProcess' {
+            $inputs = @(ConvertTo-AdminAutomationInputDescriptor -Name 'ProcessName' -Type 'string' -Required $true -Description 'Exact process name. Protected Windows processes remain blocked.')
+        }
+        'ClearTempFiles' {
+            $inputs = @(
+                ConvertTo-AdminAutomationInputDescriptor -Name 'MinimumAgeDays' -Type 'integer' -DefaultValue 2 -Minimum 1 -Maximum 30 -Description 'Minimum age of files eligible for deletion.'
+                ConvertTo-AdminAutomationInputDescriptor -Name 'MaximumFiles' -Type 'integer' -DefaultValue 50000 -Minimum 100 -Maximum 100000 -Description 'Maximum files examined per target.'
+            )
+        }
+        'ScheduledTasks' {
+            $inputs = @(
+                ConvertTo-AdminAutomationInputDescriptor -Name 'TaskPath' -Type 'string' -DefaultValue '\' -Description 'Validated scheduled-task path prefix.'
+                ConvertTo-AdminAutomationInputDescriptor -Name 'MaximumTasks' -Type 'integer' -DefaultValue 50 -Minimum 1 -Maximum 500 -Description 'Maximum tasks returned per target.'
+            )
+        }
+        'EventLogQuery' {
+            $inputs = @(
+                ConvertTo-AdminAutomationInputDescriptor -Name 'EventLogName' -Type 'string' -DefaultValue 'System' -Description 'Validated Windows event-log channel.'
+                ConvertTo-AdminAutomationInputDescriptor -Name 'EntryCount' -Type 'integer' -DefaultValue 20 -Minimum 1 -Maximum 1000 -Description 'Maximum events returned per target.'
+                ConvertTo-AdminAutomationInputDescriptor -Name 'EventLevel' -Type 'string[]' -DefaultValue @('Error', 'Warning') -AllowedValues @('Critical', 'Error', 'Warning', 'Information', 'Verbose') -Description 'One or more event severity levels.'
+            )
+        }
+        'RegistryRead' {
+            $inputs = @(
+                ConvertTo-AdminAutomationInputDescriptor -Name 'RegistryPath' -Type 'string' -Required $true -Description 'Validated registry provider or hive path.'
+                ConvertTo-AdminAutomationInputDescriptor -Name 'RegistryValueName' -Type 'string' -DefaultValue '' -Description 'Optional value name. Empty returns all values.'
+            )
+        }
+        'CustomCommand' {
+            $inputs = @(ConvertTo-AdminAutomationInputDescriptor -Name 'CommandText' -Type 'string' -Required $true -Description 'Unsandboxed CMD command text, limited to 32767 characters.')
+        }
+        'CustomPowerShell' {
+            $inputs = @(
+                ConvertTo-AdminAutomationInputDescriptor -Name 'PowerShellText' -Type 'string' -Description 'Unsandboxed PowerShell source. Mutually exclusive with PowerShellFile.'
+                ConvertTo-AdminAutomationInputDescriptor -Name 'PowerShellFile' -Type 'path' -Description 'Literal local .ps1 path, limited to 1 MiB. Mutually exclusive with PowerShellText.'
+            )
+        }
+    }
+
+    return [pscustomobject][ordered]@{
+        id               = $CatalogItem.Id
+        displayName      = $CatalogItem.Name
+        classification   = $CatalogItem.Classification
+        confirmationText = $CatalogItem.ConfirmationText
+        inputs           = @($inputs)
+    }
+}
+
+function Get-AdminAutomationActionCatalog {
+    [CmdletBinding()]
+    param()
+
+    $descriptors = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($catalogEntry in $Script:ActionCatalog.GetEnumerator()) {
+        $descriptors.Add((Get-AdminAutomationActionDescriptor -CatalogItem $catalogEntry.Value)) | Out-Null
+    }
+    return $descriptors.ToArray()
 }
 
 function Test-AdminTcpPort {
@@ -1531,6 +2151,10 @@ function Resolve-AdminPsExec {
         [string]$Path
     )
 
+    if (-not (Test-AdminLiteralFilePathText -LiteralPath $Path)) {
+        throw 'The PsExec path contains an unsafe or unsupported component.'
+    }
+
     $resolvedPath = $null
     if (Test-Path -LiteralPath $Path -PathType Leaf) {
         $resolvedPath = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).Path
@@ -1579,15 +2203,14 @@ function ConvertTo-AdminEncodedPayload {
 
     $utf8 = New-Object System.Text.UTF8Encoding($false)
     $actionBase64 = [Convert]::ToBase64String($utf8.GetBytes($ActionText))
-    $argumentJson = ConvertTo-Json -InputObject @($ArgumentList) -Compress -Depth 10
-    $argumentBase64 = [Convert]::ToBase64String($utf8.GetBytes($argumentJson))
+    $argumentBase64 = ConvertTo-AdminArgumentEnvelope -ArgumentList $ArgumentList
 
     $payload = @"
 `$ErrorActionPreference = 'Stop'
 `$utf8 = New-Object System.Text.UTF8Encoding(`$false)
 `$actionText = `$utf8.GetString([Convert]::FromBase64String('$actionBase64'))
-`$argumentJson = `$utf8.GetString([Convert]::FromBase64String('$argumentBase64'))
-`$parsedArguments = ConvertFrom-Json -InputObject `$argumentJson
+`$argumentXml = `$utf8.GetString([Convert]::FromBase64String('$argumentBase64'))
+`$parsedArguments = [System.Management.Automation.PSSerializer]::Deserialize(`$argumentXml)
 if (`$null -eq `$parsedArguments) {
     `$arguments = @()
 }
@@ -1621,6 +2244,90 @@ exit `$exitCode
     return [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($payload))
 }
 
+function ConvertTo-AdminArgumentEnvelope {
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [object[]]$ArgumentList = @()
+    )
+
+    $argumentXml = [System.Management.Automation.PSSerializer]::Serialize([object[]]$ArgumentList, 10)
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    return [Convert]::ToBase64String($utf8.GetBytes($argumentXml))
+}
+
+function ConvertFrom-AdminArgumentEnvelope {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$EncodedEnvelope
+    )
+
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    $argumentXml = $utf8.GetString([Convert]::FromBase64String($EncodedEnvelope))
+    $parsedArguments = [System.Management.Automation.PSSerializer]::Deserialize($argumentXml)
+    if ($null -eq $parsedArguments) {
+        return @()
+    }
+    return @($parsedArguments)
+}
+
+function ConvertTo-AdminSafeErrorMessage {
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [AllowNull()]
+        $Message,
+
+        [Parameter()]
+        [ValidateRange(128, 4096)]
+        [int]$MaximumLength = 1024
+    )
+
+    if ($null -eq $Message) {
+        return 'The operation failed without an error message.'
+    }
+
+    $safeMessage = ([string]$Message -replace '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', ' ' -replace '[\r\n\t]+', ' ').Trim()
+    if ([string]::IsNullOrWhiteSpace($safeMessage)) {
+        $safeMessage = 'The operation failed without an error message.'
+    }
+    if ($safeMessage.Length -gt $MaximumLength) {
+        $safeMessage = $safeMessage.Substring(0, $MaximumLength) + ' [truncated]'
+    }
+
+    return $safeMessage
+}
+
+function Get-AdminErrorCategory {
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [AllowNull()]
+        $Message
+    )
+
+    $text = [string]$Message
+    if ($text -match '(?i)timed?\s*out|timeout') {
+        return 'Timeout'
+    }
+    if ($text -match '(?i)access is denied|access denied|unauthorized|authentication|logon failure|credentials') {
+        return 'Authentication'
+    }
+    if ($text -match '(?i)cannot connect|connection|unreachable|name resolution|network path|WinRM cannot|RPC server') {
+        return 'Connectivity'
+    }
+    if ($text -match '(?i)output exceeded|output limit') {
+        return 'OutputLimit'
+    }
+    if ($text -match '(?i)invalid|not supported|not found|required|must be') {
+        return 'Validation'
+    }
+
+    return 'Execution'
+}
+
 function ConvertTo-AdminFailureEnvelope {
     [CmdletBinding()]
     param(
@@ -1634,8 +2341,17 @@ function ConvertTo-AdminFailureEnvelope {
         [string]$Message,
 
         [Parameter()]
-        [int]$Attempts = 1
+        [int]$Attempts = 1,
+
+        [Parameter()]
+        [ValidateSet('Validation', 'Authorization', 'Authentication', 'Connectivity', 'Timeout', 'OutputLimit', 'Execution', 'Internal')]
+        [string]$ErrorCategory
     )
+
+    $safeMessage = ConvertTo-AdminSafeErrorMessage -Message $Message
+    if ([string]::IsNullOrWhiteSpace($ErrorCategory)) {
+        $ErrorCategory = Get-AdminErrorCategory -Message $safeMessage
+    }
 
     return [pscustomobject]@{
         ComputerName = $ComputerName
@@ -1643,7 +2359,8 @@ function ConvertTo-AdminFailureEnvelope {
         Attempts     = $Attempts
         Success      = $false
         Data         = @()
-        ErrorMessage = $Message
+        ErrorCategory = $ErrorCategory
+        ErrorMessage = $safeMessage
     }
 }
 
@@ -1672,7 +2389,7 @@ function Invoke-AdminPsExecTarget {
     )
 
     if (-not (Test-AdminHostname -ComputerName $ComputerName)) {
-        return ConvertTo-AdminFailureEnvelope -ComputerName $ComputerName -Transport 'PsExec' -Message 'The target computer name is invalid.'
+        return ConvertTo-AdminFailureEnvelope -ComputerName $ComputerName -Transport 'PsExec' -Message 'The target computer name is invalid.' -ErrorCategory Validation
     }
 
     $encodedPayload = ConvertTo-AdminEncodedPayload -ActionText $ActionText -ArgumentList $ArgumentList
@@ -1741,10 +2458,10 @@ function Invoke-AdminPsExecTarget {
         }
 
         if ($timedOut) {
-            return ConvertTo-AdminFailureEnvelope -ComputerName $ComputerName -Transport 'PsExec' -Message "Operation timed out after $TimeoutSeconds seconds."
+            return ConvertTo-AdminFailureEnvelope -ComputerName $ComputerName -Transport 'PsExec' -Message "Operation timed out after $TimeoutSeconds seconds." -ErrorCategory Timeout
         }
         if ($outputExceeded) {
-            return ConvertTo-AdminFailureEnvelope -ComputerName $ComputerName -Transport 'PsExec' -Message "Operation output exceeded the $MaximumOutputBytes byte limit."
+            return ConvertTo-AdminFailureEnvelope -ComputerName $ComputerName -Transport 'PsExec' -Message "Operation output exceeded the $MaximumOutputBytes byte limit." -ErrorCategory OutputLimit
         }
 
         $output = if (Test-Path -LiteralPath $outputPath) { [System.IO.File]::ReadAllText($outputPath) } else { '' }
@@ -1771,7 +2488,8 @@ function Invoke-AdminPsExecTarget {
             Attempts     = 1
             Success      = [bool]$remoteEnvelope.Success
             Data         = @($remoteEnvelope.Data)
-            ErrorMessage = $remoteEnvelope.ErrorMessage
+            ErrorCategory = if ([bool]$remoteEnvelope.Success) { $null } else { Get-AdminErrorCategory -Message $remoteEnvelope.ErrorMessage }
+            ErrorMessage = if ([bool]$remoteEnvelope.Success) { $null } else { ConvertTo-AdminSafeErrorMessage -Message $remoteEnvelope.ErrorMessage }
         }
     }
     catch {
@@ -1817,7 +2535,7 @@ function Invoke-AdminWinRmTarget {
     )
 
     if (-not (Test-AdminHostname -ComputerName $ComputerName)) {
-        return ConvertTo-AdminFailureEnvelope -ComputerName $ComputerName -Transport 'WinRM' -Message 'The target computer name is invalid.'
+        return ConvertTo-AdminFailureEnvelope -ComputerName $ComputerName -Transport 'WinRM' -Message 'The target computer name is invalid.' -ErrorCategory Validation
     }
 
     try {
@@ -1845,6 +2563,7 @@ function Invoke-AdminWinRmTarget {
             Attempts     = 1
             Success      = $true
             Data         = @($data)
+            ErrorCategory = $null
             ErrorMessage = $null
         }
     }
@@ -1916,6 +2635,19 @@ function Invoke-AdminTargetWithRetry {
     return $lastResult
 }
 
+function Get-AdminEffectiveRetryCount {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [bool]$ReadOnly
+    )
+
+    if ($ReadOnly) {
+        return [int]$Script:State.RetryCount
+    }
+    return 0
+}
+
 function Add-AdminNormalizedData {
     [CmdletBinding()]
     param(
@@ -1969,19 +2701,105 @@ function Add-AdminFailureResult {
         [string]$Message,
 
         [Parameter()]
-        [int]$Attempts = 1
+        [int]$Attempts = 1,
+
+        [Parameter()]
+        [string]$ErrorCategory
     )
+
+    $safeMessage = ConvertTo-AdminSafeErrorMessage -Message $Message
+    if ([string]::IsNullOrWhiteSpace($ErrorCategory)) {
+        $ErrorCategory = Get-AdminErrorCategory -Message $safeMessage
+    }
 
     $Destination.Add([pscustomobject]@{
             ComputerName = $ComputerName
             Transport    = $Transport
             Attempts     = $Attempts
             Status       = 'Failed'
-            ErrorMessage = $Message
+            ErrorCategory = $ErrorCategory
+            ErrorMessage = $safeMessage
         }) | Out-Null
 }
 
-function Invoke-AdminTarget {
+function Get-AdminTargetStatusFromData {
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [AllowEmptyCollection()]
+        [object[]]$Data = @()
+    )
+
+    $statuses = @($Data | ForEach-Object {
+            if ($null -ne $_ -and $null -ne $_.PSObject.Properties['Status']) {
+                [string]$_.Status
+            }
+        })
+    if (@($statuses | Where-Object { $_ -in @('Failed', 'Error') }).Count -gt 0) {
+        return 'Failed'
+    }
+    if (@($statuses | Where-Object { $_ -in @('Partial', 'ChecksWithErrors') }).Count -gt 0) {
+        return 'Partial'
+    }
+
+    return 'Success'
+}
+
+function ConvertTo-AdminDetailedTargetResult {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$Index,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ComputerName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Transport,
+
+        [Parameter(Mandatory = $true)]
+        [datetime]$StartedAtUtc,
+
+        [Parameter(Mandatory = $true)]
+        [datetime]$FinishedAtUtc,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Success', 'Partial', 'Failed', 'TimedOut', 'WhatIf', 'Skipped')]
+        [string]$Status,
+
+        [Parameter()]
+        [int]$Attempts = 0,
+
+        [Parameter()]
+        [AllowNull()]
+        [string]$ErrorCategory,
+
+        [Parameter()]
+        [AllowNull()]
+        [string]$ErrorMessage,
+
+        [Parameter()]
+        [AllowEmptyCollection()]
+        [object[]]$Data = @()
+    )
+
+    $durationMilliseconds = [math]::Max(0, [math]::Round(($FinishedAtUtc - $StartedAtUtc).TotalMilliseconds))
+    return [pscustomobject][ordered]@{
+        Index          = $Index
+        ComputerName   = $ComputerName
+        Transport      = $Transport
+        StartedAtUtc   = $StartedAtUtc.ToUniversalTime()
+        FinishedAtUtc  = $FinishedAtUtc.ToUniversalTime()
+        DurationMs     = [int64]$durationMilliseconds
+        Status         = $Status
+        Attempts       = $Attempts
+        ErrorCategory  = $ErrorCategory
+        ErrorMessage   = if ($ErrorMessage) { ConvertTo-AdminSafeErrorMessage -Message $ErrorMessage } else { $null }
+        Data           = @($Data)
+    }
+}
+
+function Invoke-AdminTargetDetailed {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -2013,38 +2831,59 @@ function Invoke-AdminTarget {
     }
 
     $actionBlock = $Script:ActionScripts[$ActionName]
-    $results = New-Object 'System.Collections.Generic.List[object]'
+    $targetResults = New-Object 'System.Collections.Generic.List[object]'
 
     if ($TargetMode -eq 'Local') {
+        $startedAtUtc = [datetime]::UtcNow
+        $dataItems = New-Object 'System.Collections.Generic.List[object]'
         try {
             $data = @(& $actionBlock @ArgumentList)
-            Add-AdminNormalizedData -Destination $results -ComputerName $env:COMPUTERNAME -Data $data
-            if ($results.Count -eq 0) {
-                $results.Add([pscustomobject]@{
+            Add-AdminNormalizedData -Destination $dataItems -ComputerName $env:COMPUTERNAME -Data $data
+            if ($dataItems.Count -eq 0) {
+                $dataItems.Add([pscustomobject]@{
                         ComputerName = $env:COMPUTERNAME
                         Status       = 'Success'
                         Message      = 'The action completed without output.'
                     }) | Out-Null
             }
+            $finishedAtUtc = [datetime]::UtcNow
+            $targetStatus = Get-AdminTargetStatusFromData -Data $dataItems.ToArray()
+            $targetErrorCategory = if ($targetStatus -eq 'Failed') { 'Execution' } else { $null }
+            $targetErrorMessage = if ($targetStatus -eq 'Failed') { 'The action returned one or more failed result records.' } else { $null }
+            $targetResults.Add((ConvertTo-AdminDetailedTargetResult -Index 0 -ComputerName $env:COMPUTERNAME -Transport 'Local' -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -Status $targetStatus -Attempts 1 -ErrorCategory $targetErrorCategory -ErrorMessage $targetErrorMessage -Data $dataItems.ToArray())) | Out-Null
         }
         catch {
-            Add-AdminFailureResult -Destination $results -ComputerName $env:COMPUTERNAME -Transport 'Local' -Message $_.Exception.Message
+            $finishedAtUtc = [datetime]::UtcNow
+            $errorCategory = Get-AdminErrorCategory -Message $_.Exception.Message
+            $safeMessage = if ($ActionName -in @('CustomCommand', 'CustomPowerShell')) {
+                'The custom action failed. Operator-supplied error text was omitted.'
+            }
+            else {
+                ConvertTo-AdminSafeErrorMessage -Message $_.Exception.Message
+            }
+            $failureStatus = if ($errorCategory -eq 'Timeout') { 'TimedOut' } else { 'Failed' }
+            $targetResults.Add((ConvertTo-AdminDetailedTargetResult -Index 0 -ComputerName $env:COMPUTERNAME -Transport 'Local' -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -Status $failureStatus -Attempts 1 -ErrorCategory $errorCategory -ErrorMessage $safeMessage)) | Out-Null
         }
-        return $results.ToArray()
+        return $targetResults.ToArray()
     }
 
     $actionText = $actionBlock.ToString()
-    $argumentJson = ConvertTo-Json -InputObject @($ArgumentList) -Compress -Depth 10
-    $effectiveRetryCount = if ($ReadOnly) { $Script:State.RetryCount } else { 0 }
+    $argumentEnvelope = ConvertTo-AdminArgumentEnvelope -ArgumentList $ArgumentList
+    $effectiveRetryCount = Get-AdminEffectiveRetryCount -ReadOnly $ReadOnly
     $timeoutSeconds = $Script:State.OperationTimeoutMinutes * 60
     $targetIndex = 0
+    $startedJobs = New-Object 'System.Collections.Generic.List[object]'
 
-    while ($targetIndex -lt $Computers.Count) {
-        $lastIndex = [math]::Min($targetIndex + $Script:State.MaxConcurrentJobs - 1, $Computers.Count - 1)
-        $batch = @($Computers[$targetIndex..$lastIndex])
-        $records = New-Object System.Collections.ArrayList
+    try {
+        while ($targetIndex -lt $Computers.Count) {
+            $lastIndex = [math]::Min($targetIndex + $Script:State.MaxConcurrentJobs - 1, $Computers.Count - 1)
+            $batch = @($Computers[$targetIndex..$lastIndex])
+            $records = New-Object System.Collections.ArrayList
 
-        foreach ($computer in $batch) {
+        for ($batchIndex = 0; $batchIndex -lt $batch.Count; $batchIndex++) {
+            $computer = $batch[$batchIndex]
+            $absoluteIndex = $targetIndex + $batchIndex
+            $startedAtUtc = [datetime]::UtcNow
             try {
                 $job = Start-Job -Name ('AdminJob_{0}' -f [guid]::NewGuid().ToString('N')) -ScriptBlock {
                     param(
@@ -2053,7 +2892,7 @@ function Invoke-AdminTarget {
                         $TargetComputer,
                         [System.Management.Automation.PSCredential]$RemoteCredential,
                         $RemoteActionText,
-                        $RemoteArgumentJson,
+                        $RemoteArgumentEnvelope,
                         $RemotePsExecPath,
                         $RemoteUseSsl,
                         $RemoteAuthentication,
@@ -2063,8 +2902,7 @@ function Invoke-AdminTarget {
                     )
 
                     . $ToolkitPath
-                    $parsed = ConvertFrom-Json -InputObject $RemoteArgumentJson
-                    $remoteArguments = if ($null -eq $parsed) { @() } else { @($parsed) }
+                    $remoteArguments = @(ConvertFrom-AdminArgumentEnvelope -EncodedEnvelope $RemoteArgumentEnvelope)
                     Invoke-AdminTargetWithRetry -Transport $SelectedTransport -ComputerName $TargetComputer -Credential $RemoteCredential -ActionText $RemoteActionText -ArgumentList $remoteArguments -PsExecFullPath $RemotePsExecPath -UseSsl ([bool]$RemoteUseSsl) -Authentication $RemoteAuthentication -RetryCount $RemoteRetryCount -RetryDelaySeconds $RemoteRetryDelay -TimeoutSeconds $RemoteTimeoutSeconds
                 } -ArgumentList @(
                     $Script:ToolkitPath,
@@ -2072,7 +2910,7 @@ function Invoke-AdminTarget {
                     $computer,
                     $Script:State.Credential,
                     $actionText,
-                    $argumentJson,
+                    $argumentEnvelope,
                     $Script:State.PsExecFullPath,
                     $Script:State.UseSsl,
                     $Script:State.Authentication,
@@ -2081,14 +2919,18 @@ function Invoke-AdminTarget {
                     $timeoutSeconds
                 ) -ErrorAction Stop
 
+                $startedJobs.Add($job) | Out-Null
                 [void]$records.Add([pscustomobject]@{
                         Job          = $job
+                        Index        = $absoluteIndex
                         ComputerName = $computer
-                        Started      = Get-Date
+                        StartedAtUtc = $startedAtUtc
                     })
             }
             catch {
-                Add-AdminFailureResult -Destination $results -ComputerName $computer -Transport $Script:State.Transport -Message "Unable to start background job: $($_.Exception.Message)"
+                $finishedAtUtc = [datetime]::UtcNow
+                $message = ConvertTo-AdminSafeErrorMessage -Message "Unable to start background job: $($_.Exception.Message)"
+                $targetResults.Add((ConvertTo-AdminDetailedTargetResult -Index $absoluteIndex -ComputerName $computer -Transport $Script:State.Transport -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -Status Failed -ErrorCategory Internal -ErrorMessage $message)) | Out-Null
             }
         }
 
@@ -2097,29 +2939,39 @@ function Invoke-AdminTarget {
             foreach ($record in @($records.ToArray())) {
                 $job = $record.Job
                 if ($job.State -in @('Completed', 'Failed', 'Stopped')) {
+                    $finishedAtUtc = [datetime]::UtcNow
                     $receiveErrors = @()
                     $envelopes = @(Receive-Job -Job $job -ErrorAction SilentlyContinue -ErrorVariable receiveErrors)
                     $envelope = $envelopes | Select-Object -Last 1
 
                     if ($null -eq $envelope) {
                         $message = if ($receiveErrors.Count -gt 0) { ($receiveErrors | ForEach-Object { $_.Exception.Message }) -join '; ' } else { "Job ended in state $($job.State) without a result." }
-                        Add-AdminFailureResult -Destination $results -ComputerName $record.ComputerName -Transport $Script:State.Transport -Message $message
+                        $safeMessage = if ($ActionName -in @('CustomCommand', 'CustomPowerShell')) { 'The custom action job failed without a safe result.' } else { ConvertTo-AdminSafeErrorMessage -Message $message }
+                        $targetResults.Add((ConvertTo-AdminDetailedTargetResult -Index $record.Index -ComputerName $record.ComputerName -Transport $Script:State.Transport -StartedAtUtc $record.StartedAtUtc -FinishedAtUtc $finishedAtUtc -Status Failed -ErrorCategory Internal -ErrorMessage $safeMessage)) | Out-Null
                     }
                     elseif ($envelope.Success) {
-                        Add-AdminNormalizedData -Destination $results -ComputerName $record.ComputerName -Data $envelope.Data
-                        if (@($envelope.Data).Count -eq 0) {
-                            $results.Add([pscustomobject]@{
+                        $dataItems = New-Object 'System.Collections.Generic.List[object]'
+                        Add-AdminNormalizedData -Destination $dataItems -ComputerName $record.ComputerName -Data $envelope.Data
+                        if ($dataItems.Count -eq 0) {
+                            $dataItems.Add([pscustomobject]@{
                                     ComputerName = $record.ComputerName
                                     Status       = 'Success'
                                     Message      = 'The action completed without output.'
                                 }) | Out-Null
                         }
+                        $targetStatus = Get-AdminTargetStatusFromData -Data $dataItems.ToArray()
+                        $targetErrorCategory = if ($targetStatus -eq 'Failed') { 'Execution' } else { $null }
+                        $targetErrorMessage = if ($targetStatus -eq 'Failed') { 'The action returned one or more failed result records.' } else { $null }
+                        $targetResults.Add((ConvertTo-AdminDetailedTargetResult -Index $record.Index -ComputerName $record.ComputerName -Transport $Script:State.Transport -StartedAtUtc $record.StartedAtUtc -FinishedAtUtc $finishedAtUtc -Status $targetStatus -Attempts ([int]$envelope.Attempts) -ErrorCategory $targetErrorCategory -ErrorMessage $targetErrorMessage -Data $dataItems.ToArray())) | Out-Null
                     }
                     else {
-                        Add-AdminFailureResult -Destination $results -ComputerName $record.ComputerName -Transport $Script:State.Transport -Message ([string]$envelope.ErrorMessage) -Attempts ([int]$envelope.Attempts)
+                        $category = if ($envelope.ErrorCategory) { [string]$envelope.ErrorCategory } else { Get-AdminErrorCategory -Message $envelope.ErrorMessage }
+                        $status = if ($category -eq 'Timeout') { 'TimedOut' } else { 'Failed' }
+                        $targetErrorMessage = if ($ActionName -in @('CustomCommand', 'CustomPowerShell')) { 'The custom action failed. Operator-supplied error text was omitted.' } else { [string]$envelope.ErrorMessage }
+                        $targetResults.Add((ConvertTo-AdminDetailedTargetResult -Index $record.Index -ComputerName $record.ComputerName -Transport $Script:State.Transport -StartedAtUtc $record.StartedAtUtc -FinishedAtUtc $finishedAtUtc -Status $status -Attempts ([int]$envelope.Attempts) -ErrorCategory $category -ErrorMessage $targetErrorMessage)) | Out-Null
                     }
 
-                    Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+                    Remove-Job -Job $job -Force -WhatIf:$false -Confirm:$false -ErrorAction SilentlyContinue
                     [void]$records.Remove($record)
                 }
             }
@@ -2130,9 +2982,11 @@ function Invoke-AdminTarget {
 
             if ((Get-Date) -ge $batchDeadline) {
                 foreach ($record in @($records.ToArray())) {
-                    Stop-Job -Job $record.Job -ErrorAction SilentlyContinue
-                    Remove-Job -Job $record.Job -Force -ErrorAction SilentlyContinue
-                    Add-AdminFailureResult -Destination $results -ComputerName $record.ComputerName -Transport $Script:State.Transport -Message "Batch timeout exceeded after $($Script:State.OperationTimeoutMinutes) minutes."
+                    Stop-Job -Job $record.Job -WhatIf:$false -Confirm:$false -ErrorAction SilentlyContinue
+                    Remove-Job -Job $record.Job -Force -WhatIf:$false -Confirm:$false -ErrorAction SilentlyContinue
+                    $finishedAtUtc = [datetime]::UtcNow
+                    $message = "Batch timeout exceeded after $($Script:State.OperationTimeoutMinutes) minutes."
+                    $targetResults.Add((ConvertTo-AdminDetailedTargetResult -Index $record.Index -ComputerName $record.ComputerName -Transport $Script:State.Transport -StartedAtUtc $record.StartedAtUtc -FinishedAtUtc $finishedAtUtc -Status TimedOut -ErrorCategory Timeout -ErrorMessage $message)) | Out-Null
                     [void]$records.Remove($record)
                 }
                 break
@@ -2141,7 +2995,53 @@ function Invoke-AdminTarget {
             Start-Sleep -Milliseconds 250
         }
 
-        $targetIndex = $lastIndex + 1
+            $targetIndex = $lastIndex + 1
+        }
+    }
+    finally {
+        foreach ($startedJob in @($startedJobs.ToArray())) {
+            if ($startedJob.State -notin @('Completed', 'Failed', 'Stopped')) {
+                Stop-Job -Job $startedJob -WhatIf:$false -Confirm:$false -ErrorAction SilentlyContinue
+            }
+            Remove-Job -Job $startedJob -Force -WhatIf:$false -Confirm:$false -ErrorAction SilentlyContinue
+        }
+    }
+
+    return @($targetResults.ToArray() | Sort-Object -Property Index)
+}
+
+function Invoke-AdminTarget {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Local', 'Remote')]
+        [string]$TargetMode,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$Computers,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$ActionName,
+
+        [Parameter()]
+        [object[]]$ArgumentList = @(),
+
+        [Parameter()]
+        [bool]$ReadOnly = $true
+    )
+
+    $results = New-Object 'System.Collections.Generic.List[object]'
+    $targetResults = @(Invoke-AdminTargetDetailed -TargetMode $TargetMode -Computers $Computers -ActionName $ActionName -ArgumentList $ArgumentList -ReadOnly $ReadOnly)
+    foreach ($targetResult in $targetResults) {
+        if (@($targetResult.Data).Count -gt 0) {
+            foreach ($item in @($targetResult.Data)) {
+                $results.Add($item) | Out-Null
+            }
+        }
+        elseif ($targetResult.Status -in @('Failed', 'TimedOut')) {
+            Add-AdminFailureResult -Destination $results -ComputerName $targetResult.ComputerName -Transport $targetResult.Transport -Message $targetResult.ErrorMessage -Attempts $targetResult.Attempts -ErrorCategory $targetResult.ErrorCategory
+        }
     }
 
     return $results.ToArray()
@@ -2466,7 +3366,7 @@ function Get-AdminActionRequest {
         [int]$Choice
     )
 
-    $catalogItem = $Script:ActionCatalog[$Choice]
+    $catalogItem = Get-AdminActionCatalogItemByMenuNumber -MenuNumber $Choice
     $arguments = @()
     $readOnly = [bool]$catalogItem.ReadOnly
     $token = $null
@@ -2598,7 +3498,7 @@ function Get-AdminActionRequest {
                 $cancelled = $true
                 break
             }
-            $arguments = @($logName, $count, (, $levels))
+            $arguments = @($logName, $count, [string[]]$levels)
         }
         18 {
             $keyPath = (Read-Host 'Registry key path').Trim()
@@ -2673,6 +3573,1112 @@ function Get-AdminActionRequest {
     }
 }
 
+function Test-AdminParameterBound {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$Parameters,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    return $Parameters.Contains($Name)
+}
+
+function Get-AdminRequestedTargetSummary {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$Parameters
+    )
+
+    $localSelected = (Test-AdminParameterBound -Parameters $Parameters -Name 'Local') -and [bool]$Parameters['Local']
+    $computerNameSelected = (Test-AdminParameterBound -Parameters $Parameters -Name 'ComputerName') -and -not [string]::IsNullOrWhiteSpace([string]$Parameters['ComputerName'])
+    $computerListSelected = (Test-AdminParameterBound -Parameters $Parameters -Name 'ComputerListPath') -and -not [string]::IsNullOrWhiteSpace([string]$Parameters['ComputerListPath'])
+    $selectorCount = [int]$localSelected + [int]$computerNameSelected + [int]$computerListSelected
+    if ($selectorCount -ne 1) {
+        return [pscustomobject]@{
+            TargetMode           = $null
+            RequestedTargetCount = 0
+            Transport            = $null
+            Authentication       = $null
+            UseSsl               = $false
+        }
+    }
+
+    if ($localSelected) {
+        return [pscustomobject]@{
+            TargetMode           = 'Local'
+            RequestedTargetCount = 1
+            Transport            = 'Local'
+            Authentication       = $null
+            UseSsl               = $false
+        }
+    }
+
+    $transportName = if ($Script:State.Transport -in @('WinRM', 'PsExec')) { $Script:State.Transport } else { $null }
+    $authenticationName = if ($transportName -eq 'WinRM' -and $Script:State.Authentication -in @('Default', 'Kerberos', 'Negotiate')) { $Script:State.Authentication } else { $null }
+    return [pscustomobject]@{
+        TargetMode           = 'Remote'
+        RequestedTargetCount = if ($computerNameSelected) { 1 } else { 0 }
+        Transport            = $transportName
+        Authentication       = $authenticationName
+        UseSsl               = $transportName -eq 'WinRM' -and [bool]$Script:State.UseSsl
+    }
+}
+
+function ConvertTo-AdminUtcTimestamp {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [datetime]$Value
+    )
+
+    return $Value.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ', [System.Globalization.CultureInfo]::InvariantCulture)
+}
+
+function ConvertTo-AdminJsonSafeValue {
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [AllowNull()]
+        $Value,
+
+        [Parameter()]
+        [ValidateRange(0, 20)]
+        [int]$Depth = 0,
+
+        [Parameter()]
+        [ValidateRange(1, 20)]
+        [int]$MaximumDepth = 10
+    )
+
+    if ($null -eq $Value) {
+        return $null
+    }
+    if ($Depth -ge $MaximumDepth) {
+        return '[maximum depth exceeded]'
+    }
+    if ($Value -is [System.Management.Automation.PSCredential] -or
+        $Value -is [System.Security.SecureString] -or
+        $Value -is [scriptblock] -or
+        $Value -is [System.Exception] -or
+        $Value -is [System.Management.Automation.ErrorRecord]) {
+        return $null
+    }
+    if ($Value -is [datetime]) {
+        return ConvertTo-AdminUtcTimestamp -Value $Value
+    }
+    if ($Value -is [datetimeoffset]) {
+        return $Value.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ', [System.Globalization.CultureInfo]::InvariantCulture)
+    }
+    if ($Value -is [timespan]) {
+        return $Value.ToString('c', [System.Globalization.CultureInfo]::InvariantCulture)
+    }
+    if ($Value -is [guid] -or $Value -is [version] -or $Value -is [uri] -or $Value.GetType().IsEnum) {
+        return [string]$Value
+    }
+    if ($Value -is [single] -or $Value -is [double]) {
+        $floatingPointValue = [double]$Value
+        if ([double]::IsNaN($floatingPointValue)) {
+            return 'NaN'
+        }
+        if ([double]::IsPositiveInfinity($floatingPointValue)) {
+            return 'Infinity'
+        }
+        if ([double]::IsNegativeInfinity($floatingPointValue)) {
+            return '-Infinity'
+        }
+        return $Value
+    }
+    if ($Value -is [string] -or $Value -is [char] -or $Value -is [bool] -or
+        $Value -is [byte] -or $Value -is [sbyte] -or $Value -is [int16] -or
+        $Value -is [uint16] -or $Value -is [int32] -or $Value -is [uint32] -or
+        $Value -is [int64] -or $Value -is [uint64] -or $Value -is [decimal]) {
+        return $Value
+    }
+
+    if ($Value -is [System.Collections.IDictionary]) {
+        $safeDictionary = [ordered]@{}
+        $dictionaryEntries = New-Object 'System.Collections.Generic.List[object]'
+        $dictionaryIndex = 0
+        foreach ($dictionaryEntry in $Value.GetEnumerator()) {
+            $dictionaryKey = $dictionaryEntry.Key
+            if ($null -eq $dictionaryKey) {
+                $dictionaryKeyText = ''
+                $dictionaryKeyType = ''
+            }
+            else {
+                $dictionaryKeyType = $dictionaryKey.GetType().FullName
+                if ($dictionaryKey -is [System.IFormattable]) {
+                    $dictionaryKeyText = $dictionaryKey.ToString($null, [System.Globalization.CultureInfo]::InvariantCulture)
+                }
+                else {
+                    $dictionaryKeyText = [string]$dictionaryKey
+                }
+            }
+
+            $dictionaryEntries.Add([pscustomobject]@{
+                    KeyText = $dictionaryKeyText
+                    SortKey = ('{0}{1}{2}{1}{3:D10}' -f $dictionaryKeyText, ([char]0), $dictionaryKeyType, $dictionaryIndex)
+                    Value   = $dictionaryEntry.Value
+                }) | Out-Null
+            $dictionaryIndex++
+        }
+
+        [string[]]$dictionarySortKeys = @($dictionaryEntries | ForEach-Object { $_.SortKey })
+        [object[]]$sortedDictionaryEntries = @($dictionaryEntries.ToArray())
+        [System.Array]::Sort(
+            [System.Array]$dictionarySortKeys,
+            [System.Array]$sortedDictionaryEntries,
+            [System.StringComparer]::Ordinal
+        )
+
+        foreach ($dictionaryEntry in $sortedDictionaryEntries) {
+            $dictionaryKeyText = [string]$dictionaryEntry.KeyText
+            if ($dictionaryKeyText -match '^(?i:Credential|Password|SecureString|ScriptBlock|InvocationInfo|Exception|RunspaceId|PSComputerName|PSShowComputerName)$') {
+                continue
+            }
+
+            $outputKey = $dictionaryKeyText
+            $outputKeySuffix = 2
+            while ($safeDictionary.Contains($outputKey)) {
+                $outputKey = '{0}#{1}' -f $dictionaryKeyText, $outputKeySuffix
+                $outputKeySuffix++
+            }
+            $safeDictionary[$outputKey] = ConvertTo-AdminJsonSafeValue -Value $dictionaryEntry.Value -Depth ($Depth + 1) -MaximumDepth $MaximumDepth
+        }
+        return [pscustomobject]$safeDictionary
+    }
+
+    if ($Value -is [System.Collections.IEnumerable]) {
+        $safeItems = New-Object 'System.Collections.Generic.List[object]'
+        foreach ($item in $Value) {
+            $safeItems.Add((ConvertTo-AdminJsonSafeValue -Value $item -Depth ($Depth + 1) -MaximumDepth $MaximumDepth)) | Out-Null
+        }
+        return , $safeItems.ToArray()
+    }
+
+    $safeObject = [ordered]@{}
+    [string[]]$propertyNames = @($Value.PSObject.Properties.Name | Sort-Object -Unique)
+    [array]::Sort($propertyNames, [System.StringComparer]::Ordinal)
+    foreach ($propertyName in $propertyNames) {
+        if ($propertyName -match '^(?i:Credential|Password|SecureString|ScriptBlock|InvocationInfo|Exception|RunspaceId|PSComputerName|PSShowComputerName)$') {
+            continue
+        }
+        try {
+            $safeObject[$propertyName] = ConvertTo-AdminJsonSafeValue -Value $Value.$propertyName -Depth ($Depth + 1) -MaximumDepth $MaximumDepth
+        }
+        catch {
+            $safeObject[$propertyName] = $null
+        }
+    }
+
+    if ($safeObject.Count -eq 0) {
+        return [string]$Value
+    }
+    return [pscustomobject]$safeObject
+}
+
+function ConvertTo-AdminAutomationTargetEnvelope {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$TargetResult
+    )
+
+    $safeData = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($item in @($TargetResult.Data)) {
+        $safeData.Add((ConvertTo-AdminJsonSafeValue -Value $item -MaximumDepth 10)) | Out-Null
+    }
+
+    return [pscustomobject][ordered]@{
+        target         = [string]$TargetResult.ComputerName
+        status         = [string]$TargetResult.Status
+        startedAtUtc   = ConvertTo-AdminUtcTimestamp -Value $TargetResult.StartedAtUtc
+        finishedAtUtc  = ConvertTo-AdminUtcTimestamp -Value $TargetResult.FinishedAtUtc
+        durationMs     = [int64]$TargetResult.DurationMs
+        attempts       = [int]$TargetResult.Attempts
+        errorCategory  = if ($TargetResult.ErrorCategory) { [string]$TargetResult.ErrorCategory } else { $null }
+        errorMessage   = if ($TargetResult.ErrorMessage) { ConvertTo-AdminSafeErrorMessage -Message $TargetResult.ErrorMessage } else { $null }
+        data           = @($safeData.ToArray())
+    }
+}
+
+function ConvertTo-AdminAutomationEnvelope {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [guid]$RunId,
+
+        [Parameter(Mandatory = $true)]
+        [datetime]$StartedAtUtc,
+
+        [Parameter(Mandatory = $true)]
+        [datetime]$FinishedAtUtc,
+
+        [Parameter()]
+        [AllowNull()]
+        $ActionId,
+
+        [Parameter()]
+        [AllowNull()]
+        $ActionName,
+
+        [Parameter()]
+        [AllowNull()]
+        $ReadOnly,
+
+        [Parameter()]
+        [AllowNull()]
+        $TargetMode,
+
+        [Parameter()]
+        [AllowNull()]
+        $Transport,
+
+        [Parameter()]
+        [AllowNull()]
+        $Authentication,
+
+        [Parameter()]
+        [bool]$UseSsl = $false,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Status,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Outcome,
+
+        [Parameter(Mandatory = $true)]
+        [int]$ExitCode,
+
+        [Parameter()]
+        [ValidateRange(0, 1000)]
+        [int]$RequestedTargetCount = 0,
+
+        [Parameter()]
+        [AllowEmptyCollection()]
+        [object[]]$TargetResults = @(),
+
+        [Parameter()]
+        [AllowEmptyCollection()]
+        [string[]]$Warnings = @(),
+
+        [Parameter()]
+        [AllowEmptyCollection()]
+        [object[]]$Errors = @(),
+
+        [Parameter()]
+        [AllowEmptyCollection()]
+        [string[]]$ReportPaths = @(),
+
+        [Parameter()]
+        [AllowEmptyCollection()]
+        [object[]]$Actions = @()
+    )
+
+    $targets = New-Object 'System.Collections.Generic.List[object]'
+    $recordCount = 0
+    foreach ($targetResult in @($TargetResults | Sort-Object -Property Index)) {
+        $targetEnvelope = ConvertTo-AdminAutomationTargetEnvelope -TargetResult $targetResult
+        $targets.Add($targetEnvelope) | Out-Null
+        $recordCount += @($targetEnvelope.data).Count
+    }
+
+    $durationMilliseconds = [math]::Max(0, [math]::Round(($FinishedAtUtc - $StartedAtUtc).TotalMilliseconds))
+    $readOnlyValue = if ($null -eq $ReadOnly) { $null } else { [bool]$ReadOnly }
+    $stateChangingValue = if ($null -eq $ReadOnly) { $null } else { -not [bool]$ReadOnly }
+    $safeErrors = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($errorItem in @($Errors)) {
+        $safeErrors.Add([pscustomobject][ordered]@{
+                category = [string]$errorItem.Category
+                message  = ConvertTo-AdminSafeErrorMessage -Message $errorItem.Message
+            }) | Out-Null
+    }
+    $canonicalActionId = $null
+    if (-not [string]::IsNullOrWhiteSpace([string]$ActionId)) {
+        $safeActionId = Get-AdminSafeActionId -ActionId ([string]$ActionId)
+        $canonicalActionItem = if ($safeActionId) { Get-AdminActionCatalogItem -ActionId $safeActionId } else { $null }
+        if ($canonicalActionItem) {
+            $canonicalActionId = $canonicalActionItem.Id
+        }
+    }
+
+    return [pscustomobject][ordered]@{
+        schemaVersion  = $Script:AutomationSchemaVersion
+        toolkitVersion = $Script:ToolkitVersion
+        runId          = $RunId.ToString('D')
+        startedAtUtc   = ConvertTo-AdminUtcTimestamp -Value $StartedAtUtc
+        finishedAtUtc  = ConvertTo-AdminUtcTimestamp -Value $FinishedAtUtc
+        durationMs     = [int64]$durationMilliseconds
+        actionId       = $canonicalActionId
+        actionName     = if ([string]::IsNullOrWhiteSpace([string]$ActionName)) { $null } else { [string]$ActionName }
+        readOnly       = $readOnlyValue
+        stateChanging  = $stateChangingValue
+        targetMode     = if ($TargetMode -in @('Local', 'Remote')) { [string]$TargetMode } else { $null }
+        transport      = [pscustomobject][ordered]@{
+            name           = if ($Transport -in @('Local', 'WinRM', 'PsExec')) { [string]$Transport } else { $null }
+            authentication = if ($Authentication -in @('Default', 'Kerberos', 'Negotiate')) { [string]$Authentication } else { $null }
+            useSsl         = [bool]$UseSsl
+        }
+        status         = $Status
+        outcome        = $Outcome
+        exitCode       = [int]$ExitCode
+        targetCount    = [int]$RequestedTargetCount
+        recordCount    = [int]$recordCount
+        targets        = @($targets.ToArray())
+        warnings       = @($Warnings | ForEach-Object { [string]$_ })
+        errors         = @($safeErrors.ToArray())
+        reportPaths    = @($ReportPaths | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { [string]$_ })
+        actions        = @($Actions)
+    }
+}
+
+function ConvertTo-AdminAutomationJson {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Envelope
+    )
+
+    return ConvertTo-Json -InputObject $Envelope -Compress -Depth 20
+}
+
+function ConvertTo-AdminOutputSinkFailureEnvelope {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$OriginalEnvelope,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Message
+    )
+
+    $finishedAtUtc = [datetime]::UtcNow
+    $startedAtUtc = [datetime]::Parse(
+        [string]$OriginalEnvelope.startedAtUtc,
+        [System.Globalization.CultureInfo]::InvariantCulture,
+        [System.Globalization.DateTimeStyles]::RoundtripKind
+    ).ToUniversalTime()
+    $durationMilliseconds = [math]::Max(0, [math]::Round(($finishedAtUtc - $startedAtUtc).TotalMilliseconds))
+    $safeMessage = ConvertTo-AdminSafeErrorMessage -Message $Message
+
+    $OriginalEnvelope.finishedAtUtc = ConvertTo-AdminUtcTimestamp -Value $finishedAtUtc
+    $OriginalEnvelope.durationMs = [int64]$durationMilliseconds
+    $OriginalEnvelope.status = 'InternalFailure'
+    $OriginalEnvelope.outcome = 'InternalFailure'
+    $OriginalEnvelope.exitCode = [int]$Script:AutomationExitCodes.InternalFailure
+    $OriginalEnvelope.warnings = @($OriginalEnvelope.warnings) + @('Target execution finished before the requested JSON result could be delivered. Review the preserved target results before deciding whether to retry.')
+    $OriginalEnvelope.errors = @($OriginalEnvelope.errors) + @([pscustomobject][ordered]@{ category = 'Internal'; message = $safeMessage })
+    $OriginalEnvelope.reportPaths = @()
+    return $OriginalEnvelope
+}
+
+function Resolve-AdminAutomationOutputPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$LiteralPath
+    )
+
+    if ($LiteralPath -ceq '-' -or $LiteralPath -ieq 'STDOUT') {
+        return '-'
+    }
+    if (-not (Test-AdminLiteralFilePathText -LiteralPath $LiteralPath)) {
+        throw 'The JSON output path contains an unsafe or unsupported component.'
+    }
+
+    $fullPath = [System.IO.Path]::GetFullPath($LiteralPath)
+    if ([System.IO.Path]::GetExtension($fullPath) -ine '.json') {
+        throw 'The JSON output path must use the .json extension.'
+    }
+    if (Test-Path -LiteralPath $fullPath) {
+        throw "Refusing to overwrite an existing JSON output file: $fullPath"
+    }
+    $parent = Split-Path -Parent $fullPath
+    if ([string]::IsNullOrWhiteSpace($parent)) {
+        throw 'The JSON output path must include a valid parent directory.'
+    }
+
+    if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
+        [void][System.IO.Directory]::CreateDirectory($parent)
+    }
+
+    $leafName = Split-Path -Leaf $fullPath
+    $deviceBaseName = @($leafName -split '\.', 2)[0]
+    if ([string]::IsNullOrWhiteSpace($leafName) -or $leafName.Length -gt 255 -or $leafName.TrimEnd(' ', '.') -cne $leafName) {
+        throw 'The JSON output file name is invalid.'
+    }
+    if ($leafName.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -ge 0 -or $deviceBaseName -match '^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$') {
+        throw 'The JSON output file name is not supported on Windows.'
+    }
+
+    $outputProbe = $null
+    $outputProbeCreated = $false
+    $outputProbePath = Join-Path $parent ('.admin-json-probe-{0}.tmp' -f [guid]::NewGuid().ToString('N'))
+    try {
+        $outputProbe = [System.IO.File]::Open($outputProbePath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        $outputProbeCreated = $true
+    }
+    finally {
+        if ($outputProbe) {
+            $outputProbe.Dispose()
+        }
+        if ($outputProbeCreated -and (Test-Path -LiteralPath $outputProbePath -PathType Leaf)) {
+            [System.IO.File]::Delete($outputProbePath)
+        }
+    }
+
+    return $fullPath
+}
+
+function Get-AdminAutomationResolutionFailure {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Validation', 'Authorization')]
+        [string]$Category,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Message
+    )
+
+    return [pscustomobject][ordered]@{
+        Success  = $false
+        Category = $Category
+        Message  = ConvertTo-AdminSafeErrorMessage -Message $Message
+        Request  = $null
+    }
+}
+
+function Resolve-AdminAutomationInputFile {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$LiteralPath,
+
+        [Parameter()]
+        [AllowEmptyString()]
+        [string]$RequiredExtension = ''
+    )
+
+    if (-not (Test-AdminLiteralFilePathText -LiteralPath $LiteralPath)) {
+        throw 'The input path contains an unsafe or unsupported component.'
+    }
+    $fullPath = [System.IO.Path]::GetFullPath($LiteralPath)
+    if (-not [string]::IsNullOrWhiteSpace($RequiredExtension) -and [System.IO.Path]::GetExtension($fullPath) -ine $RequiredExtension) {
+        throw "The input file must use the $RequiredExtension extension."
+    }
+    if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
+        throw "Input file not found: $fullPath"
+    }
+
+    return $fullPath
+}
+
+function Resolve-AdminAutomationRequest {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$Parameters
+    )
+
+    if ((Test-AdminParameterBound -Parameters $Parameters -Name 'Confirm') -and [bool]$Parameters['Confirm']) {
+        return Get-AdminAutomationResolutionFailure -Category Validation -Message 'Automation mode does not permit an interactive -Confirm prompt. Omit -Confirm or use -Confirm:$false.'
+    }
+    $configurationError = Get-AdminRuntimeConfigurationError
+    if (-not [string]::IsNullOrWhiteSpace($configurationError)) {
+        return Get-AdminAutomationResolutionFailure -Category Validation -Message $configurationError
+    }
+
+    $rawActionId = if (Test-AdminParameterBound -Parameters $Parameters -Name 'Action') { ([string]$Parameters['Action']).Trim() } else { '' }
+    if ([string]::IsNullOrWhiteSpace($rawActionId)) {
+        return Get-AdminAutomationResolutionFailure -Category Validation -Message 'Automation mode requires -Action or -ListActions.'
+    }
+    $requestedActionId = Get-AdminSafeActionId -ActionId $rawActionId
+    if ([string]::IsNullOrWhiteSpace($requestedActionId)) {
+        return Get-AdminAutomationResolutionFailure -Category Validation -Message 'The action identifier format is invalid.'
+    }
+    $catalogItem = Get-AdminActionCatalogItem -ActionId $requestedActionId
+    if ($null -eq $catalogItem) {
+        return Get-AdminAutomationResolutionFailure -Category Validation -Message "Unknown action identifier: $requestedActionId"
+    }
+
+    $allowedInputs = @($Script:AutomationActionInputs[$catalogItem.Id])
+    foreach ($inputName in $Script:AutomationInputNames) {
+        if ((Test-AdminParameterBound -Parameters $Parameters -Name $inputName) -and $inputName -notin $allowedInputs) {
+            return Get-AdminAutomationResolutionFailure -Category Validation -Message "Parameter -$inputName is not valid for action $($catalogItem.Id)."
+        }
+    }
+
+    $localSelected = (Test-AdminParameterBound -Parameters $Parameters -Name 'Local') -and [bool]$Parameters['Local']
+    $singleTarget = if (Test-AdminParameterBound -Parameters $Parameters -Name 'ComputerName') { ([string]$Parameters['ComputerName']).Trim() } else { '' }
+    $listPath = if (Test-AdminParameterBound -Parameters $Parameters -Name 'ComputerListPath') { ([string]$Parameters['ComputerListPath']).Trim() } else { '' }
+    $selectorCount = 0
+    if ($localSelected) { $selectorCount++ }
+    if (-not [string]::IsNullOrWhiteSpace($singleTarget)) { $selectorCount++ }
+    if (-not [string]::IsNullOrWhiteSpace($listPath)) { $selectorCount++ }
+    if ($selectorCount -ne 1) {
+        return Get-AdminAutomationResolutionFailure -Category Validation -Message 'Select exactly one target source: -Local, -ComputerName, or -ComputerListPath.'
+    }
+
+    $targetMode = if ($localSelected) { 'Local' } else { 'Remote' }
+    $computers = @()
+    if ($targetMode -eq 'Local') {
+        $remoteOnlyParameters = @(
+            'Transport',
+            'PsExecPath',
+            'Credential',
+            'MaxConcurrentJobs',
+            'RetryCount',
+            'RetryDelaySeconds',
+            'OperationTimeoutMinutes',
+            'ConnectivityTimeoutSeconds',
+            'UseSsl',
+            'Authentication',
+            'SkipConnectivityCheck',
+            'ComputerName',
+            'ComputerListPath',
+            'PsExecConfirmationText'
+        )
+        foreach ($parameterName in $remoteOnlyParameters) {
+            if (Test-AdminParameterBound -Parameters $Parameters -Name $parameterName) {
+                return Get-AdminAutomationResolutionFailure -Category Validation -Message "Parameter -$parameterName is not valid with -Local."
+            }
+        }
+        $computers = @($env:COMPUTERNAME)
+    }
+    elseif (-not [string]::IsNullOrWhiteSpace($singleTarget)) {
+        if (-not (Test-AdminHostname -ComputerName $singleTarget)) {
+            return Get-AdminAutomationResolutionFailure -Category Validation -Message "Invalid remote target: $singleTarget"
+        }
+        $computers = @($singleTarget)
+    }
+    else {
+        try {
+            $resolvedListPath = Resolve-AdminAutomationInputFile -LiteralPath $listPath
+            $importResult = Import-AdminComputerList -LiteralPath $resolvedListPath -MaximumTargets 500
+        }
+        catch {
+            return Get-AdminAutomationResolutionFailure -Category Validation -Message $_.Exception.Message
+        }
+        if (@($importResult.InvalidLines).Count -gt 0) {
+            $lineText = (@($importResult.InvalidLines | Select-Object -First 20) -join ', ')
+            return Get-AdminAutomationResolutionFailure -Category Validation -Message "The computer list contains invalid targets on line(s): $lineText"
+        }
+        $computers = @($importResult.Computers)
+        if ($computers.Count -eq 0) {
+            return Get-AdminAutomationResolutionFailure -Category Validation -Message 'The computer list contains no valid targets.'
+        }
+    }
+
+    if ($computers.Count -gt 25) {
+        $targetAuthorization = if (Test-AdminParameterBound -Parameters $Parameters -Name 'TargetListConfirmationText') { [string]$Parameters['TargetListConfirmationText'] } else { '' }
+        if ($targetAuthorization -cne 'USE TARGET LIST') {
+            return Get-AdminAutomationResolutionFailure -Category Authorization -Message 'More than 25 targets require -TargetListConfirmationText with the exact value USE TARGET LIST.'
+        }
+    }
+    elseif ((Test-AdminParameterBound -Parameters $Parameters -Name 'TargetListConfirmationText') -and -not [string]::IsNullOrWhiteSpace([string]$Parameters['TargetListConfirmationText'])) {
+        return Get-AdminAutomationResolutionFailure -Category Validation -Message 'TargetListConfirmationText is accepted only when the request contains more than 25 targets.'
+    }
+
+    if ($targetMode -eq 'Remote' -and $Script:State.Transport -eq 'PsExec') {
+        foreach ($winRmOnlyParameter in @('Authentication', 'UseSsl')) {
+            if (Test-AdminParameterBound -Parameters $Parameters -Name $winRmOnlyParameter) {
+                return Get-AdminAutomationResolutionFailure -Category Validation -Message "Parameter -$winRmOnlyParameter is valid only with the WinRM transport."
+            }
+        }
+        if ($Script:State.Credential) {
+            return Get-AdminAutomationResolutionFailure -Category Validation -Message 'PsExec does not accept alternate credentials in this toolkit.'
+        }
+        $psExecAuthorization = if (Test-AdminParameterBound -Parameters $Parameters -Name 'PsExecConfirmationText') { [string]$Parameters['PsExecConfirmationText'] } else { '' }
+        if ($psExecAuthorization -cne 'USE PSEXEC') {
+            return Get-AdminAutomationResolutionFailure -Category Authorization -Message 'PsExec requires -PsExecConfirmationText with the exact value USE PSEXEC.'
+        }
+        try {
+            $Script:State.PsExecFullPath = Resolve-AdminPsExec -Path $Script:State.PsExecPath
+        }
+        catch {
+            return Get-AdminAutomationResolutionFailure -Category Validation -Message $_.Exception.Message
+        }
+    }
+    else {
+        if (Test-AdminParameterBound -Parameters $Parameters -Name 'PsExecPath') {
+            return Get-AdminAutomationResolutionFailure -Category Validation -Message 'Parameter -PsExecPath is valid only with the PsExec transport.'
+        }
+        if ((Test-AdminParameterBound -Parameters $Parameters -Name 'PsExecConfirmationText') -and -not [string]::IsNullOrWhiteSpace([string]$Parameters['PsExecConfirmationText'])) {
+            return Get-AdminAutomationResolutionFailure -Category Validation -Message 'PsExecConfirmationText is accepted only for the PsExec transport.'
+        }
+    }
+
+    $arguments = @()
+    $effectiveReadOnly = [bool]$catalogItem.ReadOnly
+    switch ($catalogItem.Id) {
+        'RunningProcesses' {
+            $value = if (Test-AdminParameterBound -Parameters $Parameters -Name 'TopCount') { [int]$Parameters['TopCount'] } else { 20 }
+            if ($value -lt 1 -or $value -gt 100) {
+                return Get-AdminAutomationResolutionFailure -Category Validation -Message 'TopCount must be from 1 through 100.'
+            }
+            $arguments = @($value)
+        }
+        'WindowsUpdate' {
+            $requestedKbs = @(if (Test-AdminParameterBound -Parameters $Parameters -Name 'IncludeKB') { $Parameters['IncludeKB'] })
+            if ($requestedKbs.Count -gt 100) {
+                return Get-AdminAutomationResolutionFailure -Category Validation -Message 'IncludeKB accepts at most 100 KB identifiers.'
+            }
+            $normalizedKbs = New-Object 'System.Collections.Generic.List[string]'
+            $seenKbs = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($requestedKb in $requestedKbs) {
+                $kb = ([string]$requestedKb).Trim().ToUpperInvariant()
+                if (-not [string]::IsNullOrWhiteSpace($kb) -and -not $kb.StartsWith('KB')) {
+                    $kb = "KB$kb"
+                }
+                if (-not (Test-AdminKbNumber -KbNumber $kb)) {
+                    return Get-AdminAutomationResolutionFailure -Category Validation -Message "Invalid KB identifier: $requestedKb"
+                }
+                if ($seenKbs.Add($kb)) {
+                    $normalizedKbs.Add($kb) | Out-Null
+                }
+            }
+            $arguments = @(, $normalizedKbs.ToArray())
+        }
+        'ScheduleReboot' {
+            $value = if (Test-AdminParameterBound -Parameters $Parameters -Name 'RebootDelaySeconds') { [int]$Parameters['RebootDelaySeconds'] } else { 60 }
+            if ($value -lt 30 -or $value -gt 3600) {
+                return Get-AdminAutomationResolutionFailure -Category Validation -Message 'RebootDelaySeconds must be from 30 through 3600.'
+            }
+            $arguments = @($value)
+        }
+        'ServiceManagement' {
+            $requestedService = if (Test-AdminParameterBound -Parameters $Parameters -Name 'ServiceName') { ([string]$Parameters['ServiceName']).Trim() } else { '' }
+            if (-not (Test-AdminServiceName -ServiceName $requestedService)) {
+                return Get-AdminAutomationResolutionFailure -Category Validation -Message 'ServiceManagement requires a valid -ServiceName.'
+            }
+            $requestedServiceAction = if (Test-AdminParameterBound -Parameters $Parameters -Name 'ServiceAction') { ([string]$Parameters['ServiceAction']).Trim() } else { 'Query' }
+            $serviceActionMap = @{
+                query   = 'Query'
+                start   = 'Start'
+                stop    = 'Stop'
+                restart = 'Restart'
+            }
+            $serviceActionKey = $requestedServiceAction.ToLowerInvariant()
+            if (-not $serviceActionMap.ContainsKey($serviceActionKey)) {
+                return Get-AdminAutomationResolutionFailure -Category Validation -Message 'ServiceAction must be Query, Start, Stop, or Restart.'
+            }
+            $canonicalServiceAction = $serviceActionMap[$serviceActionKey]
+            $effectiveReadOnly = $canonicalServiceAction -eq 'Query'
+            $arguments = @($requestedService, $canonicalServiceAction)
+        }
+        'TerminateProcess' {
+            $requestedProcess = if (Test-AdminParameterBound -Parameters $Parameters -Name 'ProcessName') { ([string]$Parameters['ProcessName']).Trim() } else { '' }
+            if (-not (Test-AdminProcessName -ProcessName $requestedProcess)) {
+                return Get-AdminAutomationResolutionFailure -Category Validation -Message 'TerminateProcess requires a valid -ProcessName.'
+            }
+            $baseName = [System.IO.Path]::GetFileNameWithoutExtension($requestedProcess)
+            $protectedProcesses = @('System', 'Registry', 'smss', 'csrss', 'wininit', 'winlogon', 'services', 'lsass', 'svchost', 'fontdrvhost', 'dwm', 'Idle')
+            if ($baseName -in $protectedProcesses) {
+                return Get-AdminAutomationResolutionFailure -Category Authorization -Message "The safety policy blocks termination of core Windows process '$baseName'."
+            }
+            $arguments = @($requestedProcess)
+        }
+        'ClearTempFiles' {
+            $age = if (Test-AdminParameterBound -Parameters $Parameters -Name 'MinimumAgeDays') { [int]$Parameters['MinimumAgeDays'] } else { 2 }
+            $maximum = if (Test-AdminParameterBound -Parameters $Parameters -Name 'MaximumFiles') { [int]$Parameters['MaximumFiles'] } else { 50000 }
+            if ($age -lt 1 -or $age -gt 30) {
+                return Get-AdminAutomationResolutionFailure -Category Validation -Message 'MinimumAgeDays must be from 1 through 30.'
+            }
+            if ($maximum -lt 100 -or $maximum -gt 100000) {
+                return Get-AdminAutomationResolutionFailure -Category Validation -Message 'MaximumFiles must be from 100 through 100000.'
+            }
+            $arguments = @($age, $maximum)
+        }
+        'ScheduledTasks' {
+            $requestedTaskPath = if (Test-AdminParameterBound -Parameters $Parameters -Name 'TaskPath') { ([string]$Parameters['TaskPath']).Trim() } else { '\' }
+            if ([string]::IsNullOrWhiteSpace($requestedTaskPath)) {
+                $requestedTaskPath = '\'
+            }
+            if (-not $requestedTaskPath.EndsWith('\')) {
+                $requestedTaskPath += '\'
+            }
+            if (-not (Test-AdminTaskPath -TaskPath $requestedTaskPath)) {
+                return Get-AdminAutomationResolutionFailure -Category Validation -Message 'TaskPath is invalid.'
+            }
+            $maximum = if (Test-AdminParameterBound -Parameters $Parameters -Name 'MaximumTasks') { [int]$Parameters['MaximumTasks'] } else { 50 }
+            if ($maximum -lt 1 -or $maximum -gt 500) {
+                return Get-AdminAutomationResolutionFailure -Category Validation -Message 'MaximumTasks must be from 1 through 500.'
+            }
+            $arguments = @($requestedTaskPath, $maximum)
+        }
+        'EventLogQuery' {
+            $requestedLogName = if (Test-AdminParameterBound -Parameters $Parameters -Name 'EventLogName') { ([string]$Parameters['EventLogName']).Trim() } else { 'System' }
+            if (-not (Test-AdminEventLogName -LogName $requestedLogName)) {
+                return Get-AdminAutomationResolutionFailure -Category Validation -Message 'EventLogName is invalid.'
+            }
+            $count = if (Test-AdminParameterBound -Parameters $Parameters -Name 'EntryCount') { [int]$Parameters['EntryCount'] } else { 20 }
+            if ($count -lt 1 -or $count -gt 1000) {
+                return Get-AdminAutomationResolutionFailure -Category Validation -Message 'EntryCount must be from 1 through 1000.'
+            }
+            $requestedLevels = @(if (Test-AdminParameterBound -Parameters $Parameters -Name 'EventLevel') { $Parameters['EventLevel'] } else { 'Error'; 'Warning' })
+            $eventLevelCharacterCount = 0
+            foreach ($requestedLevelValue in $requestedLevels) {
+                $eventLevelCharacterCount += ([string]$requestedLevelValue).Length
+            }
+            if ($requestedLevels.Count -gt 20 -or $eventLevelCharacterCount -gt 1024) {
+                return Get-AdminAutomationResolutionFailure -Category Validation -Message 'EventLevel input exceeds the supported size limit.'
+            }
+            $levelMap = @{
+                critical    = 'Critical'
+                error       = 'Error'
+                warning     = 'Warning'
+                information = 'Information'
+                verbose     = 'Verbose'
+            }
+            $levels = New-Object 'System.Collections.Generic.List[string]'
+            $seenLevels = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($requestedLevel in $requestedLevels) {
+                foreach ($levelPart in @(([string]$requestedLevel) -split ',')) {
+                    $levelKey = $levelPart.Trim().ToLowerInvariant()
+                    if (-not $levelMap.ContainsKey($levelKey)) {
+                        return Get-AdminAutomationResolutionFailure -Category Validation -Message "Invalid event level: $levelPart"
+                    }
+                    $canonicalLevel = $levelMap[$levelKey]
+                    if ($seenLevels.Add($canonicalLevel)) {
+                        $levels.Add($canonicalLevel) | Out-Null
+                    }
+                }
+            }
+            if ($levels.Count -eq 0) {
+                return Get-AdminAutomationResolutionFailure -Category Validation -Message 'At least one EventLevel is required.'
+            }
+            $arguments = @($requestedLogName, $count, [string[]]$levels.ToArray())
+        }
+        'RegistryRead' {
+            $requestedRegistryPath = if (Test-AdminParameterBound -Parameters $Parameters -Name 'RegistryPath') { ([string]$Parameters['RegistryPath']).Trim() } else { '' }
+            if (-not (Test-AdminRegistryPath -RegistryPath $requestedRegistryPath)) {
+                return Get-AdminAutomationResolutionFailure -Category Validation -Message 'RegistryRead requires a valid -RegistryPath.'
+            }
+            $requestedValueName = if (Test-AdminParameterBound -Parameters $Parameters -Name 'RegistryValueName') { [string]$Parameters['RegistryValueName'] } else { '' }
+            if (-not (Test-AdminRegistryValueName -ValueName $requestedValueName)) {
+                return Get-AdminAutomationResolutionFailure -Category Validation -Message 'RegistryValueName is invalid.'
+            }
+            $arguments = @($requestedRegistryPath, $requestedValueName)
+        }
+        'CustomCommand' {
+            $requestedCommand = if (Test-AdminParameterBound -Parameters $Parameters -Name 'CommandText') { [string]$Parameters['CommandText'] } else { '' }
+            if ([string]::IsNullOrWhiteSpace($requestedCommand) -or $requestedCommand.Length -gt 32767) {
+                return Get-AdminAutomationResolutionFailure -Category Validation -Message 'CustomCommand requires nonempty CommandText no longer than 32767 characters.'
+            }
+            $arguments = @($requestedCommand)
+        }
+        'CustomPowerShell' {
+            $requestedScriptText = if (Test-AdminParameterBound -Parameters $Parameters -Name 'PowerShellText') { [string]$Parameters['PowerShellText'] } else { '' }
+            $requestedScriptFile = if (Test-AdminParameterBound -Parameters $Parameters -Name 'PowerShellFile') { ([string]$Parameters['PowerShellFile']).Trim() } else { '' }
+            $hasText = -not [string]::IsNullOrWhiteSpace($requestedScriptText)
+            $hasFile = -not [string]::IsNullOrWhiteSpace($requestedScriptFile)
+            if ([int]$hasText + [int]$hasFile -ne 1) {
+                return Get-AdminAutomationResolutionFailure -Category Validation -Message 'CustomPowerShell requires exactly one of -PowerShellText or -PowerShellFile.'
+            }
+            if ($hasFile) {
+                try {
+                    $resolvedScriptPath = Resolve-AdminAutomationInputFile -LiteralPath $requestedScriptFile -RequiredExtension '.ps1'
+                    $requestedScriptText = Read-AdminBoundedUtf8File -LiteralPath $resolvedScriptPath -MaximumBytes 1048576
+                }
+                catch {
+                    return Get-AdminAutomationResolutionFailure -Category Validation -Message $_.Exception.Message
+                }
+            }
+            $scriptValidation = Test-AdminPowerShellText -ScriptText $requestedScriptText
+            if (-not $scriptValidation.IsValid) {
+                return Get-AdminAutomationResolutionFailure -Category Validation -Message 'PowerShell source is invalid and was not executed.'
+            }
+            $arguments = @($requestedScriptText)
+        }
+    }
+
+    $expectedConfirmation = if ($Script:AutomationConfirmations.Contains($catalogItem.Id)) { [string]$Script:AutomationConfirmations[$catalogItem.Id] } else { $null }
+    $providedConfirmation = if (Test-AdminParameterBound -Parameters $Parameters -Name 'ConfirmationText') { [string]$Parameters['ConfirmationText'] } else { '' }
+    $whatIfRequested = (Test-AdminParameterBound -Parameters $Parameters -Name 'WhatIf') -and [bool]$Parameters['WhatIf']
+    if ($effectiveReadOnly) {
+        if (-not [string]::IsNullOrWhiteSpace($providedConfirmation)) {
+            return Get-AdminAutomationResolutionFailure -Category Validation -Message 'ConfirmationText is not accepted for a read-only request.'
+        }
+    }
+    elseif ($whatIfRequested) {
+        if (-not [string]::IsNullOrWhiteSpace($providedConfirmation) -and $providedConfirmation -cne $expectedConfirmation) {
+            return Get-AdminAutomationResolutionFailure -Category Authorization -Message "The supplied ConfirmationText does not match the exact value $expectedConfirmation."
+        }
+    }
+    elseif ($providedConfirmation -cne $expectedConfirmation) {
+        return Get-AdminAutomationResolutionFailure -Category Authorization -Message "This action requires -ConfirmationText with the exact value $expectedConfirmation."
+    }
+
+    $warnings = New-Object 'System.Collections.Generic.List[string]'
+    if ($catalogItem.Id -in @('CustomCommand', 'CustomPowerShell')) {
+        $warnings.Add('This expert action executes operator-supplied content without a sandbox.') | Out-Null
+    }
+
+    $request = [pscustomobject][ordered]@{
+        CatalogItem         = $catalogItem
+        ActionId            = $catalogItem.Id
+        ActionName          = $catalogItem.Name
+        Script              = $catalogItem.Script
+        Arguments           = @($arguments)
+        ReadOnly            = [bool]$effectiveReadOnly
+        ExpectedConfirmation = $expectedConfirmation
+        TargetMode          = $targetMode
+        Computers           = @($computers)
+        Warnings            = @($warnings.ToArray())
+    }
+    return [pscustomobject][ordered]@{
+        Success  = $true
+        Category = $null
+        Message  = $null
+        Request  = $request
+    }
+}
+
+function Get-AdminAutomationOutcome {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]]$TargetResults
+    )
+
+    $successCount = @($TargetResults | Where-Object { $_.Status -eq 'Success' }).Count
+    $partialCount = @($TargetResults | Where-Object { $_.Status -eq 'Partial' }).Count
+    $failedCount = @($TargetResults | Where-Object { $_.Status -eq 'Failed' }).Count
+    $timeoutCount = @($TargetResults | Where-Object { $_.Status -eq 'TimedOut' }).Count
+
+    if ($successCount -eq $TargetResults.Count -and $TargetResults.Count -gt 0) {
+        $status = 'Succeeded'
+        $outcome = 'CompleteSuccess'
+        $exitCode = $Script:AutomationExitCodes.CompleteSuccess
+    }
+    elseif (($successCount + $partialCount) -gt 0) {
+        $status = 'PartiallySucceeded'
+        $outcome = 'PartialSuccess'
+        $exitCode = $Script:AutomationExitCodes.PartialSuccess
+    }
+    elseif ($timeoutCount -eq $TargetResults.Count -and $TargetResults.Count -gt 0) {
+        $status = 'TimedOut'
+        $outcome = 'Timeout'
+        $exitCode = $Script:AutomationExitCodes.Timeout
+    }
+    else {
+        $status = 'Failed'
+        $outcome = 'ExecutionFailure'
+        $exitCode = $Script:AutomationExitCodes.ExecutionFailure
+    }
+
+    return [pscustomobject][ordered]@{
+        Status       = $status
+        Outcome      = $outcome
+        ExitCode     = [int]$exitCode
+        SuccessCount = $successCount
+        PartialCount = $partialCount
+        FailedCount  = $failedCount
+        TimeoutCount = $timeoutCount
+    }
+}
+
+function Invoke-AdminAutomation {
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$Parameters,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$ResolvedOutputPath
+    )
+
+    $startedAtUtc = [datetime]::UtcNow
+    $runId = [guid]::NewGuid()
+    $requestedActionId = if (Test-AdminParameterBound -Parameters $Parameters -Name 'Action') { Get-AdminSafeActionId -ActionId ([string]$Parameters['Action']) } else { $null }
+    $reportPaths = if ($ResolvedOutputPath -ceq '-') { @() } else { @($ResolvedOutputPath) }
+    $requestedTargetSummary = Get-AdminRequestedTargetSummary -Parameters $Parameters
+    $transportName = $requestedTargetSummary.Transport
+    $transportAuthentication = $requestedTargetSummary.Authentication
+    $transportUseSsl = $requestedTargetSummary.UseSsl
+
+    if ((Test-AdminParameterBound -Parameters $Parameters -Name 'ListActions') -and [bool]$Parameters['ListActions']) {
+        if (Test-AdminParameterBound -Parameters $Parameters -Name 'Action') {
+            $finishedAtUtc = [datetime]::UtcNow
+            return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -ActionId $requestedActionId -Status ValidationFailed -Outcome ValidationFailure -ExitCode $Script:AutomationExitCodes.ValidationFailure -Errors @([pscustomobject]@{ Category = 'Validation'; Message = 'ListActions cannot be combined with Action.' }) -ReportPaths $reportPaths
+        }
+        $catalogOnlyParameters = @(
+            'Transport',
+            'PsExecPath',
+            'Credential',
+            'MaxConcurrentJobs',
+            'RetryCount',
+            'RetryDelaySeconds',
+            'OperationTimeoutMinutes',
+            'ConnectivityTimeoutSeconds',
+            'LogFile',
+            'UseSsl',
+            'Authentication',
+            'Quiet',
+            'SkipConnectivityCheck',
+            'Local',
+            'ComputerName',
+            'ComputerListPath',
+            'ConfirmationText',
+            'TargetListConfirmationText',
+            'PsExecConfirmationText',
+            'WhatIf',
+            'Confirm'
+        ) + $Script:AutomationInputNames
+        foreach ($parameterName in $catalogOnlyParameters) {
+            if (Test-AdminParameterBound -Parameters $Parameters -Name $parameterName) {
+                $finishedAtUtc = [datetime]::UtcNow
+                return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -Status ValidationFailed -Outcome ValidationFailure -ExitCode $Script:AutomationExitCodes.ValidationFailure -Errors @([pscustomobject]@{ Category = 'Validation'; Message = "Parameter -$parameterName cannot be combined with -ListActions." }) -ReportPaths $reportPaths
+            }
+        }
+
+        $actions = @(Get-AdminAutomationActionCatalog)
+        $finishedAtUtc = [datetime]::UtcNow
+        return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -Status Succeeded -Outcome CompleteSuccess -ExitCode $Script:AutomationExitCodes.CompleteSuccess -Actions $actions -ReportPaths $reportPaths
+    }
+
+    if (-not (Test-WindowsPlatform)) {
+        $finishedAtUtc = [datetime]::UtcNow
+        return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -ActionId $requestedActionId -Status ValidationFailed -Outcome ValidationFailure -ExitCode $Script:AutomationExitCodes.ValidationFailure -Errors @([pscustomobject]@{ Category = 'Validation'; Message = 'Windows Admin Toolkit runs only on Windows.' }) -ReportPaths $reportPaths
+    }
+
+    $resolution = Resolve-AdminAutomationRequest -Parameters $Parameters
+    if (-not $resolution.Success) {
+        $catalogItem = if ($requestedActionId) { Get-AdminActionCatalogItem -ActionId $requestedActionId } else { $null }
+        $actionName = if ($catalogItem) { $catalogItem.Name } else { $null }
+        $readOnly = if ($catalogItem -and $catalogItem.Classification -ne 'Conditional') { [bool]$catalogItem.ReadOnly } else { $null }
+        $outcome = if ($resolution.Category -eq 'Authorization') { 'AuthorizationFailure' } else { 'ValidationFailure' }
+        $status = if ($resolution.Category -eq 'Authorization') { 'AuthorizationFailed' } else { 'ValidationFailed' }
+        $exitCode = if ($resolution.Category -eq 'Authorization') { $Script:AutomationExitCodes.AuthorizationFailure } else { $Script:AutomationExitCodes.ValidationFailure }
+        $finishedAtUtc = [datetime]::UtcNow
+        return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -ActionId $requestedActionId -ActionName $actionName -ReadOnly $readOnly -TargetMode $requestedTargetSummary.TargetMode -Transport $transportName -Authentication $transportAuthentication -UseSsl $transportUseSsl -Status $status -Outcome $outcome -ExitCode $exitCode -RequestedTargetCount $requestedTargetSummary.RequestedTargetCount -Errors @([pscustomobject]@{ Category = $resolution.Category; Message = $resolution.Message }) -ReportPaths $reportPaths
+    }
+
+    $request = $resolution.Request
+    $transportName = if ($request.TargetMode -eq 'Local') { 'Local' } else { $Script:State.Transport }
+    $transportAuthentication = if ($request.TargetMode -eq 'Remote' -and $Script:State.Transport -eq 'WinRM') { $Script:State.Authentication } else { $null }
+    $transportUseSsl = $request.TargetMode -eq 'Remote' -and $Script:State.Transport -eq 'WinRM' -and [bool]$Script:State.UseSsl
+    try {
+        $requestedLogPath = if (Test-AdminParameterBound -Parameters $Parameters -Name 'LogFile') { [string]$Parameters['LogFile'] } else { $null }
+        [void](Initialize-AdminLog -RequestedPath $requestedLogPath)
+        Write-AdminLog -Message ("Automation run {0} prepared action '{1}' for {2} target(s)." -f $runId, $request.ActionName, $request.Computers.Count) -NoConsole
+    }
+    catch {
+        $finishedAtUtc = [datetime]::UtcNow
+        return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -ActionId $request.ActionId -ActionName $request.ActionName -ReadOnly $request.ReadOnly -TargetMode $request.TargetMode -Transport $transportName -Authentication $transportAuthentication -UseSsl $transportUseSsl -Status ValidationFailed -Outcome ValidationFailure -ExitCode $Script:AutomationExitCodes.ValidationFailure -RequestedTargetCount $request.Computers.Count -Errors @([pscustomobject]@{ Category = 'Validation'; Message = "Unable to initialize the log: $($_.Exception.Message)" }) -ReportPaths $reportPaths
+    }
+
+    if (-not $request.ReadOnly) {
+        $whatIfRequested = (Test-AdminParameterBound -Parameters $Parameters -Name 'WhatIf') -and [bool]$Parameters['WhatIf']
+        if ($whatIfRequested) {
+            $previewResults = New-Object 'System.Collections.Generic.List[object]'
+            for ($index = 0; $index -lt $request.Computers.Count; $index++) {
+                $previewTime = [datetime]::UtcNow
+                $previewResults.Add((ConvertTo-AdminDetailedTargetResult -Index $index -ComputerName $request.Computers[$index] -Transport $transportName -StartedAtUtc $previewTime -FinishedAtUtc $previewTime -Status WhatIf -Data @())) | Out-Null
+            }
+            $warnings = @($request.Warnings) + @('WhatIf preview completed. No target operation was started.')
+            $finishedAtUtc = [datetime]::UtcNow
+            Write-AdminLog -Message ("Automation run {0} completed as a WhatIf preview." -f $runId) -NoConsole
+            return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -ActionId $request.ActionId -ActionName $request.ActionName -ReadOnly $request.ReadOnly -TargetMode $request.TargetMode -Transport $transportName -Authentication $transportAuthentication -UseSsl $transportUseSsl -Status WhatIf -Outcome CompleteSuccess -ExitCode $Script:AutomationExitCodes.CompleteSuccess -RequestedTargetCount $request.Computers.Count -TargetResults $previewResults.ToArray() -Warnings $warnings -ReportPaths $reportPaths
+        }
+
+        $targetDescription = if ($request.TargetMode -eq 'Local') { "local computer $env:COMPUTERNAME" } else { "$($request.Computers.Count) remote target(s)" }
+        $shouldProcess = $PSCmdlet.ShouldProcess($targetDescription, $request.ActionName)
+        if (-not $shouldProcess) {
+            $finishedAtUtc = [datetime]::UtcNow
+            return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -ActionId $request.ActionId -ActionName $request.ActionName -ReadOnly $request.ReadOnly -TargetMode $request.TargetMode -Transport $transportName -Authentication $transportAuthentication -UseSsl $transportUseSsl -Status AuthorizationFailed -Outcome AuthorizationFailure -ExitCode $Script:AutomationExitCodes.AuthorizationFailure -RequestedTargetCount $request.Computers.Count -Errors @([pscustomobject]@{ Category = 'Authorization'; Message = 'PowerShell ShouldProcess did not authorize the operation.' }) -Warnings $request.Warnings -ReportPaths $reportPaths
+        }
+    }
+
+    $preflightFailures = @{}
+    $executionComputers = @($request.Computers)
+    $warnings = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($requestWarning in @($request.Warnings)) {
+        $warnings.Add($requestWarning) | Out-Null
+    }
+    if ($request.TargetMode -eq 'Remote' -and -not $Script:State.SkipConnectivityCheck) {
+        $port = if ($Script:State.Transport -eq 'PsExec') { 445 } elseif ($Script:State.UseSsl) { 5986 } else { 5985 }
+        $preflightStartedAtUtc = [datetime]::UtcNow
+        try {
+            $preflight = Test-AdminTargetConnectivity -Computers $request.Computers -Port $port -TimeoutSeconds $Script:State.ConnectivityTimeoutSeconds -BatchSize $Script:State.MaxConcurrentJobs
+            $executionComputers = @($preflight.Reachable)
+            foreach ($unreachableComputer in @($preflight.Unreachable)) {
+                $preflightFinishedAtUtc = [datetime]::UtcNow
+                $preflightFailures[$unreachableComputer] = ConvertTo-AdminDetailedTargetResult -Index 0 -ComputerName $unreachableComputer -Transport $transportName -StartedAtUtc $preflightStartedAtUtc -FinishedAtUtc $preflightFinishedAtUtc -Status Failed -ErrorCategory Connectivity -ErrorMessage "The target did not answer on TCP port $port during preflight."
+            }
+            if (@($preflight.Unreachable).Count -gt 0) {
+                $warnings.Add("$(@($preflight.Unreachable).Count) target(s) failed the TCP port $port preflight and were not executed.") | Out-Null
+            }
+        }
+        catch {
+            $preflightFinishedAtUtc = [datetime]::UtcNow
+            $executionComputers = @()
+            foreach ($computer in $request.Computers) {
+                $preflightFailures[$computer] = ConvertTo-AdminDetailedTargetResult -Index 0 -ComputerName $computer -Transport $transportName -StartedAtUtc $preflightStartedAtUtc -FinishedAtUtc $preflightFinishedAtUtc -Status Failed -ErrorCategory Connectivity -ErrorMessage $_.Exception.Message
+            }
+            $warnings.Add('The connectivity preflight failed before target execution.') | Out-Null
+        }
+    }
+
+    $executionResults = @()
+    if ($executionComputers.Count -gt 0) {
+        try {
+            $executionResults = @(Invoke-AdminTargetDetailed -TargetMode $request.TargetMode -Computers $executionComputers -ActionName $request.Script -ArgumentList $request.Arguments -ReadOnly $request.ReadOnly)
+        }
+        catch [System.Management.Automation.PipelineStoppedException] {
+            $finishedAtUtc = [datetime]::UtcNow
+            Write-AdminLog -Message ("Automation run {0} was cancelled before completion." -f $runId) -Level WARN -NoConsole
+            return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -ActionId $request.ActionId -ActionName $request.ActionName -ReadOnly $request.ReadOnly -TargetMode $request.TargetMode -Transport $transportName -Authentication $transportAuthentication -UseSsl $transportUseSsl -Status InternalFailure -Outcome InternalFailure -ExitCode $Script:AutomationExitCodes.InternalFailure -RequestedTargetCount $request.Computers.Count -Errors @([pscustomobject]@{ Category = 'Internal'; Message = 'The automation run was cancelled before completion.' }) -Warnings $warnings.ToArray() -ReportPaths $reportPaths
+        }
+        catch {
+            $finishedAtUtc = [datetime]::UtcNow
+            $internalErrorMessage = if ($request.Script -in @('CustomCommand', 'CustomPowerShell')) { 'The custom action failed internally. Operator-supplied error text was omitted.' } else { ConvertTo-AdminSafeErrorMessage -Message $_.Exception.Message }
+            Write-AdminLog -Message ("Automation run {0} failed internally: {1}" -f $runId, $internalErrorMessage) -Level ERROR -NoConsole
+            return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -ActionId $request.ActionId -ActionName $request.ActionName -ReadOnly $request.ReadOnly -TargetMode $request.TargetMode -Transport $transportName -Authentication $transportAuthentication -UseSsl $transportUseSsl -Status InternalFailure -Outcome InternalFailure -ExitCode $Script:AutomationExitCodes.InternalFailure -RequestedTargetCount $request.Computers.Count -Errors @([pscustomobject]@{ Category = 'Internal'; Message = $internalErrorMessage }) -Warnings $warnings.ToArray() -ReportPaths $reportPaths
+        }
+    }
+
+    $executionMap = @{}
+    foreach ($executionResult in $executionResults) {
+        $executionMap[[string]$executionResult.ComputerName] = $executionResult
+    }
+    $orderedResults = New-Object 'System.Collections.Generic.List[object]'
+    for ($index = 0; $index -lt $request.Computers.Count; $index++) {
+        $computer = $request.Computers[$index]
+        $result = if ($preflightFailures.ContainsKey($computer)) { $preflightFailures[$computer] } else { $executionMap[$computer] }
+        if ($null -eq $result) {
+            $missingTime = [datetime]::UtcNow
+            $result = ConvertTo-AdminDetailedTargetResult -Index $index -ComputerName $computer -Transport $transportName -StartedAtUtc $missingTime -FinishedAtUtc $missingTime -Status Failed -ErrorCategory Internal -ErrorMessage 'The target completed without a deterministic result.'
+        }
+        $result.Index = $index
+        $orderedResults.Add($result) | Out-Null
+    }
+
+    $aggregate = Get-AdminAutomationOutcome -TargetResults $orderedResults.ToArray()
+    if ($aggregate.PartialCount -gt 0) {
+        $warnings.Add("$($aggregate.PartialCount) target(s) returned a partial action result.") | Out-Null
+    }
+    if ($aggregate.FailedCount -gt 0) {
+        $warnings.Add("$($aggregate.FailedCount) target(s) failed.") | Out-Null
+    }
+    if ($aggregate.TimeoutCount -gt 0) {
+        $warnings.Add("$($aggregate.TimeoutCount) target(s) timed out.") | Out-Null
+    }
+
+    $finishedAtUtc = [datetime]::UtcNow
+    Write-AdminLog -Message ("Automation run {0} finished with outcome {1}." -f $runId, $aggregate.Outcome) -NoConsole
+    return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -ActionId $request.ActionId -ActionName $request.ActionName -ReadOnly $request.ReadOnly -TargetMode $request.TargetMode -Transport $transportName -Authentication $transportAuthentication -UseSsl $transportUseSsl -Status $aggregate.Status -Outcome $aggregate.Outcome -ExitCode $aggregate.ExitCode -RequestedTargetCount $request.Computers.Count -TargetResults $orderedResults.ToArray() -Warnings $warnings.ToArray() -ReportPaths $reportPaths
+}
+
 function Show-AdminResult {
     [CmdletBinding()]
     param(
@@ -2714,6 +4720,26 @@ function Invoke-WindowsAdminToolkit {
 
     if (-not (Test-WindowsPlatform)) {
         throw 'Windows Admin Toolkit runs only on Windows.'
+    }
+
+    if ($null -ne $Script:State.Credential -and $Script:State.Credential -isnot [System.Management.Automation.PSCredential]) {
+        if ($Script:State.Transport -eq 'PsExec') {
+            throw 'PsExec does not accept alternate credentials in this toolkit.'
+        }
+        if ($Script:State.Credential -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$Script:State.Credential)) {
+            throw 'Credential must be a PSCredential object or a nonempty username in interactive mode.'
+        }
+
+        $credentialUserName = ([string]$Script:State.Credential).Trim()
+        $Script:State.Credential = Get-Credential -UserName $credentialUserName -Message 'Enter credentials for authorized WinRM access'
+        if (-not $Script:State.Credential) {
+            throw 'Credential entry was cancelled.'
+        }
+    }
+
+    $configurationError = Get-AdminRuntimeConfigurationError
+    if (-not [string]::IsNullOrWhiteSpace($configurationError)) {
+        throw $configurationError
     }
 
     [void](Initialize-AdminLog -RequestedPath $LogFile)
@@ -2795,6 +4821,85 @@ function Invoke-WindowsAdminToolkit {
 }
 
 if (-not $Script:WasDotSourced) {
+    if ($Automation) {
+        $ProgressPreference = 'SilentlyContinue'
+        $VerbosePreference = 'SilentlyContinue'
+        $DebugPreference = 'SilentlyContinue'
+        $InformationPreference = 'SilentlyContinue'
+        $WarningPreference = 'SilentlyContinue'
+
+        try {
+            $resolvedOutputPath = Resolve-AdminAutomationOutputPath -LiteralPath $JsonOutputPath
+        }
+        catch {
+            $failureStartedAtUtc = [datetime]::UtcNow
+            $failureRequestedActionId = Get-AdminSafeActionId -ActionId $Action
+            $failureCatalogItem = if ($failureRequestedActionId) { Get-AdminActionCatalogItem -ActionId $failureRequestedActionId } else { $null }
+            $failureActionId = if ($failureCatalogItem) { $failureCatalogItem.Id } else { $null }
+            $failureActionName = if ($failureCatalogItem) { $failureCatalogItem.Name } else { $null }
+            $failureReadOnly = if ($failureCatalogItem -and $failureCatalogItem.Classification -ne 'Conditional') { [bool]$failureCatalogItem.ReadOnly } else { $null }
+            $failureTargetSummary = Get-AdminRequestedTargetSummary -Parameters $Script:InvocationParameters
+            $failureEnvelope = ConvertTo-AdminAutomationEnvelope -RunId ([guid]::NewGuid()) -StartedAtUtc $failureStartedAtUtc -FinishedAtUtc ([datetime]::UtcNow) -ActionId $failureActionId -ActionName $failureActionName -ReadOnly $failureReadOnly -TargetMode $failureTargetSummary.TargetMode -Transport $failureTargetSummary.Transport -Authentication $failureTargetSummary.Authentication -UseSsl $failureTargetSummary.UseSsl -Status ValidationFailed -Outcome ValidationFailure -ExitCode $Script:AutomationExitCodes.ValidationFailure -RequestedTargetCount $failureTargetSummary.RequestedTargetCount -Errors @([pscustomobject]@{ Category = 'Validation'; Message = $_.Exception.Message })
+            [Console]::Error.WriteLine((ConvertTo-AdminAutomationJson -Envelope $failureEnvelope))
+            exit $Script:AutomationExitCodes.ValidationFailure
+        }
+
+        $automationEnvelope = $null
+        try {
+            $automationInvokeParameters = @{
+                Parameters         = $Script:InvocationParameters
+                ResolvedOutputPath = $resolvedOutputPath
+                Confirm            = $false
+            }
+            if ($WhatIfPreference) {
+                $automationInvokeParameters.WhatIf = $true
+            }
+            $automationEnvelope = Invoke-AdminAutomation @automationInvokeParameters
+            $automationJson = ConvertTo-AdminAutomationJson -Envelope $automationEnvelope
+            if ($resolvedOutputPath -ceq '-') {
+                [Console]::Out.WriteLine($automationJson)
+            }
+            else {
+                [void](Write-AdminUtf8File -LiteralPath $resolvedOutputPath -Content $automationJson -EmitBom $false)
+            }
+            exit ([int]$automationEnvelope.exitCode)
+        }
+        catch {
+            $failureStartedAtUtc = [datetime]::UtcNow
+            try {
+                $failureEnvelope = if ($null -ne $automationEnvelope) {
+                    ConvertTo-AdminOutputSinkFailureEnvelope -OriginalEnvelope $automationEnvelope -Message ("The requested JSON output sink failed: {0}" -f $_.Exception.Message)
+                }
+                else {
+                    ConvertTo-AdminAutomationEnvelope -RunId ([guid]::NewGuid()) -StartedAtUtc $failureStartedAtUtc -FinishedAtUtc ([datetime]::UtcNow) -ActionId (Get-AdminSafeActionId -ActionId $Action) -Status InternalFailure -Outcome InternalFailure -ExitCode $Script:AutomationExitCodes.InternalFailure -Errors @([pscustomobject]@{ Category = 'Internal'; Message = $_.Exception.Message })
+                }
+                [Console]::Error.WriteLine((ConvertTo-AdminAutomationJson -Envelope $failureEnvelope))
+            }
+            catch {
+                [Console]::Error.WriteLine('Windows Admin Toolkit encountered an internal automation failure.')
+            }
+            exit $Script:AutomationExitCodes.InternalFailure
+        }
+    }
+
+    $automationOnlyParameters = @(
+        'Action',
+        'ListActions',
+        'Local',
+        'ComputerName',
+        'ComputerListPath',
+        'JsonOutputPath',
+        'ConfirmationText',
+        'TargetListConfirmationText',
+        'PsExecConfirmationText'
+    ) + $Script:AutomationInputNames
+    foreach ($parameterName in $automationOnlyParameters) {
+        if (Test-AdminParameterBound -Parameters $Script:InvocationParameters -Name $parameterName) {
+            Write-Error "Parameter -$parameterName requires -Automation."
+            exit 1
+        }
+    }
+
     $invokeParameters = @{}
     if ($WhatIfPreference) {
         $invokeParameters.WhatIf = $true

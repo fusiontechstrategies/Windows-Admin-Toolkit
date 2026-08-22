@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "1.0",
+  "toolkitVersion": "2.1.0",
+  "runId": "44444444-4444-4444-8444-444444444444",
+  "startedAtUtc": "2026-08-22T14:03:00.000Z",
+  "finishedAtUtc": "2026-08-22T14:33:00.000Z",
+  "durationMs": 1800000,
+  "actionId": "SoftwareInventory",
+  "actionName": "Installed Software",
+  "readOnly": true,
+  "stateChanging": false,
+  "targetMode": "Remote",
+  "transport": { "name": "WinRM", "authentication": "Kerberos", "useSsl": false },
+  "status": "TimedOut",
+  "outcome": "Timeout",
+  "exitCode": 5,
+  "targetCount": 1,
+  "recordCount": 0,
+  "targets": [
+    {
+      "target": "server03.example.com",
+      "status": "TimedOut",
+      "startedAtUtc": "2026-08-22T14:03:00.100Z",
+      "finishedAtUtc": "2026-08-22T14:33:00.000Z",
+      "durationMs": 1799900,
+      "attempts": 2,
+      "errorCategory": "Timeout",
+      "errorMessage": "Operation timed out after 1800 seconds.",
+      "data": []
+    }
+  ],
+  "warnings": ["1 target(s) timed out."],
+  "errors": [],
+  "reportPaths": [],
+  "actions": []
+}

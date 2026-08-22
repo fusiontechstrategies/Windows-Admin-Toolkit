@@ -1,0 +1,38 @@
+{
+  "schemaVersion": "1.0",
+  "toolkitVersion": "2.1.0",
+  "runId": "11111111-1111-4111-8111-111111111111",
+  "startedAtUtc": "2026-08-22T14:00:00.000Z",
+  "finishedAtUtc": "2026-08-22T14:00:00.250Z",
+  "durationMs": 250,
+  "actionId": "SystemInfo",
+  "actionName": "OS Version and Uptime",
+  "readOnly": true,
+  "stateChanging": false,
+  "targetMode": "Local",
+  "transport": { "name": "Local", "authentication": null, "useSsl": false },
+  "status": "Succeeded",
+  "outcome": "CompleteSuccess",
+  "exitCode": 0,
+  "targetCount": 1,
+  "recordCount": 1,
+  "targets": [
+    {
+      "target": "ADMIN-WS01",
+      "status": "Success",
+      "startedAtUtc": "2026-08-22T14:00:00.025Z",
+      "finishedAtUtc": "2026-08-22T14:00:00.225Z",
+      "durationMs": 200,
+      "attempts": 1,
+      "errorCategory": null,
+      "errorMessage": null,
+      "data": [
+        { "ComputerName": "ADMIN-WS01", "OSName": "Microsoft Windows 11 Pro", "Status": "Success" }
+      ]
+    }
+  ],
+  "warnings": [],
+  "errors": [],
+  "reportPaths": [],
+  "actions": []
+}
