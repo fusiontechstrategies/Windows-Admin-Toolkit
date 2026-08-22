@@ -1,6 +1,6 @@
 # Enterprise auditability
 
-Windows Admin Toolkit 2.3.0 adds opt-in, machine-readable audit records for automation runs. Audit output is designed for SIEM, RMM, ticketing, and change-review pipelines without changing the toolkit's authorization model or silently modifying Windows configuration.
+Windows Admin Toolkit 3.0.0 retains the 2.3 opt-in, machine-readable audit contract for direct automation runs. Audit output is designed for SIEM, RMM, ticketing, and change-review pipelines without changing the toolkit's authorization model or silently modifying Windows configuration.
 
 Auditing does not grant access, configure remoting, register an Event Log source, replace a policy decision, replace `ShouldProcess`, or replace an exact confirmation phrase.
 
@@ -168,3 +168,5 @@ Audit records intentionally exclude:
 Audit records may contain target names, policy profile names, action IDs, statuses, timings, and bounded normalized errors. Protect audit files accordingly.
 
 The synthetic result and JSON Lines examples are in [`examples/automation/results/audited-success.json`](examples/automation/results/audited-success.json) and [`examples/audit/audited-success.jsonl`](examples/audit/audited-success.jsonl).
+
+Controlled plan operations do not accept `AuditPath`, `AuditEventLog`, or `AuditEventSource` in orchestration schema 1.0. Their approved plan, result, and atomic checkpoint are recovery and change evidence, but they are not substitutes for this direct-run audit stream or an external change-system audit trail. Retain plan artifacts, checkpoint history, ordinary logs, result envelopes, and external approval evidence together as described in [ORCHESTRATION.md](ORCHESTRATION.md).

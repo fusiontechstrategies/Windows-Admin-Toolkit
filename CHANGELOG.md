@@ -24,13 +24,21 @@ The format follows Keep a Changelog principles, and the project uses Semantic Ve
 - Audit schema version 1.0, SIEM-oriented terminal summaries, and documented `WAT-AUDIT-SUMMARY-1` SHA-256 canonicalization
 - A complete synthetic audited result and six-record JSON Lines lifecycle example
 - Automation regression coverage under Windows PowerShell 5.1 and PowerShell 7.x
+- Controlled orchestration with separate `Create`, `Approve`, `Execute`, and `Resume` operations
+- Strict plan schema version 1.0 with canonical action, input, ordered-target, transport, policy, and safety snapshots
+- Full SHA-256 plan hashes under `WAT-PLAN-1` and separately hashed approval metadata under `WAT-PLAN-APPROVAL-1`
+- Atomic checkpoint schema version 1.0 with explicit per-target lifecycle states, one-attempt evidence, deterministic summaries, and `WAT-CHECKPOINT-1` hashes
+- Orchestration result schema version 1.0 and four internally consistent synthetic plan, checkpoint, and result examples
+- Release-candidate automation with optional SHA-256 Authenticode signing, verified `SHA256SUMS.txt`, and an SPDX 2.3 JSON SBOM
+- Complete orchestration, recovery, release-integrity, security, and responsible-use guidance
 
 ### Changed
 
 - Refactored interactive and automation modes to share one action catalog and one execution implementation
 - Added deterministic per-target timing, attempts, normalized errors, and concurrency-order restoration
-- Increased the dependency-free native suite to 570 deterministic checks per PowerShell edition
-- Updated the toolkit version to 2.3.0 and the automation result contract to schema version 1.2
+- Increased the dependency-free native suite to 643 deterministic checks per PowerShell edition
+- Updated the toolkit version to 3.0.0 while retaining the direct automation result contract at schema version 1.2
+- Made controlled orchestration sequential at one-target checkpoint granularity so interruption recovery has deterministic boundaries
 
 ### Fixed
 
@@ -66,6 +74,13 @@ The format follows Keep a Changelog principles, and the project uses Semantic Ve
 - Flushed target-start evidence before connectivity or requested-action execution and converted configured audit-sink failures into visible non-success results
 - Excluded credentials, custom source, raw action data, and raw custom output from audit records
 - Kept Windows Event Log integration off by default and prohibited automatic source registration or configuration changes
+- Made plan and checkpoint parsing strict UTF-8 security boundaries with hard size limits, duplicate-key and case-conflict detection, unknown-property rejection, canonical identifiers and timestamps, and hash verification
+- Required exact full-plan-hash phrases for approval, execution, and resume while preserving action-specific, large-target, PsExec, policy, `ShouldProcess`, `WhatIf`, protected-resource, and no-retry safeguards
+- Rejected execution-time overrides of approved actions, inputs, targets, transports, policies, and safety settings and re-resolved the complete contract before target work
+- Limited version 1 plans to the current Windows identity and excluded both unsandboxed custom-code actions
+- Bound referenced policy and PsExec files by canonical path and SHA-256, with existing PsExec signer, product, and version checks repeated before execution
+- Prevented Resume from automatically repeating completed, failed, timed-out, skipped, unknown, or interrupted in-progress targets
+- Kept signing keys, certificate provisioning, trust configuration, tagging, upload, and publication outside automated release tooling
 
 ## [2.0.0] - 2026-08-12
 

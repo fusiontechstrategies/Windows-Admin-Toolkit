@@ -140,12 +140,16 @@ exit `$LASTEXITCODE
     }
 }
 
-Test-ToolkitAssertion -Condition ($Script:ToolkitVersion -eq '2.3.0') -Name 'Version is 2.3.0'
+Test-ToolkitAssertion -Condition ($Script:ToolkitVersion -eq '3.0.0') -Name 'Version is 3.0.0'
 Test-ToolkitAssertion -Condition ($Script:ActionCatalog.Count -eq 20) -Name 'Action catalog contains 20 actions'
 Test-ToolkitAssertion -Condition ($Script:ActionScripts.Count -eq 20) -Name 'Action script registry contains 20 scripts'
 Test-ToolkitAssertion -Condition ($Script:AutomationSchemaVersion -eq '1.2') -Name 'Automation schema version is 1.2'
 Test-ToolkitAssertion -Condition ($Script:PolicySchemaVersion -eq '1.0') -Name 'Policy schema version is 1.0'
 Test-ToolkitAssertion -Condition ($Script:AuditSchemaVersion -eq '1.0') -Name 'Audit schema version is 1.0'
+Test-ToolkitAssertion -Condition ($Script:PlanSchemaVersion -eq '1.0') -Name 'Orchestration plan schema version is 1.0'
+Test-ToolkitAssertion -Condition ($Script:CheckpointSchemaVersion -eq '1.0') -Name 'Orchestration checkpoint schema version is 1.0'
+Test-ToolkitAssertion -Condition ($Script:OrchestrationResultSchemaVersion -eq '1.0') -Name 'Orchestration result schema version is 1.0'
+Test-ToolkitAssertion -Condition ($Script:PlanCanonicalization -ceq 'WAT-PLAN-1' -and $Script:PlanApprovalCanonicalization -ceq 'WAT-PLAN-APPROVAL-1' -and $Script:CheckpointCanonicalization -ceq 'WAT-CHECKPOINT-1') -Name 'Orchestration canonicalization identifiers are versioned and stable'
 
 $expectedActionIds = @(
     'SystemInfo',
@@ -971,6 +975,25 @@ try {
     Test-ToolkitAssertion -Condition (@($auditSchema.properties.eventType.enum).Count -eq 7) -Name 'Committed audit schema enumerates every lifecycle event type'
     Test-ToolkitAssertion -Condition ($auditSchema.'$defs'.summary.properties.summaryHash.pattern -ceq '^[0-9a-f]{64}$') -Name 'Committed audit schema requires a lowercase SHA-256 summary hash'
 
+    $planSchemaPath = Join-Path $projectRoot 'schemas\orchestration-plan-v1.schema.json'
+    $planSchema = Get-Content -LiteralPath $planSchemaPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    Test-ToolkitAssertion -Condition ($planSchema.properties.schemaVersion.const -ceq '1.0' -and $planSchema.properties.toolkitVersion.const -ceq '3.0.0') -Name 'Committed orchestration plan schema locks its public versions'
+    Test-ToolkitAssertion -Condition (-not [bool]$planSchema.additionalProperties -and -not [bool]$planSchema.'$defs'.request.additionalProperties) -Name 'Orchestration plan schema rejects unknown root and request properties'
+    Test-ToolkitAssertion -Condition (@($planSchema.'$defs'.stableActionId.enum).Count -eq 18 -and @($planSchema.'$defs'.stableActionId.enum | Where-Object { $_ -in @('CustomCommand', 'CustomPowerShell') }).Count -eq 0) -Name 'Orchestration plan schema excludes both unsandboxed custom-code actions'
+    Test-ToolkitAssertion -Condition ($planSchema.'$defs'.request.properties.targets.maxItems -eq 500 -and ($planSchema.'$defs'.approval.properties.status.enum -join '|') -ceq 'Pending|Approved') -Name 'Orchestration plan schema bounds targets and approval states'
+
+    $checkpointSchemaPath = Join-Path $projectRoot 'schemas\orchestration-checkpoint-v1.schema.json'
+    $checkpointSchema = Get-Content -LiteralPath $checkpointSchemaPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    Test-ToolkitAssertion -Condition ($checkpointSchema.properties.schemaVersion.const -ceq '1.0' -and $checkpointSchema.properties.toolkitVersion.const -ceq '3.0.0') -Name 'Committed checkpoint schema locks its public versions'
+    Test-ToolkitAssertion -Condition (($checkpointSchema.'$defs'.lifecycleTarget.properties.state.enum -join '|') -ceq 'Pending|InProgress|Completed|Failed|TimedOut|Skipped|Unknown') -Name 'Checkpoint schema enumerates every explicit lifecycle state'
+    Test-ToolkitAssertion -Condition ($checkpointSchema.'$defs'.lifecycleTarget.properties.attempts.maximum -eq 1 -and $checkpointSchema.properties.targets.maxItems -eq 500) -Name 'Checkpoint schema prohibits repeated orchestration attempts and bounds targets'
+
+    $orchestrationResultSchemaPath = Join-Path $projectRoot 'schemas\orchestration-result-v1.schema.json'
+    $orchestrationResultSchema = Get-Content -LiteralPath $orchestrationResultSchemaPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    Test-ToolkitAssertion -Condition ($orchestrationResultSchema.properties.schemaVersion.const -ceq '1.0' -and $orchestrationResultSchema.properties.toolkitVersion.const -ceq '3.0.0') -Name 'Committed orchestration result schema locks its public versions'
+    Test-ToolkitAssertion -Condition (($orchestrationResultSchema.properties.operation.enum -join '|') -ceq 'Create|Approve|Execute|Resume|Unknown') -Name 'Orchestration result schema enumerates every plan operation'
+    Test-ToolkitAssertion -Condition (@($orchestrationResultSchema.allOf).Count -eq 9 -and @($orchestrationResultSchema.required).Count -eq 20) -Name 'Orchestration result schema locks all outcomes and stable root fields'
+
     $exampleDirectory = Join-Path $projectRoot 'examples\automation\results'
     $exampleFiles = @(Get-ChildItem -LiteralPath $exampleDirectory -Filter '*.json' -File | Sort-Object -Property Name)
     Test-ToolkitAssertion -Condition ($exampleFiles.Count -eq 9) -Name 'Repository includes nine documented automation, policy, and audit outcome examples'
@@ -992,7 +1015,7 @@ try {
         Test-ToolkitAssertion -Condition (@($requiredRootFields | Where-Object { $_ -notin $presentFields }).Count -eq 0) -Name "Example $($exampleFile.Name) contains all stable root fields"
         Test-ToolkitAssertion -Condition ($example.outcome -eq $expectedExampleOutcomes[$exampleFile.BaseName]) -Name "Example $($exampleFile.Name) uses its documented outcome"
         Test-ToolkitAssertion -Condition (@($example.targets).Count -le [int]$example.targetCount) -Name "Example $($exampleFile.Name) preserves bounded target arrays"
-        Test-ToolkitAssertion -Condition ($example.schemaVersion -ceq '1.2' -and $example.toolkitVersion -ceq '2.3.0') -Name "Example $($exampleFile.Name) uses the current public versions"
+        Test-ToolkitAssertion -Condition ($example.schemaVersion -ceq '1.2' -and $example.toolkitVersion -ceq '3.0.0') -Name "Example $($exampleFile.Name) uses the current public versions"
         Test-ToolkitAssertion -Condition (@($example.policy.PSObject.Properties.Name | Where-Object { $_ -in @('applied', 'schemaVersion', 'profileName', 'decision', 'reasonCode', 'reason') }).Count -eq 6) -Name "Example $($exampleFile.Name) contains a complete policy decision"
         Test-ToolkitAssertion -Condition (@($example.audit.PSObject.Properties.Name).Count -eq 10) -Name "Example $($exampleFile.Name) contains complete audit metadata"
         Test-ToolkitAssertion -Condition (@($example.targets | Where-Object { $_.targetId -notmatch '^t-[0-9a-f]{24}$' }).Count -eq 0) -Name "Example $($exampleFile.Name) uses valid stable target identifiers"
@@ -1012,11 +1035,266 @@ try {
     $auditExampleText = [System.IO.File]::ReadAllText($auditExamplePath)
     Test-ToolkitAssertion -Condition ($auditExampleText -notmatch 'Credential|SecureString|ScriptBlock|CommandText|PowerShellText|rawOutput') -Name 'Audit example excludes credentials, custom code, and raw output fields'
 
+    $orchestrationExampleDirectory = Join-Path $projectRoot 'examples\orchestration'
+    $orchestrationExampleFiles = @(Get-ChildItem -LiteralPath $orchestrationExampleDirectory -File | Sort-Object -Property Name)
+    Test-ToolkitAssertion -Condition ($orchestrationExampleFiles.Count -eq 4) -Name 'Repository includes four internally consistent orchestration examples'
+    $pendingPlanExample = Import-AdminOrchestrationPlan -LiteralPath (Join-Path $orchestrationExampleDirectory 'pending-system-info.watplan.json')
+    $approvedPlanExample = Import-AdminOrchestrationPlan -LiteralPath (Join-Path $orchestrationExampleDirectory 'approved-system-info.watplan.json')
+    $checkpointExample = Import-AdminOrchestrationCheckpoint -LiteralPath (Join-Path $orchestrationExampleDirectory 'completed-system-info.watcheckpoint.json') -Plan $approvedPlanExample
+    $orchestrationResultExample = Get-Content -LiteralPath (Join-Path $orchestrationExampleDirectory 'completed-system-info-result.json') -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    Test-ToolkitAssertion -Condition ($pendingPlanExample.approval.status -ceq 'Pending' -and $approvedPlanExample.approval.status -ceq 'Approved' -and $pendingPlanExample.planHash.value -ceq $approvedPlanExample.planHash.value) -Name 'Pending and approved examples preserve one immutable execution contract'
+    Test-ToolkitAssertion -Condition ((Get-AdminPlanHash -Plan $approvedPlanExample) -ceq $approvedPlanExample.planHash.value -and (Get-AdminPlanApprovalHash -Approval $approvedPlanExample.approval) -ceq $approvedPlanExample.approval.approvalHash) -Name 'Approved example plan and approval hashes recompute canonically'
+    Test-ToolkitAssertion -Condition ($checkpointExample.summary.completedCount -eq 1 -and $checkpointExample.targets[0].attempts -eq 1 -and (Get-AdminCheckpointHash -Checkpoint $checkpointExample) -ceq $checkpointExample.checkpointHash.value) -Name 'Checkpoint example has a verifiable single-attempt completed lifecycle'
+    Test-ToolkitAssertion -Condition ($orchestrationResultExample.operation -ceq 'Execute' -and $orchestrationResultExample.outcome -ceq 'CompleteSuccess' -and $orchestrationResultExample.planHash -ceq $approvedPlanExample.planHash.value -and $orchestrationResultExample.checkpointHash -ceq $checkpointExample.checkpointHash.value) -Name 'Orchestration result example correlates the approved plan and checkpoint hashes'
+    Test-ToolkitAssertion -Condition (@($orchestrationExampleFiles | Where-Object { $bytes = [System.IO.File]::ReadAllBytes($_.FullName); $bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF }).Count -eq 0) -Name 'Orchestration examples use UTF-8 without a byte-order mark'
+    $partialLifecycleTargets = @([pscustomobject]@{ state = 'Completed'; resultOutcome = 'PartialSuccess' })
+    $partialLifecycleOutcome = Get-AdminOrchestrationExecutionOutcome -Summary (Get-AdminLifecycleSummary -Target $partialLifecycleTargets) -Target $partialLifecycleTargets
+    Test-ToolkitAssertion -Condition ($partialLifecycleOutcome.Outcome -ceq 'PartialSuccess' -and $partialLifecycleOutcome.ExitCode -eq 1) -Name 'Completed orchestration target with a partial action result remains partial overall'
+    $validationSkippedTargets = @([pscustomobject]@{ state = 'Skipped'; resultOutcome = 'ValidationFailure' })
+    $validationSkippedOutcome = Get-AdminOrchestrationExecutionOutcome -Summary (Get-AdminLifecycleSummary -Target $validationSkippedTargets) -Target $validationSkippedTargets
+    Test-ToolkitAssertion -Condition ($validationSkippedOutcome.Outcome -ceq 'ValidationFailure' -and $validationSkippedOutcome.ExitCode -eq 2) -Name 'Skipped orchestration validation retains validation exit semantics'
+
     $currentEnginePath = (Get-Process -Id $PID -ErrorAction Stop).Path
     $automationLogPath = Join-Path $resolvedTemporaryRoot 'automation-tests.log'
     $escapedAutomationLogPath = $automationLogPath.Replace("'", "''")
     $escapedReadOnlyPolicyPath = $readOnlyPolicyPath.Replace("'", "''")
     $escapedHelpdeskPolicyPath = $helpdeskPolicyPath.Replace("'", "''")
+
+    $unknownPlanOperationProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText '-Automation -PlanOperation NoSuchOperation'
+    $unknownPlanOperationEnvelope = ConvertFrom-Json -InputObject $unknownPlanOperationProcess.StdOut.Trim() -ErrorAction Stop
+    Test-ToolkitAssertion -Condition ($unknownPlanOperationProcess.ExitCode -eq 2 -and $unknownPlanOperationEnvelope.operation -ceq 'Unknown' -and $unknownPlanOperationEnvelope.outcome -ceq 'ValidationFailure') -Name 'Unknown plan operation returns the orchestration validation contract'
+
+    $planWithoutAutomationPath = Join-Path $resolvedTemporaryRoot 'without-automation.watplan.json'
+    $escapedPlanWithoutAutomationPath = $planWithoutAutomationPath.Replace("'", "''")
+    $planWithoutAutomationProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-PlanOperation Create -PlanPath '$escapedPlanWithoutAutomationPath'" -TimeoutSeconds 10
+    Test-ToolkitAssertion -Condition ($planWithoutAutomationProcess.ExitCode -eq 1 -and -not (Test-Path -LiteralPath $planWithoutAutomationPath)) -Name 'Plan parameters require explicit automation mode without entering the menu'
+
+    $customPlanPath = Join-Path $resolvedTemporaryRoot 'custom-code.watplan.json'
+    $escapedCustomPlanPath = $customPlanPath.Replace("'", "''")
+    $customPlanProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -PlanOperation Create -PlanPath '$escapedCustomPlanPath' -Action CustomPowerShell -Local -PowerShellText 'Get-Date'"
+    $customPlanEnvelope = ConvertFrom-Json -InputObject $customPlanProcess.StdOut.Trim() -ErrorAction Stop
+    Test-ToolkitAssertion -Condition ($customPlanProcess.ExitCode -eq 2 -and $customPlanEnvelope.outcome -ceq 'ValidationFailure' -and -not (Test-Path -LiteralPath $customPlanPath)) -Name 'Plan creation rejects unsandboxed custom PowerShell without writing a plan'
+
+    $auditedPlanPath = Join-Path $resolvedTemporaryRoot 'audited-plan.watplan.json'
+    $auditedPlanAuditPath = Join-Path $resolvedTemporaryRoot 'audited-plan.jsonl'
+    $escapedAuditedPlanPath = $auditedPlanPath.Replace("'", "''")
+    $escapedAuditedPlanAuditPath = $auditedPlanAuditPath.Replace("'", "''")
+    $auditedPlanProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -PlanOperation Create -PlanPath '$escapedAuditedPlanPath' -Action SystemInfo -Local -AuditPath '$escapedAuditedPlanAuditPath'"
+    $auditedPlanEnvelope = ConvertFrom-Json -InputObject $auditedPlanProcess.StdOut.Trim() -ErrorAction Stop
+    Test-ToolkitAssertion -Condition ($auditedPlanProcess.ExitCode -eq 2 -and $auditedPlanEnvelope.errors[0].message -match 'AuditPath' -and -not (Test-Path -LiteralPath $auditedPlanPath) -and -not (Test-Path -LiteralPath $auditedPlanAuditPath)) -Name 'Plan creation keeps checkpoint evidence separate from direct-run audit sinks'
+
+    $pendingPlanPath = Join-Path $resolvedTemporaryRoot 'system-info-pending.watplan.json'
+    $approvedPlanPath = Join-Path $resolvedTemporaryRoot 'system-info-approved.watplan.json'
+    $checkpointPath = Join-Path $resolvedTemporaryRoot 'system-info.watcheckpoint.json'
+    $escapedPendingPlanPath = $pendingPlanPath.Replace("'", "''")
+    $escapedApprovedPlanPath = $approvedPlanPath.Replace("'", "''")
+    $escapedCheckpointPath = $checkpointPath.Replace("'", "''")
+    $createPlanProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -PlanOperation Create -PlanPath '$escapedPendingPlanPath' -Action SystemInfo -Local -LogFile '$escapedAutomationLogPath'"
+    $createPlanEnvelope = ConvertFrom-Json -InputObject $createPlanProcess.StdOut.Trim() -ErrorAction Stop
+    $pendingPlan = Import-AdminOrchestrationPlan -LiteralPath $pendingPlanPath
+    Test-ToolkitAssertion -Condition ($createPlanProcess.ExitCode -eq 0 -and $createPlanEnvelope.operation -ceq 'Create' -and $createPlanEnvelope.status -ceq 'Planned' -and $createPlanEnvelope.planHash -ceq $pendingPlan.planHash.value) -Name 'Plan creation writes a pending immutable request and returns its full hash'
+    Test-ToolkitAssertion -Condition ($pendingPlan.approval.status -ceq 'Pending' -and $pendingPlan.request.actionId -ceq 'SystemInfo' -and $pendingPlan.request.targetMode -ceq 'Local' -and $pendingPlan.request.safety.identityMode -ceq 'CurrentWindowsIdentity') -Name 'Created plan records the canonical action, local target, and current-identity boundary'
+    $pendingPlanBytes = [System.IO.File]::ReadAllBytes($pendingPlanPath)
+    Test-ToolkitAssertion -Condition ($pendingPlanBytes.Length -gt 0 -and $pendingPlanBytes[0] -eq [byte][char]'{' -and -not ($pendingPlanBytes.Length -ge 3 -and $pendingPlanBytes[0] -eq 0xEF -and $pendingPlanBytes[1] -eq 0xBB -and $pendingPlanBytes[2] -eq 0xBF)) -Name 'Created plan uses bounded UTF-8 without a byte-order mark'
+    Test-ToolkitAssertion -Condition ((Get-AdminPlanHash -Plan $pendingPlan) -ceq $pendingPlan.planHash.value -and $pendingPlan.approval.planHash -ceq $pendingPlan.planHash.value) -Name 'Created plan hash recomputes over the complete immutable request'
+
+    $pendingPlanFileHashBeforeReuse = (Get-FileHash -LiteralPath $pendingPlanPath -Algorithm SHA256).Hash
+    $reusePlanProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -PlanOperation Create -PlanPath '$escapedPendingPlanPath' -Action SystemInfo -Local"
+    $reusePlanEnvelope = ConvertFrom-Json -InputObject $reusePlanProcess.StdOut.Trim() -ErrorAction Stop
+    $pendingPlanFileHashAfterReuse = (Get-FileHash -LiteralPath $pendingPlanPath -Algorithm SHA256).Hash
+    Test-ToolkitAssertion -Condition ($reusePlanProcess.ExitCode -eq 2 -and $reusePlanEnvelope.outcome -ceq 'ValidationFailure' -and $pendingPlanFileHashBeforeReuse -eq $pendingPlanFileHashAfterReuse) -Name 'Plan creation refuses overwrite and preserves the reviewed source bytes'
+
+    $planHash = [string]$pendingPlan.planHash.value
+    $pendingExecutePath = Join-Path $resolvedTemporaryRoot 'pending-execute.watcheckpoint.json'
+    $escapedPendingExecutePath = $pendingExecutePath.Replace("'", "''")
+    $pendingExecuteProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -PlanOperation Execute -PlanPath '$escapedPendingPlanPath' -CheckpointPath '$escapedPendingExecutePath' -PlanApprovalText 'EXECUTE PLAN $planHash'"
+    $pendingExecuteEnvelope = ConvertFrom-Json -InputObject $pendingExecuteProcess.StdOut.Trim() -ErrorAction Stop
+    Test-ToolkitAssertion -Condition ($pendingExecuteProcess.ExitCode -eq 3 -and $pendingExecuteEnvelope.outcome -ceq 'AuthorizationFailure' -and -not (Test-Path -LiteralPath $pendingExecutePath)) -Name 'A pending plan cannot execute or create a checkpoint'
+
+    $wrongApproveProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -PlanOperation Approve -PlanPath '$escapedPendingPlanPath' -ApprovedPlanPath '$escapedApprovedPlanPath' -ApprovedBy 'Synthetic Approver' -ApprovalReference 'CHG-TEST-001' -PlanApprovalText 'APPROVE PLAN wrong'"
+    $wrongApproveEnvelope = ConvertFrom-Json -InputObject $wrongApproveProcess.StdOut.Trim() -ErrorAction Stop
+    Test-ToolkitAssertion -Condition ($wrongApproveProcess.ExitCode -eq 3 -and $wrongApproveEnvelope.outcome -ceq 'AuthorizationFailure' -and -not (Test-Path -LiteralPath $approvedPlanPath)) -Name 'Plan approval requires the exact complete reviewed hash'
+
+    $pendingPlanSourceHashBeforeApproval = (Get-FileHash -LiteralPath $pendingPlanPath -Algorithm SHA256).Hash
+    $approvePlanProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -PlanOperation Approve -PlanPath '$escapedPendingPlanPath' -ApprovedPlanPath '$escapedApprovedPlanPath' -ApprovedBy 'Synthetic Approver' -ApprovalReference 'CHG-TEST-001' -PlanApprovalText 'APPROVE PLAN $planHash'"
+    $approvePlanEnvelope = ConvertFrom-Json -InputObject $approvePlanProcess.StdOut.Trim() -ErrorAction Stop
+    $approvedPlan = Import-AdminOrchestrationPlan -LiteralPath $approvedPlanPath
+    $pendingPlanSourceHashAfterApproval = (Get-FileHash -LiteralPath $pendingPlanPath -Algorithm SHA256).Hash
+    Test-ToolkitAssertion -Condition ($approvePlanProcess.ExitCode -eq 0 -and $approvePlanEnvelope.status -ceq 'Approved' -and $approvedPlan.approval.status -ceq 'Approved' -and $approvedPlan.planHash.value -ceq $planHash) -Name 'Approval writes a new approved artifact without changing the execution contract'
+    Test-ToolkitAssertion -Condition ($pendingPlanSourceHashBeforeApproval -eq $pendingPlanSourceHashAfterApproval -and $approvedPlan.approval.approvedBy -ceq 'Synthetic Approver' -and $approvedPlan.approval.reference -ceq 'CHG-TEST-001') -Name 'Approval preserves pending source bytes and records bounded review metadata'
+    Test-ToolkitAssertion -Condition ((Get-AdminPlanApprovalHash -Approval $approvedPlan.approval) -ceq $approvedPlan.approval.approvalHash) -Name 'Approved plan cryptographically binds its approval metadata to the plan hash'
+
+    $reapprovePath = Join-Path $resolvedTemporaryRoot 'reapproved.watplan.json'
+    $escapedReapprovePath = $reapprovePath.Replace("'", "''")
+    $reapproveProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -PlanOperation Approve -PlanPath '$escapedApprovedPlanPath' -ApprovedPlanPath '$escapedReapprovePath' -ApprovedBy 'Synthetic Approver' -ApprovalReference 'CHG-TEST-002' -PlanApprovalText 'APPROVE PLAN $planHash'"
+    $reapproveEnvelope = ConvertFrom-Json -InputObject $reapproveProcess.StdOut.Trim() -ErrorAction Stop
+    Test-ToolkitAssertion -Condition ($reapproveProcess.ExitCode -eq 2 -and $reapproveEnvelope.outcome -ceq 'ValidationFailure' -and -not (Test-Path -LiteralPath $reapprovePath)) -Name 'An approved plan cannot be silently reapproved with replacement metadata'
+
+    $wrongExecuteProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -PlanOperation Execute -PlanPath '$escapedApprovedPlanPath' -CheckpointPath '$escapedCheckpointPath' -PlanApprovalText 'EXECUTE PLAN wrong'"
+    $wrongExecuteEnvelope = ConvertFrom-Json -InputObject $wrongExecuteProcess.StdOut.Trim() -ErrorAction Stop
+    Test-ToolkitAssertion -Condition ($wrongExecuteProcess.ExitCode -eq 3 -and $wrongExecuteEnvelope.outcome -ceq 'AuthorizationFailure' -and -not (Test-Path -LiteralPath $checkpointPath)) -Name 'Execution requires an exact operation phrase and full approved hash'
+
+    $overrideExecuteProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -PlanOperation Execute -PlanPath '$escapedApprovedPlanPath' -CheckpointPath '$escapedCheckpointPath' -PlanApprovalText 'EXECUTE PLAN $planHash' -Action SystemInfo"
+    $overrideExecuteEnvelope = ConvertFrom-Json -InputObject $overrideExecuteProcess.StdOut.Trim() -ErrorAction Stop
+    Test-ToolkitAssertion -Condition ($overrideExecuteProcess.ExitCode -eq 2 -and $overrideExecuteEnvelope.errors[0].message -match 'cannot override' -and -not (Test-Path -LiteralPath $checkpointPath)) -Name 'Execution rejects even same-value action overrides outside the approved contract'
+
+    $executePlanProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -PlanOperation Execute -PlanPath '$escapedApprovedPlanPath' -CheckpointPath '$escapedCheckpointPath' -PlanApprovalText 'EXECUTE PLAN $planHash' -LogFile '$escapedAutomationLogPath'"
+    $executePlanEnvelope = ConvertFrom-Json -InputObject $executePlanProcess.StdOut.Trim() -ErrorAction Stop
+    $executedCheckpoint = Import-AdminOrchestrationCheckpoint -LiteralPath $checkpointPath -Plan $approvedPlan
+    Test-ToolkitAssertion -Condition ($executePlanProcess.ExitCode -eq 0 -and $executePlanEnvelope.operation -ceq 'Execute' -and $executePlanEnvelope.outcome -ceq 'CompleteSuccess' -and $executedCheckpoint.summary.completedCount -eq 1) -Name 'Approved local plan executes and checkpoints a complete target lifecycle'
+    Test-ToolkitAssertion -Condition ($executedCheckpoint.targets[0].state -ceq 'Completed' -and $executedCheckpoint.targets[0].attempts -eq 1 -and $executedCheckpoint.targets[0].resultExitCode -eq 0 -and (Get-AdminCheckpointHash -Checkpoint $executedCheckpoint) -ceq $executedCheckpoint.checkpointHash.value) -Name 'Completed checkpoint records one attempt and a verifiable lifecycle hash'
+    $checkpointTemporaryArtifacts = @(Get-ChildItem -LiteralPath $resolvedTemporaryRoot -File | Where-Object { $_.Name -like '.wat-checkpoint-*.tmp' -or $_.Name -like '.wat-checkpoint-backup-*.tmp' })
+    Test-ToolkitAssertion -Condition ($checkpointTemporaryArtifacts.Count -eq 0) -Name 'Atomic checkpoint writes leave no temporary or backup artifacts'
+
+    $checkpointHashBeforeExecuteReuse = (Get-FileHash -LiteralPath $checkpointPath -Algorithm SHA256).Hash
+    $executeReuseProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -PlanOperation Execute -PlanPath '$escapedApprovedPlanPath' -CheckpointPath '$escapedCheckpointPath' -PlanApprovalText 'EXECUTE PLAN $planHash'"
+    $executeReuseEnvelope = ConvertFrom-Json -InputObject $executeReuseProcess.StdOut.Trim() -ErrorAction Stop
+    $checkpointHashAfterExecuteReuse = (Get-FileHash -LiteralPath $checkpointPath -Algorithm SHA256).Hash
+    Test-ToolkitAssertion -Condition ($executeReuseProcess.ExitCode -eq 2 -and $executeReuseEnvelope.outcome -ceq 'ValidationFailure' -and $checkpointHashBeforeExecuteReuse -eq $checkpointHashAfterExecuteReuse) -Name 'Execute refuses an existing checkpoint without mutating its evidence'
+
+    $completedStartedAtUtc = [string]$executedCheckpoint.targets[0].startedAtUtc
+    $completedFinishedAtUtc = [string]$executedCheckpoint.targets[0].finishedAtUtc
+    $resumePlanProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -PlanOperation Resume -PlanPath '$escapedApprovedPlanPath' -CheckpointPath '$escapedCheckpointPath' -PlanApprovalText 'RESUME PLAN $planHash' -LogFile '$escapedAutomationLogPath'"
+    $resumePlanEnvelope = ConvertFrom-Json -InputObject $resumePlanProcess.StdOut.Trim() -ErrorAction Stop
+    $resumedCompletedCheckpoint = Import-AdminOrchestrationCheckpoint -LiteralPath $checkpointPath -Plan $approvedPlan
+    Test-ToolkitAssertion -Condition ($resumePlanProcess.ExitCode -eq 0 -and $resumePlanEnvelope.outcome -ceq 'CompleteSuccess' -and $resumedCompletedCheckpoint.targets[0].attempts -eq 1) -Name 'Resume succeeds without repeating an already completed target'
+    Test-ToolkitAssertion -Condition ([string]$resumedCompletedCheckpoint.targets[0].startedAtUtc -ceq $completedStartedAtUtc -and [string]$resumedCompletedCheckpoint.targets[0].finishedAtUtc -ceq $completedFinishedAtUtc -and $resumedCompletedCheckpoint.targets[0].state -ceq 'Completed') -Name 'Resume preserves completed target timing and terminal state exactly'
+
+    $tamperedPlanPath = Join-Path $resolvedTemporaryRoot 'tampered-request.watplan.json'
+    $tamperedPlanObject = Get-Content -LiteralPath $pendingPlanPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    $tamperedPlanObject.request.actionName = 'Tampered action name'
+    [System.IO.File]::WriteAllText($tamperedPlanPath, (ConvertTo-Json -InputObject $tamperedPlanObject -Depth 20), (New-Object System.Text.UTF8Encoding($false)))
+    Test-ToolkitThrow -Action { Import-AdminOrchestrationPlan -LiteralPath $tamperedPlanPath | Out-Null } -Name 'Plan parser rejects a changed action contract without a matching hash'
+
+    $tamperedApprovalPath = Join-Path $resolvedTemporaryRoot 'tampered-approval.watplan.json'
+    $tamperedApprovalObject = Get-Content -LiteralPath $approvedPlanPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    $tamperedApprovalObject.approval.reference = 'CHG-TAMPERED'
+    [System.IO.File]::WriteAllText($tamperedApprovalPath, (ConvertTo-Json -InputObject $tamperedApprovalObject -Depth 20), (New-Object System.Text.UTF8Encoding($false)))
+    Test-ToolkitThrow -Action { Import-AdminOrchestrationPlan -LiteralPath $tamperedApprovalPath | Out-Null } -Name 'Plan parser rejects changed approval metadata without a matching approval hash'
+
+    $unknownPlanPropertyPath = Join-Path $resolvedTemporaryRoot 'unknown-property.watplan.json'
+    $unknownPlanPropertyObject = Get-Content -LiteralPath $pendingPlanPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    $unknownPlanPropertyObject | Add-Member -NotePropertyName unexpected -NotePropertyValue $true
+    [System.IO.File]::WriteAllText($unknownPlanPropertyPath, (ConvertTo-Json -InputObject $unknownPlanPropertyObject -Depth 20), (New-Object System.Text.UTF8Encoding($false)))
+    Test-ToolkitThrow -Action { Import-AdminOrchestrationPlan -LiteralPath $unknownPlanPropertyPath | Out-Null } -Name 'Plan parser rejects unknown properties before execution'
+
+    $duplicatePlanPath = Join-Path $resolvedTemporaryRoot 'duplicate-property.watplan.json'
+    $schemaVersionPattern = New-Object regex -ArgumentList '"schemaVersion"\s*:\s*"1\.0"\s*,'
+    $duplicatePlanText = $schemaVersionPattern.Replace([System.IO.File]::ReadAllText($pendingPlanPath), '"schemaVersion":"1.0","SchemaVersion":"1.0",', 1)
+    [System.IO.File]::WriteAllText($duplicatePlanPath, $duplicatePlanText, (New-Object System.Text.UTF8Encoding($false)))
+    Test-ToolkitThrow -Action { Import-AdminOrchestrationPlan -LiteralPath $duplicatePlanPath | Out-Null } -Name 'Plan parser rejects case-conflicting JSON properties'
+
+    $bomPlanPath = Join-Path $resolvedTemporaryRoot 'bom.watplan.json'
+    [System.IO.File]::WriteAllText($bomPlanPath, [System.IO.File]::ReadAllText($pendingPlanPath), (New-Object System.Text.UTF8Encoding($true)))
+    Test-ToolkitThrow -Action { Import-AdminOrchestrationPlan -LiteralPath $bomPlanPath | Out-Null } -Name 'Plan parser rejects a UTF-8 byte-order mark'
+    $invalidUtf8PlanPath = Join-Path $resolvedTemporaryRoot 'invalid-utf8.watplan.json'
+    [System.IO.File]::WriteAllBytes($invalidUtf8PlanPath, [byte[]]@(0xC3, 0x28))
+    Test-ToolkitThrow -Action { Import-AdminOrchestrationPlan -LiteralPath $invalidUtf8PlanPath | Out-Null } -Name 'Plan parser rejects invalid UTF-8 deterministically'
+    $oversizedPlanPath = Join-Path $resolvedTemporaryRoot 'oversized.watplan.json'
+    $oversizedPlanStream = [System.IO.File]::Open($oversizedPlanPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+    try { $oversizedPlanStream.SetLength(1048577) } finally { $oversizedPlanStream.Dispose() }
+    Test-ToolkitThrow -Action { Import-AdminOrchestrationPlan -LiteralPath $oversizedPlanPath | Out-Null } -Name 'Plan parser enforces the 1 MiB artifact limit'
+    Test-ToolkitThrow -Action { Resolve-AdminOrchestrationArtifactPath -LiteralPath (Join-Path $resolvedTemporaryRoot 'wrong-plan.json') -ArtifactType Plan | Out-Null } -Name 'Plan path resolution requires the dedicated artifact suffix'
+    Test-ToolkitThrow -Action { Resolve-AdminOrchestrationArtifactPath -LiteralPath '..\escape.watplan.json' -ArtifactType Plan | Out-Null } -Name 'Plan path resolution rejects parent traversal notation'
+
+    $tamperedCheckpointPath = Join-Path $resolvedTemporaryRoot 'tampered.watcheckpoint.json'
+    $tamperedCheckpointObject = Get-Content -LiteralPath $checkpointPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    $tamperedCheckpointObject.targets[0].attempts = 0
+    [System.IO.File]::WriteAllText($tamperedCheckpointPath, (ConvertTo-Json -InputObject $tamperedCheckpointObject -Depth 20), (New-Object System.Text.UTF8Encoding($false)))
+    Test-ToolkitThrow -Action { Import-AdminOrchestrationCheckpoint -LiteralPath $tamperedCheckpointPath -Plan $approvedPlan | Out-Null } -Name 'Checkpoint parser rejects changed lifecycle evidence'
+
+    $noncanonicalCheckpointPath = Join-Path $resolvedTemporaryRoot 'noncanonical-outcome.watcheckpoint.json'
+    $noncanonicalCheckpointObject = Get-Content -LiteralPath $checkpointPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    $noncanonicalCheckpointObject.targets[0].resultOutcome = 'completesuccess'
+    [void](ConvertTo-AdminHashedCheckpoint -Checkpoint $noncanonicalCheckpointObject)
+    [System.IO.File]::WriteAllText($noncanonicalCheckpointPath, (ConvertTo-Json -InputObject $noncanonicalCheckpointObject -Depth 20), (New-Object System.Text.UTF8Encoding($false)))
+    Test-ToolkitThrow -Action { Import-AdminOrchestrationCheckpoint -LiteralPath $noncanonicalCheckpointPath -Plan $approvedPlan | Out-Null } -Name 'Checkpoint parser requires canonical result casing even with a recomputed hash'
+
+    $inconsistentCheckpointPath = Join-Path $resolvedTemporaryRoot 'inconsistent-outcome.watcheckpoint.json'
+    $inconsistentCheckpointObject = Get-Content -LiteralPath $checkpointPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    $inconsistentCheckpointObject.targets[0].resultStatus = 'ValidationFailed'
+    $inconsistentCheckpointObject.targets[0].resultOutcome = 'ValidationFailure'
+    $inconsistentCheckpointObject.targets[0].resultExitCode = 2
+    [void](ConvertTo-AdminHashedCheckpoint -Checkpoint $inconsistentCheckpointObject)
+    [System.IO.File]::WriteAllText($inconsistentCheckpointPath, (ConvertTo-Json -InputObject $inconsistentCheckpointObject -Depth 20), (New-Object System.Text.UTF8Encoding($false)))
+    Test-ToolkitThrow -Action { Import-AdminOrchestrationCheckpoint -LiteralPath $inconsistentCheckpointPath -Plan $approvedPlan | Out-Null } -Name 'Checkpoint parser rejects inconsistent terminal results even with a recomputed hash'
+    Test-ToolkitThrow -Action { Resolve-AdminOrchestrationArtifactPath -LiteralPath (Join-Path $resolvedTemporaryRoot 'wrong-checkpoint.json') -ArtifactType Checkpoint | Out-Null } -Name 'Checkpoint path resolution requires the dedicated artifact suffix'
+
+    $interruptedCheckpointPath = Join-Path $resolvedTemporaryRoot 'interrupted.watcheckpoint.json'
+    $escapedInterruptedCheckpointPath = $interruptedCheckpointPath.Replace("'", "''")
+    $interruptedRunId = [guid]::NewGuid()
+    $interruptedCheckpoint = ConvertTo-AdminInitialCheckpoint -Plan $approvedPlan -RunId $interruptedRunId
+    $interruptedCheckpoint.targets[0].previousState = 'Pending'
+    $interruptedCheckpoint.targets[0].state = 'InProgress'
+    $interruptedCheckpoint.targets[0].startedAtUtc = ConvertTo-AdminUtcTimestamp -Value ([datetime]::UtcNow)
+    $interruptedCheckpoint.targets[0].attempts = 1
+    $interruptedCheckpoint.targets[0].executionRunId = $interruptedRunId.ToString('D')
+    [void](Write-AdminCheckpoint -LiteralPath $interruptedCheckpointPath -Checkpoint $interruptedCheckpoint -Create)
+    $interruptedStartedAtUtc = [string]$interruptedCheckpoint.targets[0].startedAtUtc
+    $interruptedResumeProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -PlanOperation Resume -PlanPath '$escapedApprovedPlanPath' -CheckpointPath '$escapedInterruptedCheckpointPath' -PlanApprovalText 'RESUME PLAN $planHash'"
+    $interruptedResumeEnvelope = ConvertFrom-Json -InputObject $interruptedResumeProcess.StdOut.Trim() -ErrorAction Stop
+    $unknownCheckpoint = Import-AdminOrchestrationCheckpoint -LiteralPath $interruptedCheckpointPath -Plan $approvedPlan
+    Test-ToolkitAssertion -Condition ($interruptedResumeProcess.ExitCode -eq 1 -and $interruptedResumeEnvelope.outcome -ceq 'PartialSuccess' -and $unknownCheckpoint.targets[0].state -ceq 'Unknown') -Name 'Resume converts an interrupted in-progress target to Unknown instead of rerunning it'
+    Test-ToolkitAssertion -Condition ($unknownCheckpoint.targets[0].attempts -eq 1 -and [string]$unknownCheckpoint.targets[0].startedAtUtc -ceq $interruptedStartedAtUtc -and $unknownCheckpoint.targets[0].errorCategory -ceq 'Interruption') -Name 'Unknown interruption evidence preserves the original single attempt and start time'
+
+    $rebootPendingPlanPath = Join-Path $resolvedTemporaryRoot 'reboot-pending.watplan.json'
+    $rebootApprovedPlanPath = Join-Path $resolvedTemporaryRoot 'reboot-approved.watplan.json'
+    $rebootCheckpointPath = Join-Path $resolvedTemporaryRoot 'reboot.watcheckpoint.json'
+    $escapedRebootPendingPlanPath = $rebootPendingPlanPath.Replace("'", "''")
+    $escapedRebootApprovedPlanPath = $rebootApprovedPlanPath.Replace("'", "''")
+    $escapedRebootCheckpointPath = $rebootCheckpointPath.Replace("'", "''")
+    $rebootCreateProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -PlanOperation Create -PlanPath '$escapedRebootPendingPlanPath' -Action ScheduleReboot -Local -WhatIf"
+    $rebootCreateEnvelope = ConvertFrom-Json -InputObject $rebootCreateProcess.StdOut.Trim() -ErrorAction Stop
+    $rebootPendingPlan = Import-AdminOrchestrationPlan -LiteralPath $rebootPendingPlanPath
+    Test-ToolkitAssertion -Condition ($rebootCreateProcess.ExitCode -eq 0 -and $rebootCreateEnvelope.operation -ceq 'Create' -and -not $rebootPendingPlan.request.readOnly -and $rebootPendingPlan.request.safety.whatIf -and $rebootPendingPlan.request.safety.retryCount -eq 0 -and $rebootPendingPlan.request.safety.requiredConfirmationText -ceq 'SCHEDULE REBOOT') -Name 'State-changing WhatIf plan preserves exact authorization and disables automatic retries'
+    $rebootPlanHash = [string]$rebootPendingPlan.planHash.value
+    $rebootApproveProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -PlanOperation Approve -PlanPath '$escapedRebootPendingPlanPath' -ApprovedPlanPath '$escapedRebootApprovedPlanPath' -ApprovedBy 'Synthetic Approver' -ApprovalReference 'CHG-TEST-REBOOT' -PlanApprovalText 'APPROVE PLAN $rebootPlanHash'"
+    Test-ToolkitAssertion -Condition ($rebootApproveProcess.ExitCode -eq 0 -and (Test-Path -LiteralPath $rebootApprovedPlanPath -PathType Leaf)) -Name 'State-changing WhatIf plan follows the same separate approval workflow'
+    $rebootMissingConfirmationProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -PlanOperation Execute -PlanPath '$escapedRebootApprovedPlanPath' -CheckpointPath '$escapedRebootCheckpointPath' -PlanApprovalText 'EXECUTE PLAN $rebootPlanHash'"
+    $rebootMissingConfirmationEnvelope = ConvertFrom-Json -InputObject $rebootMissingConfirmationProcess.StdOut.Trim() -ErrorAction Stop
+    Test-ToolkitAssertion -Condition ($rebootMissingConfirmationProcess.ExitCode -eq 3 -and $rebootMissingConfirmationEnvelope.outcome -ceq 'AuthorizationFailure' -and -not (Test-Path -LiteralPath $rebootCheckpointPath)) -Name 'Approved state-changing plan still requires its action-specific confirmation at execution'
+    $rebootExecuteProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -PlanOperation Execute -PlanPath '$escapedRebootApprovedPlanPath' -CheckpointPath '$escapedRebootCheckpointPath' -PlanApprovalText 'EXECUTE PLAN $rebootPlanHash' -ConfirmationText 'SCHEDULE REBOOT'"
+    $rebootExecuteEnvelope = ConvertFrom-Json -InputObject $rebootExecuteProcess.StdOut.Trim() -ErrorAction Stop
+    $rebootApprovedPlan = Import-AdminOrchestrationPlan -LiteralPath $rebootApprovedPlanPath
+    $rebootCheckpoint = Import-AdminOrchestrationCheckpoint -LiteralPath $rebootCheckpointPath -Plan $rebootApprovedPlan
+    Test-ToolkitAssertion -Condition ($rebootExecuteProcess.ExitCode -eq 0 -and $rebootExecuteEnvelope.outcome -ceq 'CompleteSuccess' -and $rebootCheckpoint.targets[0].state -ceq 'Completed' -and $rebootCheckpoint.targets[0].resultStatus -ceq 'WhatIf') -Name 'Approved state-changing WhatIf plan completes without applying the action'
+
+    $planPolicyPath = Join-Path $resolvedTemporaryRoot 'plan-policy.json'
+    [System.IO.File]::Copy($readOnlyPolicyPath, $planPolicyPath, $false)
+    $policyPendingPlanPath = Join-Path $resolvedTemporaryRoot 'policy-pending.watplan.json'
+    $policyApprovedPlanPath = Join-Path $resolvedTemporaryRoot 'policy-approved.watplan.json'
+    $policyCheckpointPath = Join-Path $resolvedTemporaryRoot 'policy.watcheckpoint.json'
+    $escapedPlanPolicyPath = $planPolicyPath.Replace("'", "''")
+    $escapedPolicyPendingPlanPath = $policyPendingPlanPath.Replace("'", "''")
+    $escapedPolicyApprovedPlanPath = $policyApprovedPlanPath.Replace("'", "''")
+    $escapedPolicyCheckpointPath = $policyCheckpointPath.Replace("'", "''")
+    $policyPlanCreateProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -PlanOperation Create -PlanPath '$escapedPolicyPendingPlanPath' -Action SystemInfo -Local -PolicyPath '$escapedPlanPolicyPath'"
+    $policyPendingPlan = Import-AdminOrchestrationPlan -LiteralPath $policyPendingPlanPath
+    Test-ToolkitAssertion -Condition ($policyPlanCreateProcess.ExitCode -eq 0 -and $policyPendingPlan.request.policy.applied -and $policyPendingPlan.request.policy.fileSha256 -ceq (Get-AdminFileSha256Hex -LiteralPath $planPolicyPath)) -Name 'Plan snapshots the canonical policy path and raw policy-file SHA-256'
+    $policyPlanHash = [string]$policyPendingPlan.planHash.value
+    $policyPlanApproveProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -PlanOperation Approve -PlanPath '$escapedPolicyPendingPlanPath' -ApprovedPlanPath '$escapedPolicyApprovedPlanPath' -ApprovedBy 'Synthetic Approver' -ApprovalReference 'CHG-TEST-POLICY' -PlanApprovalText 'APPROVE PLAN $policyPlanHash'"
+    Test-ToolkitAssertion -Condition ($policyPlanApproveProcess.ExitCode -eq 0 -and (Test-Path -LiteralPath $policyApprovedPlanPath -PathType Leaf)) -Name 'Unchanged policy reference can be approved with its plan'
+    $policySuccessCheckpointPath = Join-Path $resolvedTemporaryRoot 'policy-success.watcheckpoint.json'
+    $escapedPolicySuccessCheckpointPath = $policySuccessCheckpointPath.Replace("'", "''")
+    $policyPlanSuccessProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -PlanOperation Execute -PlanPath '$escapedPolicyApprovedPlanPath' -CheckpointPath '$escapedPolicySuccessCheckpointPath' -PlanApprovalText 'EXECUTE PLAN $policyPlanHash'"
+    $policyPlanSuccessEnvelope = ConvertFrom-Json -InputObject $policyPlanSuccessProcess.StdOut.Trim() -ErrorAction Stop
+    Test-ToolkitAssertion -Condition ($policyPlanSuccessProcess.ExitCode -eq 0 -and $policyPlanSuccessEnvelope.outcome -ceq 'CompleteSuccess' -and (Test-Path -LiteralPath $policySuccessCheckpointPath -PathType Leaf)) -Name 'Execution validates and holds the approved policy bytes through target completion'
+    [System.IO.File]::AppendAllText($planPolicyPath, [Environment]::NewLine, (New-Object System.Text.UTF8Encoding($false)))
+    $policyPlanExecuteProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -PlanOperation Execute -PlanPath '$escapedPolicyApprovedPlanPath' -CheckpointPath '$escapedPolicyCheckpointPath' -PlanApprovalText 'EXECUTE PLAN $policyPlanHash'"
+    $policyPlanExecuteEnvelope = ConvertFrom-Json -InputObject $policyPlanExecuteProcess.StdOut.Trim() -ErrorAction Stop
+    Test-ToolkitAssertion -Condition ($policyPlanExecuteProcess.ExitCode -eq 2 -and $policyPlanExecuteEnvelope.errors[0].message -match 'policy file' -and -not (Test-Path -LiteralPath $policyCheckpointPath)) -Name 'Changed policy bytes invalidate the approved plan before checkpoint creation'
+
+    $releaseOutputPath = Join-Path $resolvedTemporaryRoot 'release-candidate'
+    $toolkitHashBeforeReleaseBuild = (Get-FileHash -LiteralPath $toolkitPath -Algorithm SHA256).Hash
+    $releaseBuildResult = & (Join-Path $projectRoot 'tools\New-ReleaseArtifacts.ps1') -OutputDirectory $releaseOutputPath
+    $toolkitHashAfterReleaseBuild = (Get-FileHash -LiteralPath $toolkitPath -Algorithm SHA256).Hash
+    $releaseManifestLines = @([System.IO.File]::ReadAllLines((Join-Path $releaseOutputPath 'SHA256SUMS.txt'), (New-Object System.Text.UTF8Encoding($false, $true))))
+    $releaseSbom = Get-Content -LiteralPath (Join-Path $releaseOutputPath 'WindowsAdminToolkit.spdx.json') -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    Test-ToolkitAssertion -Condition ($releaseBuildResult.ToolkitVersion -ceq '3.0.0' -and -not $releaseBuildResult.Signed -and $releaseBuildResult.PayloadFileCount -gt 0 -and $releaseBuildResult.ManifestFileCount -eq ($releaseBuildResult.PayloadFileCount + 1)) -Name 'Release builder creates an unsigned candidate with manifest coverage for payload plus SBOM'
+    Test-ToolkitAssertion -Condition ($toolkitHashBeforeReleaseBuild -eq $toolkitHashAfterReleaseBuild -and (Get-FileHash -LiteralPath (Join-Path $releaseOutputPath 'WindowsAdminToolkit.ps1') -Algorithm SHA256).Hash -eq $toolkitHashBeforeReleaseBuild) -Name 'Unsigned release build copies the toolkit without modifying source bytes'
+    Test-ToolkitAssertion -Condition ($releaseSbom.spdxVersion -ceq 'SPDX-2.3' -and @($releaseSbom.files).Count -eq $releaseBuildResult.PayloadFileCount -and $releaseSbom.packages[0].versionInfo -ceq '3.0.0') -Name 'Release builder emits an SPDX 2.3 inventory for the exact copied payload'
+    Test-ToolkitAssertion -Condition (@($releaseManifestLines | Where-Object { $_ -match '\*WindowsAdminToolkit\.spdx\.json$' }).Count -eq 1 -and @($releaseManifestLines | Where-Object { $_ -match '\*SHA256SUMS\.txt$' }).Count -eq 0) -Name 'SHA-256 manifest includes the SBOM and excludes its self-referential manifest file'
+    Test-ToolkitThrow -Action { & (Join-Path $projectRoot 'tools\New-ReleaseArtifacts.ps1') -OutputDirectory $releaseOutputPath | Out-Null } -Name 'Release builder refuses to overwrite an existing candidate directory'
 
     $successProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -Action SystemInfo -Local -LogFile '$escapedAutomationLogPath'"
     $successJsonText = $successProcess.StdOut.Trim()
@@ -1024,7 +1302,7 @@ try {
     try { $successEnvelope = ConvertFrom-Json -InputObject $successJsonText -ErrorAction Stop } catch { Write-Verbose $_.Exception.Message }
     Test-ToolkitAssertion -Condition ($successProcess.ExitCode -eq 0) -Name 'Automation child process returns exit code 0 for complete success'
     Test-ToolkitAssertion -Condition ($null -ne $successEnvelope -and $successJsonText.StartsWith('{') -and $successJsonText.EndsWith('}')) -Name 'Automation stdout contains exactly one parseable JSON document'
-    Test-ToolkitAssertion -Condition ($successJsonText -match '^\{"schemaVersion":"1\.2","toolkitVersion":"2\.3\.0"') -Name 'Automation JSON root field ordering is deterministic'
+    Test-ToolkitAssertion -Condition ($successJsonText -match '^\{"schemaVersion":"1\.2","toolkitVersion":"3\.0\.0"') -Name 'Automation JSON root field ordering is deterministic'
     Test-ToolkitAssertion -Condition ($successEnvelope.outcome -eq 'CompleteSuccess' -and $successEnvelope.exitCode -eq 0) -Name 'Automation success envelope agrees with the process exit code'
     Test-ToolkitAssertion -Condition (@($successEnvelope.targets).Count -eq 1 -and @($successEnvelope.targets[0].data).Count -eq 1) -Name 'Automation success preserves target and data arrays for one item'
     Test-ToolkitAssertion -Condition (-not [bool]$successEnvelope.preflight -and $successEnvelope.policy.decision -ceq 'NotApplied' -and $successEnvelope.policy.reasonCode -ceq 'NoPolicy') -Name 'Automation success reports preflight and no-policy state explicitly'

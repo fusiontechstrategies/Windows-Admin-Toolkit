@@ -1,0 +1,44 @@
+{
+  "schemaVersion": "1.0",
+  "toolkitVersion": "3.0.0",
+  "checkpointId": "88888888-8888-4888-8888-888888888888",
+  "planId": "77777777-7777-4777-8777-777777777777",
+  "planHash": "acf439b73021b3dd82747dcdbf2c2ddd8ed9423acd254caf8cb839f064f2a752",
+  "createdAtUtc": "2026-08-22T16:04:59.000Z",
+  "updatedAtUtc": "2026-08-22T16:05:01.000Z",
+  "revision": 3,
+  "lastRunId": "99999999-9999-4999-8999-999999999999",
+  "targets": [
+    {
+      "index": 0,
+      "targetId": "t-cbf9596dcad9113727edd4e3",
+      "target": "server01.example.com",
+      "state": "Completed",
+      "previousState": "InProgress",
+      "startedAtUtc": "2026-08-22T16:05:00.000Z",
+      "finishedAtUtc": "2026-08-22T16:05:01.000Z",
+      "attempts": 1,
+      "executionRunId": "99999999-9999-4999-8999-999999999999",
+      "resultStatus": "Success",
+      "resultOutcome": "CompleteSuccess",
+      "resultExitCode": 0,
+      "errorCategory": null,
+      "errorMessage": null
+    }
+  ],
+  "summary": {
+    "targetCount": 1,
+    "pendingCount": 0,
+    "inProgressCount": 0,
+    "completedCount": 1,
+    "failedCount": 0,
+    "timedOutCount": 0,
+    "skippedCount": 0,
+    "unknownCount": 0
+  },
+  "checkpointHash": {
+    "algorithm": "SHA-256",
+    "canonicalization": "WAT-CHECKPOINT-1",
+    "value": "cf0b2389dda066d3ff20357436a52efcee219ddc6637d21e9c75fddee8c9f26b"
+  }
+}
