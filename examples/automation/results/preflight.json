@@ -1,0 +1,60 @@
+{
+  "schemaVersion": "1.1",
+  "toolkitVersion": "2.2.0",
+  "runId": "77777777-7777-4777-8777-777777777777",
+  "startedAtUtc": "2026-08-22T14:06:00.000Z",
+  "finishedAtUtc": "2026-08-22T14:06:00.125Z",
+  "durationMs": 125,
+  "actionId": "SystemInfo",
+  "actionName": "OS Version and Uptime",
+  "readOnly": true,
+  "stateChanging": false,
+  "preflight": true,
+  "targetMode": "Local",
+  "transport": { "name": "Local", "authentication": null, "useSsl": false },
+  "policy": { "applied": true, "schemaVersion": "1.0", "profileName": "Read-only local operations", "decision": "Allowed", "reasonCode": "PolicyAllowed", "reason": "The request satisfies the supplied policy profile." },
+  "status": "Succeeded",
+  "outcome": "CompleteSuccess",
+  "exitCode": 0,
+  "targetCount": 1,
+  "recordCount": 1,
+  "targets": [
+    {
+      "target": "ADMIN-WS01",
+      "status": "Success",
+      "startedAtUtc": "2026-08-22T14:06:00.025Z",
+      "finishedAtUtc": "2026-08-22T14:06:00.100Z",
+      "durationMs": 75,
+      "attempts": 1,
+      "errorCategory": null,
+      "errorMessage": null,
+      "data": [
+        {
+          "ComputerName": "ADMIN-WS01",
+          "RequestedActionId": "SystemInfo",
+          "CanRun": true,
+          "PowerShellVersion": "5.1.26100.9168",
+          "PowerShellEdition": "Desktop",
+          "LanguageMode": "FullLanguage",
+          "IsAdministrator": false,
+          "RequiresAdministrator": false,
+          "RequiredCommands": ["Get-CimInstance"],
+          "AvailableCommands": ["Get-CimInstance"],
+          "MissingCommands": [],
+          "RequiredExecutables": [],
+          "AvailableExecutables": [],
+          "MissingExecutables": [],
+          "RequiredComObjects": [],
+          "AvailableComObjects": [],
+          "MissingComObjects": [],
+          "Reasons": [],
+          "Status": "Success"
+        }
+      ]
+    }
+  ],
+  "warnings": ["Capability preflight completed without executing the requested action."],
+  "errors": [],
+  "reportPaths": [],
+  "actions": []
+}

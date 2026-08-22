@@ -3,7 +3,7 @@
     Provides interactive and noninteractive tools for authorized Windows administration.
 
 .DESCRIPTION
-    Windows Admin Toolkit 2.1 supports local administration and
+    Windows Admin Toolkit 2.2.0 supports local administration and
     bounded remote execution through PowerShell Remoting or PsExec. PowerShell
     Remoting is the default because it does not place passwords on process
     command lines. The optional PsExec transport uses only the current Windows
@@ -64,12 +64,20 @@
     Runs one named action without menus or prompts and returns a versioned JSON
     result envelope.
 
+.PARAMETER PolicyPath
+    Optional literal path to a versioned JSON policy profile. A supplied policy
+    can only narrow the toolkit's built-in permissions and safety limits.
+
 .PARAMETER Action
     Stable action identifier used by automation mode.
 
 .PARAMETER ListActions
     Returns the stable action catalog and input requirements without executing
     an action.
+
+.PARAMETER Preflight
+    Validates the complete automation request and discovers target capabilities
+    without executing the requested action.
 
 .PARAMETER Local
     Selects the local computer for automation mode.
@@ -163,8 +171,11 @@
 .EXAMPLE
     .\WindowsAdminToolkit.ps1 -Automation -ListActions -JsonOutputPath -
 
+.EXAMPLE
+    .\WindowsAdminToolkit.ps1 -Automation -Action SystemInfo -Local -PolicyPath .\read-only-local.json -Preflight -JsonOutputPath -
+
 .NOTES
-    Version: 2.1.0
+    Version: 2.2.0
     License: MIT
     Use only on systems you own or are explicitly authorized to administer.
 #>
@@ -219,10 +230,17 @@ param(
 
     [Parameter()]
     [AllowEmptyString()]
+    [string]$PolicyPath = '',
+
+    [Parameter()]
+    [AllowEmptyString()]
     [string]$Action = '',
 
     [Parameter()]
     [switch]$ListActions,
+
+    [Parameter()]
+    [switch]$Preflight,
 
     [Parameter()]
     [switch]$Local,
@@ -315,7 +333,7 @@ param(
     [string]$PowerShellFile = ''
 )
 
-$Script:ToolkitVersion = '2.1.0'
+$Script:ToolkitVersion = '2.2.0'
 $Script:WasDotSourced = $MyInvocation.InvocationName -eq '.'
 $Script:ToolkitPath = $PSCommandPath
 $Script:InvocationParameters = @{}
@@ -340,6 +358,7 @@ $Script:State = [ordered]@{
     UseSsl                     = [bool]$UseSsl
     Authentication             = $normalizedAuthentication
     SkipConnectivityCheck      = [bool]$SkipConnectivityCheck
+    PolicyProfile              = $null
 }
 
 function Test-WindowsPlatform {
@@ -1760,6 +1779,112 @@ $Script:ActionScripts.CustomPowerShell = {
     }
 }
 
+$Script:CapabilityDiscoveryScript = {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RequestedActionId,
+
+        [Parameter()]
+        [string[]]$RequiredCommands = @(),
+
+        [Parameter()]
+        [string[]]$RequiredExecutables = @(),
+
+        [Parameter()]
+        [string[]]$RequiredComObjects = @(),
+
+        [Parameter()]
+        [bool]$RequiresAdministrator = $false
+    )
+
+    $availableCommands = New-Object 'System.Collections.Generic.List[string]'
+    $missingCommands = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($commandName in $RequiredCommands) {
+        if (Get-Command -Name $commandName -ErrorAction SilentlyContinue) {
+            $availableCommands.Add($commandName) | Out-Null
+        }
+        else {
+            $missingCommands.Add($commandName) | Out-Null
+        }
+    }
+
+    $availableExecutables = New-Object 'System.Collections.Generic.List[string]'
+    $missingExecutables = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($executableName in $RequiredExecutables) {
+        if (Get-Command -Name $executableName -CommandType Application -ErrorAction SilentlyContinue) {
+            $availableExecutables.Add($executableName) | Out-Null
+        }
+        else {
+            $missingExecutables.Add($executableName) | Out-Null
+        }
+    }
+
+    $availableComObjects = New-Object 'System.Collections.Generic.List[string]'
+    $missingComObjects = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($comObjectName in $RequiredComObjects) {
+        $comObject = $null
+        try {
+            $comObject = New-Object -ComObject $comObjectName -ErrorAction Stop
+            $availableComObjects.Add($comObjectName) | Out-Null
+        }
+        catch {
+            $missingComObjects.Add($comObjectName) | Out-Null
+        }
+        finally {
+            if ($null -ne $comObject -and [System.Runtime.InteropServices.Marshal]::IsComObject($comObject)) {
+                [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($comObject)
+            }
+        }
+    }
+
+    $isAdministrator = $false
+    try {
+        $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = New-Object System.Security.Principal.WindowsPrincipal($identity)
+        $isAdministrator = $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+    }
+    catch {
+        $isAdministrator = $false
+    }
+
+    $reasons = New-Object 'System.Collections.Generic.List[string]'
+    if ($missingCommands.Count -gt 0) {
+        $reasons.Add('One or more required PowerShell commands are unavailable in this session.') | Out-Null
+    }
+    if ($missingExecutables.Count -gt 0) {
+        $reasons.Add('One or more required Windows executables are unavailable.') | Out-Null
+    }
+    if ($missingComObjects.Count -gt 0) {
+        $reasons.Add('One or more required Windows COM components are unavailable.') | Out-Null
+    }
+    if ($RequiresAdministrator -and -not $isAdministrator) {
+        $reasons.Add('The requested action requires an administrator or an equivalently delegated endpoint identity.') | Out-Null
+    }
+    $canRun = $reasons.Count -eq 0
+
+    [pscustomobject]@{
+        ComputerName          = $env:COMPUTERNAME
+        RequestedActionId     = $RequestedActionId
+        CanRun                = $canRun
+        PowerShellVersion     = [string]$PSVersionTable.PSVersion
+        PowerShellEdition     = if ($PSVersionTable.PSEdition) { [string]$PSVersionTable.PSEdition } else { 'Desktop' }
+        LanguageMode          = [string]$ExecutionContext.SessionState.LanguageMode
+        IsAdministrator       = $isAdministrator
+        RequiresAdministrator = $RequiresAdministrator
+        RequiredCommands      = @($RequiredCommands)
+        AvailableCommands     = @($availableCommands.ToArray())
+        MissingCommands       = @($missingCommands.ToArray())
+        RequiredExecutables   = @($RequiredExecutables)
+        AvailableExecutables  = @($availableExecutables.ToArray())
+        MissingExecutables    = @($missingExecutables.ToArray())
+        RequiredComObjects    = @($RequiredComObjects)
+        AvailableComObjects   = @($availableComObjects.ToArray())
+        MissingComObjects     = @($missingComObjects.ToArray())
+        Reasons               = @($reasons.ToArray())
+        Status                = if ($canRun) { 'Success' } else { 'Failed' }
+    }
+}
+
 $Script:ActionCatalog = [ordered]@{
     1  = [pscustomobject]@{ Name = 'OS Version and Uptime'; Script = 'SystemInfo'; ReadOnly = $true }
     2  = [pscustomobject]@{ Name = 'Disk Space'; Script = 'DiskSpace'; ReadOnly = $true }
@@ -1783,7 +1908,8 @@ $Script:ActionCatalog = [ordered]@{
     20 = [pscustomobject]@{ Name = 'Custom PowerShell'; Script = 'CustomPowerShell'; ReadOnly = $false }
 }
 
-$Script:AutomationSchemaVersion = '1.0'
+$Script:AutomationSchemaVersion = '1.1'
+$Script:PolicySchemaVersion = '1.0'
 $Script:AutomationExitCodes = [ordered]@{
     CompleteSuccess      = 0
     PartialSuccess       = 1
@@ -1843,6 +1969,122 @@ $Script:AutomationConfirmations = [ordered]@{
     ClearTempFiles    = 'DELETE TEMP FILES'
     CustomCommand     = 'RUN COMMAND'
     CustomPowerShell  = 'RUN SCRIPT'
+}
+$Script:PolicyInputDefinitions = [ordered]@{
+    RunningProcesses = [ordered]@{
+        TopCount = [pscustomobject]@{ Kind = 'Integer'; Minimum = 1; Maximum = 100; MaximumLength = $null; MaximumItems = $null; AllowedValues = $false }
+    }
+    WindowsUpdate = [ordered]@{
+        IncludeKB = [pscustomobject]@{ Kind = 'StringArray'; Minimum = $null; Maximum = $null; MaximumLength = 10; MaximumItems = 100; AllowedValues = $true }
+    }
+    ScheduleReboot = [ordered]@{
+        RebootDelaySeconds = [pscustomobject]@{ Kind = 'Integer'; Minimum = 30; Maximum = 3600; MaximumLength = $null; MaximumItems = $null; AllowedValues = $false }
+    }
+    ServiceManagement = [ordered]@{
+        ServiceName   = [pscustomobject]@{ Kind = 'String'; Minimum = $null; Maximum = $null; MaximumLength = 256; MaximumItems = $null; AllowedValues = $true }
+        ServiceAction = [pscustomobject]@{ Kind = 'String'; Minimum = $null; Maximum = $null; MaximumLength = 7; MaximumItems = $null; AllowedValues = $true }
+    }
+    TerminateProcess = [ordered]@{
+        ProcessName = [pscustomobject]@{ Kind = 'String'; Minimum = $null; Maximum = $null; MaximumLength = 128; MaximumItems = $null; AllowedValues = $true }
+    }
+    ClearTempFiles = [ordered]@{
+        MinimumAgeDays = [pscustomobject]@{ Kind = 'Integer'; Minimum = 1; Maximum = 30; MaximumLength = $null; MaximumItems = $null; AllowedValues = $false }
+        MaximumFiles   = [pscustomobject]@{ Kind = 'Integer'; Minimum = 100; Maximum = 100000; MaximumLength = $null; MaximumItems = $null; AllowedValues = $false }
+    }
+    ScheduledTasks = [ordered]@{
+        TaskPath     = [pscustomobject]@{ Kind = 'String'; Minimum = $null; Maximum = $null; MaximumLength = 512; MaximumItems = $null; AllowedValues = $true }
+        MaximumTasks = [pscustomobject]@{ Kind = 'Integer'; Minimum = 1; Maximum = 500; MaximumLength = $null; MaximumItems = $null; AllowedValues = $false }
+    }
+    EventLogQuery = [ordered]@{
+        EventLogName = [pscustomobject]@{ Kind = 'String'; Minimum = $null; Maximum = $null; MaximumLength = 256; MaximumItems = $null; AllowedValues = $true }
+        EntryCount   = [pscustomobject]@{ Kind = 'Integer'; Minimum = 1; Maximum = 1000; MaximumLength = $null; MaximumItems = $null; AllowedValues = $false }
+        EventLevel   = [pscustomobject]@{ Kind = 'StringArray'; Minimum = $null; Maximum = $null; MaximumLength = 11; MaximumItems = 20; AllowedValues = $true }
+    }
+    RegistryRead = [ordered]@{
+        RegistryPath      = [pscustomobject]@{ Kind = 'String'; Minimum = $null; Maximum = $null; MaximumLength = 2048; MaximumItems = $null; AllowedValues = $true }
+        RegistryValueName = [pscustomobject]@{ Kind = 'String'; Minimum = $null; Maximum = $null; MaximumLength = 16383; MaximumItems = $null; AllowedValues = $true }
+    }
+    CustomCommand = [ordered]@{
+        CommandText = [pscustomobject]@{ Kind = 'String'; Minimum = $null; Maximum = $null; MaximumLength = 32767; MaximumItems = $null; AllowedValues = $false }
+    }
+    CustomPowerShell = [ordered]@{
+        PowerShellText = [pscustomobject]@{ Kind = 'String'; Minimum = $null; Maximum = $null; MaximumLength = 1048576; MaximumItems = $null; AllowedValues = $false }
+        PowerShellFile = [pscustomobject]@{ Kind = 'String'; Minimum = $null; Maximum = $null; MaximumLength = 32767; MaximumItems = $null; AllowedValues = $false }
+    }
+}
+$Script:ActionCapabilityRequirements = [ordered]@{
+    SystemInfo        = [pscustomobject]@{ Commands = @('Get-CimInstance'); Executables = @(); ComObjects = @(); RequiresAdministrator = $false }
+    DiskSpace         = [pscustomobject]@{ Commands = @('Get-CimInstance'); Executables = @(); ComObjects = @(); RequiresAdministrator = $false }
+    HardwareInfo      = [pscustomobject]@{ Commands = @('Get-CimInstance'); Executables = @(); ComObjects = @(); RequiresAdministrator = $false }
+    NetworkConfig     = [pscustomobject]@{ Commands = @('Get-CimInstance'); Executables = @(); ComObjects = @(); RequiresAdministrator = $false }
+    LoggedOnUsers     = [pscustomobject]@{ Commands = @('Get-CimInstance', 'Get-CimAssociatedInstance'); Executables = @(); ComObjects = @(); RequiresAdministrator = $false }
+    RunningProcesses  = [pscustomobject]@{ Commands = @('Get-Process'); Executables = @(); ComObjects = @(); RequiresAdministrator = $false }
+    SoftwareInventory = [pscustomobject]@{ Commands = @('Get-ChildItem', 'Get-ItemProperty'); Executables = @(); ComObjects = @(); RequiresAdministrator = $false }
+    LicenseStatus     = [pscustomobject]@{ Commands = @('Get-CimInstance'); Executables = @(); ComObjects = @(); RequiresAdministrator = $false }
+    WindowsUpdate     = [pscustomobject]@{ Commands = @(); Executables = @(); ComObjects = @('Microsoft.Update.Session'); RequiresAdministrator = $true }
+    ScheduleReboot    = [pscustomobject]@{ Commands = @(); Executables = @('shutdown.exe'); ComObjects = @(); RequiresAdministrator = $true }
+    PendingReboot     = [pscustomobject]@{ Commands = @('Get-ItemProperty', 'Test-Path'); Executables = @(); ComObjects = @(); RequiresAdministrator = $false }
+    ServiceManagement = [pscustomobject]@{ Commands = @('Get-Service'); Executables = @(); ComObjects = @(); RequiresAdministrator = $false }
+    TerminateProcess  = [pscustomobject]@{ Commands = @('Get-Process', 'Stop-Process'); Executables = @(); ComObjects = @(); RequiresAdministrator = $true }
+    ClearTempFiles    = [pscustomobject]@{ Commands = @('Get-ChildItem', 'Remove-Item'); Executables = @(); ComObjects = @(); RequiresAdministrator = $true }
+    ScheduledTasks    = [pscustomobject]@{ Commands = @('Get-ScheduledTask', 'Get-ScheduledTaskInfo'); Executables = @(); ComObjects = @(); RequiresAdministrator = $false }
+    FirewallStatus    = [pscustomobject]@{ Commands = @('Get-NetFirewallProfile'); Executables = @(); ComObjects = @(); RequiresAdministrator = $false }
+    EventLogQuery     = [pscustomobject]@{ Commands = @('Get-WinEvent'); Executables = @(); ComObjects = @(); RequiresAdministrator = $false }
+    RegistryRead      = [pscustomobject]@{ Commands = @('Get-ItemProperty', 'Test-Path'); Executables = @(); ComObjects = @(); RequiresAdministrator = $false }
+    CustomCommand     = [pscustomobject]@{ Commands = @(); Executables = @('cmd.exe'); ComObjects = @(); RequiresAdministrator = $false }
+    CustomPowerShell  = [pscustomobject]@{ Commands = @(); Executables = @(); ComObjects = @(); RequiresAdministrator = $false }
+}
+
+function Get-AdminActionCapabilityRequirement {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$ActionId,
+
+        [Parameter()]
+        [System.Collections.IDictionary]$Inputs = @{}
+    )
+
+    if (-not $Script:ActionCapabilityRequirements.Contains($ActionId)) {
+        throw "Unknown action capability identifier: $ActionId"
+    }
+
+    $baseRequirement = $Script:ActionCapabilityRequirements[$ActionId]
+    $commands = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($commandName in @($baseRequirement.Commands)) {
+        $commands.Add([string]$commandName) | Out-Null
+    }
+    $requiresAdministrator = [bool]$baseRequirement.RequiresAdministrator
+
+    if ($ActionId -ceq 'ServiceManagement') {
+        if (-not $Inputs.Contains('ServiceAction')) {
+            throw 'ServiceManagement capability discovery requires a resolved ServiceAction input.'
+        }
+        switch ([string]$Inputs['ServiceAction']) {
+            'Query' { }
+            'Start' {
+                $commands.Add('Start-Service') | Out-Null
+                $requiresAdministrator = $true
+            }
+            'Stop' {
+                $commands.Add('Stop-Service') | Out-Null
+                $requiresAdministrator = $true
+            }
+            'Restart' {
+                $commands.Add('Restart-Service') | Out-Null
+                $requiresAdministrator = $true
+            }
+            default { throw 'ServiceManagement capability discovery received an unsupported ServiceAction input.' }
+        }
+    }
+
+    return [pscustomobject][ordered]@{
+        Commands              = @($commands.ToArray())
+        Executables           = @($baseRequirement.Executables)
+        ComObjects            = @($baseRequirement.ComObjects)
+        RequiresAdministrator = $requiresAdministrator
+    }
 }
 
 foreach ($catalogEntry in $Script:ActionCatalog.GetEnumerator()) {
@@ -1965,7 +2207,11 @@ function Get-AdminAutomationActionDescriptor {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [psobject]$CatalogItem
+        [psobject]$CatalogItem,
+
+        [Parameter()]
+        [AllowNull()]
+        [psobject]$PolicyProfile
     )
 
     $inputs = @()
@@ -2024,22 +2270,45 @@ function Get-AdminAutomationActionDescriptor {
         }
     }
 
+    $policyDecision = 'NotApplied'
+    $policyReasonCode = 'NoPolicy'
+    if ($null -ne $PolicyProfile) {
+        if ($CatalogItem.Id -cin $PolicyProfile.ActionsDeny) {
+            $policyDecision = 'Denied'
+            $policyReasonCode = 'ActionDenied'
+        }
+        elseif ($CatalogItem.Id -cnotin $PolicyProfile.ActionsAllow) {
+            $policyDecision = 'Denied'
+            $policyReasonCode = 'ActionNotAllowed'
+        }
+        else {
+            $policyDecision = 'Allowed'
+            $policyReasonCode = 'PolicyAllowed'
+        }
+    }
+
     return [pscustomobject][ordered]@{
         id               = $CatalogItem.Id
         displayName      = $CatalogItem.Name
         classification   = $CatalogItem.Classification
         confirmationText = $CatalogItem.ConfirmationText
         inputs           = @($inputs)
+        policyDecision   = $policyDecision
+        policyReasonCode = $policyReasonCode
     }
 }
 
 function Get-AdminAutomationActionCatalog {
     [CmdletBinding()]
-    param()
+    param(
+        [Parameter()]
+        [AllowNull()]
+        [psobject]$PolicyProfile
+    )
 
     $descriptors = New-Object 'System.Collections.Generic.List[object]'
     foreach ($catalogEntry in $Script:ActionCatalog.GetEnumerator()) {
-        $descriptors.Add((Get-AdminAutomationActionDescriptor -CatalogItem $catalogEntry.Value)) | Out-Null
+        $descriptors.Add((Get-AdminAutomationActionDescriptor -CatalogItem $catalogEntry.Value -PolicyProfile $PolicyProfile)) | Out-Null
     }
     return $descriptors.ToArray()
 }
@@ -2817,10 +3086,26 @@ function Invoke-AdminTargetDetailed {
         [object[]]$ArgumentList = @(),
 
         [Parameter()]
-        [bool]$ReadOnly = $true
+        [bool]$ReadOnly = $true,
+
+        [Parameter()]
+        [ValidateRange(1, 32)]
+        [int]$MaxConcurrentJobs = $Script:State.MaxConcurrentJobs,
+
+        [Parameter()]
+        [ValidateRange(0, 3)]
+        [int]$RetryCount = $Script:State.RetryCount,
+
+        [Parameter()]
+        [ValidateRange(1, 60)]
+        [int]$RetryDelaySeconds = $Script:State.RetryDelaySeconds,
+
+        [Parameter()]
+        [ValidateRange(1, 180)]
+        [int]$OperationTimeoutMinutes = $Script:State.OperationTimeoutMinutes
     )
 
-    if (-not $Script:ActionScripts.Contains($ActionName)) {
+    if (-not $Script:ActionScripts.Contains($ActionName) -and $ActionName -cne 'CapabilityPreflight') {
         throw "Unknown action script: $ActionName"
     }
 
@@ -2830,7 +3115,7 @@ function Invoke-AdminTargetDetailed {
         }
     }
 
-    $actionBlock = $Script:ActionScripts[$ActionName]
+    $actionBlock = if ($ActionName -ceq 'CapabilityPreflight') { $Script:CapabilityDiscoveryScript } else { $Script:ActionScripts[$ActionName] }
     $targetResults = New-Object 'System.Collections.Generic.List[object]'
 
     if ($TargetMode -eq 'Local') {
@@ -2869,14 +3154,14 @@ function Invoke-AdminTargetDetailed {
 
     $actionText = $actionBlock.ToString()
     $argumentEnvelope = ConvertTo-AdminArgumentEnvelope -ArgumentList $ArgumentList
-    $effectiveRetryCount = Get-AdminEffectiveRetryCount -ReadOnly $ReadOnly
-    $timeoutSeconds = $Script:State.OperationTimeoutMinutes * 60
+    $effectiveRetryCount = if ($ReadOnly) { $RetryCount } else { 0 }
+    $timeoutSeconds = $OperationTimeoutMinutes * 60
     $targetIndex = 0
     $startedJobs = New-Object 'System.Collections.Generic.List[object]'
 
     try {
         while ($targetIndex -lt $Computers.Count) {
-            $lastIndex = [math]::Min($targetIndex + $Script:State.MaxConcurrentJobs - 1, $Computers.Count - 1)
+            $lastIndex = [math]::Min($targetIndex + $MaxConcurrentJobs - 1, $Computers.Count - 1)
             $batch = @($Computers[$targetIndex..$lastIndex])
             $records = New-Object System.Collections.ArrayList
 
@@ -2915,7 +3200,7 @@ function Invoke-AdminTargetDetailed {
                     $Script:State.UseSsl,
                     $Script:State.Authentication,
                     $effectiveRetryCount,
-                    $Script:State.RetryDelaySeconds,
+                    $RetryDelaySeconds,
                     $timeoutSeconds
                 ) -ErrorAction Stop
 
@@ -2985,7 +3270,7 @@ function Invoke-AdminTargetDetailed {
                     Stop-Job -Job $record.Job -WhatIf:$false -Confirm:$false -ErrorAction SilentlyContinue
                     Remove-Job -Job $record.Job -Force -WhatIf:$false -Confirm:$false -ErrorAction SilentlyContinue
                     $finishedAtUtc = [datetime]::UtcNow
-                    $message = "Batch timeout exceeded after $($Script:State.OperationTimeoutMinutes) minutes."
+                    $message = "Batch timeout exceeded after $OperationTimeoutMinutes minutes."
                     $targetResults.Add((ConvertTo-AdminDetailedTargetResult -Index $record.Index -ComputerName $record.ComputerName -Transport $Script:State.Transport -StartedAtUtc $record.StartedAtUtc -FinishedAtUtc $finishedAtUtc -Status TimedOut -ErrorCategory Timeout -ErrorMessage $message)) | Out-Null
                     [void]$records.Remove($record)
                 }
@@ -3244,7 +3529,11 @@ function Confirm-AdminToken {
 
 function Select-AdminTargetContext {
     [CmdletBinding()]
-    param()
+    param(
+        [Parameter()]
+        [AllowNull()]
+        [psobject]$PolicyProfile
+    )
 
     $targetMode = $null
     while ($targetMode -notin @('Local', 'Remote')) {
@@ -3260,6 +3549,13 @@ function Select-AdminTargetContext {
         else {
             Write-Host 'Enter L or R.' -ForegroundColor Yellow
         }
+    }
+
+    $contextTransport = if ($targetMode -eq 'Local') { 'Local' } else { $Script:State.Transport }
+    $earlyPolicyDecision = Get-AdminPolicyExecutionContextDecision -PolicyProfile $PolicyProfile -TargetMode $targetMode -Transport $contextTransport
+    if ($earlyPolicyDecision.decision -eq 'Denied') {
+        Write-AdminLog -Message ("Policy denied the selected target mode or transport: {0}." -f $earlyPolicyDecision.reasonCode) -Level ERROR -NoConsole
+        throw $earlyPolicyDecision.reason
     }
 
     if ($targetMode -eq 'Local') {
@@ -3304,6 +3600,12 @@ function Select-AdminTargetContext {
         else {
             Write-Host 'Enter S or F.' -ForegroundColor Yellow
         }
+    }
+
+    $targetPolicyResolution = Resolve-AdminPolicyContext -PolicyProfile $PolicyProfile -TargetMode Remote -Transport $Script:State.Transport -Computers $computers -Parameters $Script:InvocationParameters
+    if (-not $targetPolicyResolution.Allowed) {
+        Write-AdminLog -Message ("Policy denied the selected remote targets: {0}." -f $targetPolicyResolution.PolicyDecision.reasonCode) -Level ERROR -NoConsole
+        throw $targetPolicyResolution.PolicyDecision.reason
     }
 
     if ($computers.Count -gt 25) {
@@ -3831,6 +4133,13 @@ function ConvertTo-AdminAutomationEnvelope {
         $ReadOnly,
 
         [Parameter()]
+        [bool]$Preflight = $false,
+
+        [Parameter()]
+        [AllowNull()]
+        [psobject]$PolicyDecision,
+
+        [Parameter()]
         [AllowNull()]
         $TargetMode,
 
@@ -3905,6 +4214,17 @@ function ConvertTo-AdminAutomationEnvelope {
             $canonicalActionId = $canonicalActionItem.Id
         }
     }
+    if ($null -eq $PolicyDecision) {
+        $PolicyDecision = ConvertTo-AdminPolicyDecision -Decision NotApplied -ReasonCode NoPolicy -Reason 'No policy profile was supplied.'
+    }
+    $safePolicyDecision = [pscustomobject][ordered]@{
+        applied       = [bool]$PolicyDecision.applied
+        schemaVersion = if ([string]::IsNullOrWhiteSpace([string]$PolicyDecision.schemaVersion)) { $null } else { [string]$PolicyDecision.schemaVersion }
+        profileName   = if ([string]::IsNullOrWhiteSpace([string]$PolicyDecision.profileName)) { $null } else { [string]$PolicyDecision.profileName }
+        decision      = if ([string]$PolicyDecision.decision -in @('NotApplied', 'NotEvaluated', 'Allowed', 'Denied', 'Invalid')) { [string]$PolicyDecision.decision } else { 'Invalid' }
+        reasonCode    = if ([string]$PolicyDecision.reasonCode -match '^[A-Za-z][A-Za-z0-9]{0,63}$') { [string]$PolicyDecision.reasonCode } else { 'PolicyInvalid' }
+        reason        = ConvertTo-AdminSafeErrorMessage -Message $PolicyDecision.reason
+    }
 
     return [pscustomobject][ordered]@{
         schemaVersion  = $Script:AutomationSchemaVersion
@@ -3917,12 +4237,14 @@ function ConvertTo-AdminAutomationEnvelope {
         actionName     = if ([string]::IsNullOrWhiteSpace([string]$ActionName)) { $null } else { [string]$ActionName }
         readOnly       = $readOnlyValue
         stateChanging  = $stateChangingValue
+        preflight      = [bool]$Preflight
         targetMode     = if ($TargetMode -in @('Local', 'Remote')) { [string]$TargetMode } else { $null }
         transport      = [pscustomobject][ordered]@{
             name           = if ($Transport -in @('Local', 'WinRM', 'PsExec')) { [string]$Transport } else { $null }
             authentication = if ($Authentication -in @('Default', 'Kerberos', 'Negotiate')) { [string]$Authentication } else { $null }
             useSsl         = [bool]$UseSsl
         }
+        policy         = $safePolicyDecision
         status         = $Status
         outcome        = $Outcome
         exitCode       = [int]$ExitCode
@@ -4043,14 +4365,28 @@ function Get-AdminAutomationResolutionFailure {
         [string]$Category,
 
         [Parameter(Mandatory = $true)]
-        [string]$Message
+        [string]$Message,
+
+        [Parameter()]
+        [AllowNull()]
+        [psobject]$PolicyDecision
     )
 
+    if ($null -eq $PolicyDecision) {
+        $PolicyDecision = if ($null -ne $Script:State.PolicyProfile) {
+            ConvertTo-AdminPolicyDecision -Applied $true -SchemaVersion $Script:State.PolicyProfile.SchemaVersion -ProfileName $Script:State.PolicyProfile.ProfileName -Decision NotEvaluated -ReasonCode RequestInvalid -Reason 'The request failed validation before policy evaluation completed.'
+        }
+        else {
+            ConvertTo-AdminPolicyDecision -Decision NotApplied -ReasonCode NoPolicy -Reason 'No policy profile was supplied.'
+        }
+    }
+
     return [pscustomobject][ordered]@{
-        Success  = $false
-        Category = $Category
-        Message  = ConvertTo-AdminSafeErrorMessage -Message $Message
-        Request  = $null
+        Success       = $false
+        Category      = $Category
+        Message       = ConvertTo-AdminSafeErrorMessage -Message $Message
+        PolicyDecision = $PolicyDecision
+        Request       = $null
     }
 }
 
@@ -4080,6 +4416,933 @@ function Resolve-AdminAutomationInputFile {
     return $fullPath
 }
 
+function ConvertTo-AdminPolicyDecision {
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [bool]$Applied = $false,
+
+        [Parameter()]
+        [AllowNull()]
+        [string]$SchemaVersion,
+
+        [Parameter()]
+        [AllowNull()]
+        [string]$ProfileName,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('NotApplied', 'NotEvaluated', 'Allowed', 'Denied', 'Invalid')]
+        [string]$Decision,
+
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[A-Za-z][A-Za-z0-9]{0,63}$')]
+        [string]$ReasonCode,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Reason
+    )
+
+    return [pscustomobject][ordered]@{
+        applied       = $Applied
+        schemaVersion = if ([string]::IsNullOrWhiteSpace($SchemaVersion)) { $null } else { $SchemaVersion }
+        profileName   = if ([string]::IsNullOrWhiteSpace($ProfileName)) { $null } else { $ProfileName }
+        decision      = $Decision
+        reasonCode    = $ReasonCode
+        reason        = ConvertTo-AdminSafeErrorMessage -Message $Reason
+    }
+}
+
+function Test-AdminJsonHasDuplicateProperty {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$JsonText
+    )
+
+    $frames = New-Object 'System.Collections.Generic.List[object]'
+    $index = 0
+    while ($index -lt $JsonText.Length) {
+        $character = $JsonText[$index]
+        if ($character -eq '{') {
+            $frames.Add([pscustomobject]@{
+                    Type = 'Object'
+                    Keys = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+                }) | Out-Null
+            $index++
+            continue
+        }
+        if ($character -eq '[') {
+            $frames.Add([pscustomobject]@{ Type = 'Array'; Keys = $null }) | Out-Null
+            $index++
+            continue
+        }
+        if ($character -eq '}' -or $character -eq ']') {
+            if ($frames.Count -gt 0) {
+                $frames.RemoveAt($frames.Count - 1)
+            }
+            $index++
+            continue
+        }
+        if ($character -ne '"') {
+            $index++
+            continue
+        }
+
+        $stringStart = $index
+        $index++
+        $escaped = $false
+        while ($index -lt $JsonText.Length) {
+            $stringCharacter = $JsonText[$index]
+            if ($escaped) {
+                $escaped = $false
+            }
+            elseif ($stringCharacter -eq '\') {
+                $escaped = $true
+            }
+            elseif ($stringCharacter -eq '"') {
+                break
+            }
+            $index++
+        }
+        if ($index -ge $JsonText.Length) {
+            return $false
+        }
+
+        $stringEnd = $index
+        $nextIndex = $stringEnd + 1
+        while ($nextIndex -lt $JsonText.Length -and [char]::IsWhiteSpace($JsonText[$nextIndex])) {
+            $nextIndex++
+        }
+        if ($nextIndex -lt $JsonText.Length -and $JsonText[$nextIndex] -eq ':' -and $frames.Count -gt 0) {
+            $frame = $frames[$frames.Count - 1]
+            if ($frame.Type -eq 'Object') {
+                try {
+                    $jsonString = $JsonText.Substring($stringStart, $stringEnd - $stringStart + 1)
+                    $propertyName = [string](ConvertFrom-Json -InputObject $jsonString -ErrorAction Stop)
+                }
+                catch {
+                    return $false
+                }
+                if (-not $frame.Keys.Add($propertyName)) {
+                    return $true
+                }
+            }
+        }
+        $index = $stringEnd + 1
+    }
+
+    return $false
+}
+
+function Get-AdminPolicyPropertyError {
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [AllowNull()]
+        $InputObject,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$AllowedProperties,
+
+        [Parameter()]
+        [string[]]$RequiredProperties = @(),
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Context
+    )
+
+    if ($null -eq $InputObject -or $InputObject -isnot [pscustomobject]) {
+        return "$Context must be a JSON object."
+    }
+    $propertyNames = @($InputObject.PSObject.Properties.Name)
+    if (@($propertyNames | Where-Object { $_ -cnotin $AllowedProperties }).Count -gt 0) {
+        return "$Context contains unsupported properties."
+    }
+    if (@($RequiredProperties | Where-Object { $_ -cnotin $propertyNames }).Count -gt 0) {
+        return "$Context is missing one or more required properties."
+    }
+    return $null
+}
+
+function ConvertTo-AdminPolicyStringList {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        $Value,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(0, 1000)]
+        [int]$MinimumCount,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(1, 1000)]
+        [int]$MaximumCount,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Context
+    )
+
+    if ($Value -isnot [System.Array]) {
+        throw "$Context must be a JSON array."
+    }
+    $items = @($Value)
+    if ($items.Count -lt $MinimumCount -or $items.Count -gt $MaximumCount) {
+        throw "$Context contains an unsupported number of values."
+    }
+    $normalized = New-Object 'System.Collections.Generic.List[string]'
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($item in $items) {
+        if ($item -isnot [string]) {
+            throw "$Context accepts string values only."
+        }
+        $text = ([string]$item).Trim()
+        if ([string]::IsNullOrWhiteSpace($text) -or $text.Length -gt 2048 -or $text -match '[\x00-\x1F\x7F]') {
+            throw "$Context contains an invalid string value."
+        }
+        if (-not $seen.Add($text)) {
+            throw "$Context contains duplicate values."
+        }
+        $normalized.Add($text) | Out-Null
+    }
+    return $normalized.ToArray()
+}
+
+function Test-AdminPolicyTargetPattern {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Pattern
+    )
+
+    if ($Pattern.EndsWith('.')) {
+        return $false
+    }
+    if ($Pattern.StartsWith('*.')) {
+        $suffix = $Pattern.Substring(2)
+        if ($suffix -match '^\d+(?:\.\d+){3}$') {
+            return $false
+        }
+        return Test-AdminHostname -ComputerName $suffix
+    }
+    return Test-AdminHostname -ComputerName $Pattern
+}
+
+function Test-AdminPolicyTargetMatch {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ComputerName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Pattern
+    )
+
+    if ($Pattern.StartsWith('*.')) {
+        $suffix = $Pattern.Substring(1)
+        return $ComputerName.Length -gt $suffix.Length -and $ComputerName.EndsWith($suffix, [System.StringComparison]::OrdinalIgnoreCase)
+    }
+    return $ComputerName.Equals($Pattern, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function ConvertTo-AdminPolicyInteger {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        $Value,
+
+        [Parameter(Mandatory = $true)]
+        [int]$Minimum,
+
+        [Parameter(Mandatory = $true)]
+        [int]$Maximum,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Context
+    )
+
+    $text = [Convert]::ToString($Value, [System.Globalization.CultureInfo]::InvariantCulture)
+    $number = 0
+    if ($text -notmatch '^-?\d+$' -or -not [int]::TryParse($text, [System.Globalization.NumberStyles]::Integer, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$number)) {
+        throw "$Context must be an integer."
+    }
+    if ($number -lt $Minimum -or $number -gt $Maximum) {
+        throw "$Context must be from $Minimum through $Maximum."
+    }
+    return $number
+}
+
+function Test-AdminPolicyAllowedInputValue {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ActionId,
+
+        [Parameter(Mandatory = $true)]
+        [string]$InputName,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Value
+    )
+
+    switch ("$ActionId/$InputName") {
+        'WindowsUpdate/IncludeKB' {
+            return (Test-AdminKbNumber -KbNumber $Value) -and $Value -ceq $Value.Trim().ToUpperInvariant()
+        }
+        'ServiceManagement/ServiceName' { return Test-AdminServiceName -ServiceName $Value }
+        'ServiceManagement/ServiceAction' { return $Value -cin @('Query', 'Start', 'Stop', 'Restart') }
+        'TerminateProcess/ProcessName' { return Test-AdminProcessName -ProcessName $Value }
+        'ScheduledTasks/TaskPath' { return Test-AdminTaskPath -TaskPath $Value }
+        'EventLogQuery/EventLogName' { return Test-AdminEventLogName -LogName $Value }
+        'EventLogQuery/EventLevel' { return $Value -cin @('Critical', 'Error', 'Warning', 'Information', 'Verbose') }
+        'RegistryRead/RegistryPath' { return Test-AdminRegistryPath -RegistryPath $Value }
+        'RegistryRead/RegistryValueName' { return Test-AdminRegistryValueName -ValueName $Value }
+        default { return $false }
+    }
+}
+
+function Import-AdminPolicyProfile {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$LiteralPath
+    )
+
+    $resolvedPath = Resolve-AdminAutomationInputFile -LiteralPath $LiteralPath -RequiredExtension '.json'
+    $jsonText = Read-AdminBoundedUtf8File -LiteralPath $resolvedPath -MaximumBytes 1048576
+    if (Test-AdminJsonHasDuplicateProperty -JsonText $jsonText) {
+        throw 'The policy profile contains duplicate or case-conflicting property names.'
+    }
+    try {
+        $policyObject = ConvertFrom-Json -InputObject $jsonText -ErrorAction Stop
+    }
+    catch {
+        throw 'The policy profile must contain valid JSON.'
+    }
+
+    $rootError = Get-AdminPolicyPropertyError -InputObject $policyObject -AllowedProperties @('schemaVersion', 'profileName', 'description', 'actions', 'transports', 'targetModes', 'targets', 'limits', 'actionInputs') -RequiredProperties @('schemaVersion', 'profileName', 'actions', 'transports', 'targetModes', 'targets') -Context 'The policy profile'
+    if ($rootError) {
+        throw $rootError
+    }
+    if ($policyObject.schemaVersion -isnot [string] -or [string]$policyObject.schemaVersion -cne $Script:PolicySchemaVersion) {
+        throw "The policy profile schemaVersion must be $Script:PolicySchemaVersion."
+    }
+    if ($policyObject.profileName -isnot [string] -or [string]$policyObject.profileName -notmatch '^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$') {
+        throw 'The policy profileName is invalid.'
+    }
+    $description = ''
+    if ($policyObject.PSObject.Properties.Name -ccontains 'description') {
+        if ($policyObject.description -isnot [string] -or ([string]$policyObject.description).Length -gt 512 -or [string]$policyObject.description -match '[\x00-\x1F\x7F]') {
+            throw 'The policy description is invalid.'
+        }
+        $description = [string]$policyObject.description
+    }
+
+    $actionError = Get-AdminPolicyPropertyError -InputObject $policyObject.actions -AllowedProperties @('allow', 'deny') -RequiredProperties @('allow') -Context 'The actions policy'
+    if ($actionError) { throw $actionError }
+    $actionAllow = @(ConvertTo-AdminPolicyStringList -Value $policyObject.actions.allow -MinimumCount 1 -MaximumCount 20 -Context 'The actions allow list')
+    $actionDeny = @(
+        if ($policyObject.actions.PSObject.Properties.Name -ccontains 'deny') {
+            ConvertTo-AdminPolicyStringList -Value $policyObject.actions.deny -MinimumCount 0 -MaximumCount 20 -Context 'The actions deny list'
+        }
+    )
+    foreach ($actionId in @($actionAllow + $actionDeny)) {
+        $catalogItem = Get-AdminActionCatalogItem -ActionId $actionId
+        if ($null -eq $catalogItem -or $catalogItem.Id -cne $actionId) {
+            throw 'The policy contains an unsupported or incorrectly cased action identifier.'
+        }
+    }
+    if (@($actionAllow | Where-Object { $_ -cin $actionDeny }).Count -gt 0) {
+        throw 'The actions allow and deny lists conflict.'
+    }
+
+    $transportError = Get-AdminPolicyPropertyError -InputObject $policyObject.transports -AllowedProperties @('allow', 'deny') -RequiredProperties @('allow') -Context 'The transports policy'
+    if ($transportError) { throw $transportError }
+    $transportAllow = @(ConvertTo-AdminPolicyStringList -Value $policyObject.transports.allow -MinimumCount 1 -MaximumCount 3 -Context 'The transports allow list')
+    $transportDeny = @(
+        if ($policyObject.transports.PSObject.Properties.Name -ccontains 'deny') {
+            ConvertTo-AdminPolicyStringList -Value $policyObject.transports.deny -MinimumCount 0 -MaximumCount 3 -Context 'The transports deny list'
+        }
+    )
+    foreach ($transportValue in @($transportAllow + $transportDeny)) {
+        if ($transportValue -cnotin @('Local', 'WinRM', 'PsExec')) {
+            throw 'The policy contains an unsupported or incorrectly cased transport.'
+        }
+    }
+    if (@($transportAllow | Where-Object { $_ -cin $transportDeny }).Count -gt 0) {
+        throw 'The transports allow and deny lists conflict.'
+    }
+
+    $targetModeError = Get-AdminPolicyPropertyError -InputObject $policyObject.targetModes -AllowedProperties @('allow', 'deny') -RequiredProperties @('allow') -Context 'The targetModes policy'
+    if ($targetModeError) { throw $targetModeError }
+    $targetModeAllow = @(ConvertTo-AdminPolicyStringList -Value $policyObject.targetModes.allow -MinimumCount 1 -MaximumCount 2 -Context 'The targetModes allow list')
+    $targetModeDeny = @(
+        if ($policyObject.targetModes.PSObject.Properties.Name -ccontains 'deny') {
+            ConvertTo-AdminPolicyStringList -Value $policyObject.targetModes.deny -MinimumCount 0 -MaximumCount 2 -Context 'The targetModes deny list'
+        }
+    )
+    foreach ($targetModeValue in @($targetModeAllow + $targetModeDeny)) {
+        if ($targetModeValue -cnotin @('Local', 'Remote')) {
+            throw 'The policy contains an unsupported or incorrectly cased target mode.'
+        }
+    }
+    if (@($targetModeAllow | Where-Object { $_ -cin $targetModeDeny }).Count -gt 0) {
+        throw 'The targetModes allow and deny lists conflict.'
+    }
+
+    $targetError = Get-AdminPolicyPropertyError -InputObject $policyObject.targets -AllowedProperties @('allow', 'deny') -RequiredProperties @('allow') -Context 'The targets policy'
+    if ($targetError) { throw $targetError }
+    $targetAllow = @(ConvertTo-AdminPolicyStringList -Value $policyObject.targets.allow -MinimumCount 0 -MaximumCount 500 -Context 'The targets allow list')
+    $targetDeny = @(
+        if ($policyObject.targets.PSObject.Properties.Name -ccontains 'deny') {
+            ConvertTo-AdminPolicyStringList -Value $policyObject.targets.deny -MinimumCount 0 -MaximumCount 500 -Context 'The targets deny list'
+        }
+    )
+    foreach ($targetPattern in @($targetAllow + $targetDeny)) {
+        if (-not (Test-AdminPolicyTargetPattern -Pattern $targetPattern)) {
+            throw 'The policy contains an invalid target pattern. Use an exact validated target or one leading star-dot suffix pattern.'
+        }
+    }
+    if (@($targetAllow | Where-Object { $_ -in $targetDeny }).Count -gt 0) {
+        throw 'The targets allow and deny lists contain the same pattern.'
+    }
+
+    $effectiveTargetModes = @($targetModeAllow | Where-Object { $_ -cnotin $targetModeDeny })
+    $effectiveTransports = @($transportAllow | Where-Object { $_ -cnotin $transportDeny })
+    $localModeAllowed = 'Local' -cin $effectiveTargetModes
+    $localTransportAllowed = 'Local' -cin $effectiveTransports
+    $remoteModeAllowed = 'Remote' -cin $effectiveTargetModes
+    $remoteTransportAllowed = @($effectiveTransports | Where-Object { $_ -cin @('WinRM', 'PsExec') }).Count -gt 0
+    if ($localModeAllowed -ne $localTransportAllowed -or $remoteModeAllowed -ne $remoteTransportAllowed) {
+        throw 'Each allowed target mode must have only its compatible transport class, and each allowed transport class must have its matching target mode.'
+    }
+    $localPossible = $localModeAllowed -and $localTransportAllowed
+    $remotePossible = $remoteModeAllowed -and $remoteTransportAllowed
+    if (-not $localPossible -and -not $remotePossible) {
+        throw 'The policy targetModes and transports do not permit any execution path.'
+    }
+    if ($remotePossible -and $targetAllow.Count -eq 0) {
+        throw 'A policy that permits remote execution requires at least one targets allow pattern.'
+    }
+    if (-not $remotePossible -and ($targetAllow.Count -gt 0 -or $targetDeny.Count -gt 0)) {
+        throw 'A policy without remote execution cannot contain inert remote target rules.'
+    }
+
+    $limits = [ordered]@{
+        MaxTargets                    = $null
+        MaxConcurrentJobs             = $null
+        MaxRetryCount                 = $null
+        MaxRetryDelaySeconds          = $null
+        MaxOperationTimeoutMinutes    = $null
+        MaxConnectivityTimeoutSeconds = $null
+    }
+    if ($policyObject.PSObject.Properties.Name -ccontains 'limits') {
+        $limitPropertyMap = [ordered]@{
+            maxTargets                    = [pscustomobject]@{ Name = 'MaxTargets'; Minimum = 1; Maximum = 500 }
+            maxConcurrentJobs             = [pscustomobject]@{ Name = 'MaxConcurrentJobs'; Minimum = 1; Maximum = 32 }
+            maxRetryCount                 = [pscustomobject]@{ Name = 'MaxRetryCount'; Minimum = 0; Maximum = 3 }
+            maxRetryDelaySeconds          = [pscustomobject]@{ Name = 'MaxRetryDelaySeconds'; Minimum = 1; Maximum = 60 }
+            maxOperationTimeoutMinutes    = [pscustomobject]@{ Name = 'MaxOperationTimeoutMinutes'; Minimum = 1; Maximum = 180 }
+            maxConnectivityTimeoutSeconds = [pscustomobject]@{ Name = 'MaxConnectivityTimeoutSeconds'; Minimum = 1; Maximum = 60 }
+        }
+        $limitError = Get-AdminPolicyPropertyError -InputObject $policyObject.limits -AllowedProperties @($limitPropertyMap.Keys) -Context 'The limits policy'
+        if ($limitError) { throw $limitError }
+        foreach ($limitProperty in @($policyObject.limits.PSObject.Properties)) {
+            $limitDefinition = $limitPropertyMap[$limitProperty.Name]
+            $limits[$limitDefinition.Name] = ConvertTo-AdminPolicyInteger -Value $limitProperty.Value -Minimum $limitDefinition.Minimum -Maximum $limitDefinition.Maximum -Context "The $($limitProperty.Name) policy limit"
+        }
+    }
+
+    $actionInputs = [ordered]@{}
+    if ($policyObject.PSObject.Properties.Name -ccontains 'actionInputs') {
+        if ($null -eq $policyObject.actionInputs -or $policyObject.actionInputs -isnot [pscustomobject]) {
+            throw 'The actionInputs policy must be a JSON object.'
+        }
+        foreach ($actionProperty in @($policyObject.actionInputs.PSObject.Properties)) {
+            $actionId = $actionProperty.Name
+            $catalogItem = Get-AdminActionCatalogItem -ActionId $actionId
+            if ($null -eq $catalogItem -or $catalogItem.Id -cne $actionId -or -not $Script:PolicyInputDefinitions.Contains($actionId)) {
+                throw 'The actionInputs policy contains an unsupported action identifier.'
+            }
+            if ($actionId -cnotin $actionAllow -or $actionId -cin $actionDeny) {
+                throw 'The actionInputs policy can constrain only an action present in the effective actions allow list.'
+            }
+            $actionConstraintObject = $actionProperty.Value
+            if ($null -eq $actionConstraintObject -or $actionConstraintObject -isnot [pscustomobject]) {
+                throw 'Each actionInputs action value must be a JSON object.'
+            }
+            $inputDefinitions = $Script:PolicyInputDefinitions[$actionId]
+            $actionConstraints = [ordered]@{}
+            foreach ($inputProperty in @($actionConstraintObject.PSObject.Properties)) {
+                $inputName = $inputProperty.Name
+                if ($inputName -cnotin @($inputDefinitions.Keys)) {
+                    throw 'The actionInputs policy contains an unsupported input name.'
+                }
+                $definition = $inputDefinitions[$inputName]
+                $constraintObject = $inputProperty.Value
+                $allowedConstraintProperties = switch ($definition.Kind) {
+                    'Integer' { @('minimum', 'maximum') }
+                    'StringArray' {
+                        $values = @('maximumLength', 'maximumItems')
+                        if ($definition.AllowedValues) { $values += 'allowedValues' }
+                        $values
+                    }
+                    default {
+                        $values = @('maximumLength')
+                        if ($definition.AllowedValues) { $values += 'allowedValues' }
+                        $values
+                    }
+                }
+                $constraintError = Get-AdminPolicyPropertyError -InputObject $constraintObject -AllowedProperties $allowedConstraintProperties -Context 'An action input constraint'
+                if ($constraintError) { throw $constraintError }
+                $constraintPropertyNames = @($constraintObject.PSObject.Properties.Name)
+                if ($constraintPropertyNames.Count -eq 0) {
+                    throw 'An action input constraint must contain at least one supported property.'
+                }
+
+                $normalizedConstraint = [ordered]@{
+                    Minimum       = $null
+                    Maximum       = $null
+                    MaximumLength = $null
+                    MaximumItems  = $null
+                    AllowedValues = @()
+                }
+                if ($constraintPropertyNames -ccontains 'minimum') {
+                    $normalizedConstraint.Minimum = ConvertTo-AdminPolicyInteger -Value $constraintObject.minimum -Minimum $definition.Minimum -Maximum $definition.Maximum -Context 'An action input minimum'
+                }
+                if ($constraintPropertyNames -ccontains 'maximum') {
+                    $normalizedConstraint.Maximum = ConvertTo-AdminPolicyInteger -Value $constraintObject.maximum -Minimum $definition.Minimum -Maximum $definition.Maximum -Context 'An action input maximum'
+                }
+                if ($null -ne $normalizedConstraint.Minimum -and $null -ne $normalizedConstraint.Maximum -and $normalizedConstraint.Minimum -gt $normalizedConstraint.Maximum) {
+                    throw 'An action input minimum cannot exceed its maximum.'
+                }
+                if ($constraintPropertyNames -ccontains 'maximumLength') {
+                    $normalizedConstraint.MaximumLength = ConvertTo-AdminPolicyInteger -Value $constraintObject.maximumLength -Minimum 1 -Maximum $definition.MaximumLength -Context 'An action input maximumLength'
+                }
+                if ($constraintPropertyNames -ccontains 'maximumItems') {
+                    $normalizedConstraint.MaximumItems = ConvertTo-AdminPolicyInteger -Value $constraintObject.maximumItems -Minimum 1 -Maximum $definition.MaximumItems -Context 'An action input maximumItems'
+                }
+                if ($constraintPropertyNames -ccontains 'allowedValues') {
+                    if ($constraintObject.allowedValues -isnot [System.Array]) {
+                        throw 'An action input allowedValues value must be a JSON array.'
+                    }
+                    $allowedInputValues = @($constraintObject.allowedValues)
+                    if ($allowedInputValues.Count -lt 1 -or $allowedInputValues.Count -gt 100) {
+                        throw 'An action input allowedValues list must contain from 1 through 100 values.'
+                    }
+                    $normalizedAllowedValues = New-Object 'System.Collections.Generic.List[string]'
+                    $seenAllowedValues = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+                    foreach ($allowedInputValue in $allowedInputValues) {
+                        if ($allowedInputValue -isnot [string]) {
+                            throw 'An action input allowedValues list accepts strings only.'
+                        }
+                        $allowedInputText = [string]$allowedInputValue
+                        if ($allowedInputText.Length -gt $definition.MaximumLength -or -not (Test-AdminPolicyAllowedInputValue -ActionId $actionId -InputName $inputName -Value $allowedInputText)) {
+                            throw 'An action input allowedValues list contains an invalid value.'
+                        }
+                        if (-not $seenAllowedValues.Add($allowedInputText)) {
+                            throw 'An action input allowedValues list contains duplicate values.'
+                        }
+                        $normalizedAllowedValues.Add($allowedInputText) | Out-Null
+                    }
+                    if ($null -ne $normalizedConstraint.MaximumLength -and @($normalizedAllowedValues.ToArray() | Where-Object { $_.Length -gt [int]$normalizedConstraint.MaximumLength }).Count -gt 0) {
+                        throw 'An action input allowedValues list conflicts with its maximumLength constraint.'
+                    }
+                    $normalizedConstraint.AllowedValues = @($normalizedAllowedValues.ToArray())
+                }
+                $actionConstraints[$inputName] = [pscustomobject]$normalizedConstraint
+            }
+            if ($actionConstraints.Count -eq 0) {
+                throw 'Each actionInputs action must contain at least one input constraint.'
+            }
+            $actionInputs[$actionId] = $actionConstraints
+        }
+    }
+
+    return [pscustomobject][ordered]@{
+        SchemaVersion  = $Script:PolicySchemaVersion
+        ProfileName    = [string]$policyObject.profileName
+        Description    = $description
+        SourcePath     = $resolvedPath
+        ActionsAllow   = @($actionAllow)
+        ActionsDeny    = @($actionDeny)
+        TransportsAllow = @($transportAllow)
+        TransportsDeny = @($transportDeny)
+        TargetModesAllow = @($targetModeAllow)
+        TargetModesDeny = @($targetModeDeny)
+        TargetsAllow   = @($targetAllow)
+        TargetsDeny    = @($targetDeny)
+        Limits         = [pscustomobject]$limits
+        ActionInputs   = $actionInputs
+    }
+}
+
+function Get-AdminRequestedExecutionSetting {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$Parameters
+    )
+
+    return [pscustomobject][ordered]@{
+        MaxConcurrentJobs          = if (Test-AdminParameterBound -Parameters $Parameters -Name 'MaxConcurrentJobs') { [int]$Parameters['MaxConcurrentJobs'] } else { [int]$Script:State.MaxConcurrentJobs }
+        RetryCount                 = if (Test-AdminParameterBound -Parameters $Parameters -Name 'RetryCount') { [int]$Parameters['RetryCount'] } else { [int]$Script:State.RetryCount }
+        RetryDelaySeconds          = if (Test-AdminParameterBound -Parameters $Parameters -Name 'RetryDelaySeconds') { [int]$Parameters['RetryDelaySeconds'] } else { [int]$Script:State.RetryDelaySeconds }
+        OperationTimeoutMinutes    = if (Test-AdminParameterBound -Parameters $Parameters -Name 'OperationTimeoutMinutes') { [int]$Parameters['OperationTimeoutMinutes'] } else { [int]$Script:State.OperationTimeoutMinutes }
+        ConnectivityTimeoutSeconds = if (Test-AdminParameterBound -Parameters $Parameters -Name 'ConnectivityTimeoutSeconds') { [int]$Parameters['ConnectivityTimeoutSeconds'] } else { [int]$Script:State.ConnectivityTimeoutSeconds }
+    }
+}
+
+function ConvertTo-AdminPolicyResolution {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [bool]$Allowed,
+
+        [Parameter(Mandatory = $true)]
+        [psobject]$PolicyDecision,
+
+        [Parameter(Mandatory = $true)]
+        [psobject]$ExecutionSettings
+    )
+
+    return [pscustomobject][ordered]@{
+        Allowed           = $Allowed
+        PolicyDecision    = $PolicyDecision
+        ExecutionSettings = $ExecutionSettings
+    }
+}
+
+function Get-AdminPolicyExecutionContextDecision {
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [AllowNull()]
+        [psobject]$PolicyProfile,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Local', 'Remote')]
+        [string]$TargetMode,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Local', 'WinRM', 'PsExec')]
+        [string]$Transport
+    )
+
+    if ($null -eq $PolicyProfile) {
+        return ConvertTo-AdminPolicyDecision -Decision NotApplied -ReasonCode NoPolicy -Reason 'No policy profile was supplied.'
+    }
+    $decisionParameters = @{
+        Applied       = $true
+        SchemaVersion = $PolicyProfile.SchemaVersion
+        ProfileName   = $PolicyProfile.ProfileName
+    }
+    if ($TargetMode -cin $PolicyProfile.TargetModesDeny) {
+        return ConvertTo-AdminPolicyDecision @decisionParameters -Decision Denied -ReasonCode TargetModeDenied -Reason 'The policy explicitly denies the requested target mode.'
+    }
+    if ($TargetMode -cnotin $PolicyProfile.TargetModesAllow) {
+        return ConvertTo-AdminPolicyDecision @decisionParameters -Decision Denied -ReasonCode TargetModeNotAllowed -Reason 'The requested target mode is not present in the policy allow list.'
+    }
+    if ($Transport -cin $PolicyProfile.TransportsDeny) {
+        return ConvertTo-AdminPolicyDecision @decisionParameters -Decision Denied -ReasonCode TransportDenied -Reason 'The policy explicitly denies the requested transport.'
+    }
+    if ($Transport -cnotin $PolicyProfile.TransportsAllow) {
+        return ConvertTo-AdminPolicyDecision @decisionParameters -Decision Denied -ReasonCode TransportNotAllowed -Reason 'The requested transport is not present in the policy allow list.'
+    }
+    return ConvertTo-AdminPolicyDecision @decisionParameters -Decision Allowed -ReasonCode PolicyAllowed -Reason 'The requested target mode and transport satisfy the supplied policy profile.'
+}
+
+function Resolve-AdminPolicyRequest {
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [AllowNull()]
+        [psobject]$PolicyProfile,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ActionId,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Local', 'Remote')]
+        [string]$TargetMode,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Local', 'WinRM', 'PsExec')]
+        [string]$Transport,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$Computers,
+
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$Inputs,
+
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$Parameters
+    )
+
+    $executionSettings = Get-AdminRequestedExecutionSetting -Parameters $Parameters
+    if ($null -eq $PolicyProfile) {
+        $decision = ConvertTo-AdminPolicyDecision -Decision NotApplied -ReasonCode NoPolicy -Reason 'No policy profile was supplied.'
+        return ConvertTo-AdminPolicyResolution -Allowed $true -PolicyDecision $decision -ExecutionSettings $executionSettings
+    }
+
+    $decisionParameters = @{
+        Applied       = $true
+        SchemaVersion = $PolicyProfile.SchemaVersion
+        ProfileName   = $PolicyProfile.ProfileName
+    }
+    if ($ActionId -cin $PolicyProfile.ActionsDeny) {
+        $decision = ConvertTo-AdminPolicyDecision @decisionParameters -Decision Denied -ReasonCode ActionDenied -Reason 'The policy explicitly denies the requested action.'
+        return ConvertTo-AdminPolicyResolution -Allowed $false -PolicyDecision $decision -ExecutionSettings $executionSettings
+    }
+    if ($ActionId -cnotin $PolicyProfile.ActionsAllow) {
+        $decision = ConvertTo-AdminPolicyDecision @decisionParameters -Decision Denied -ReasonCode ActionNotAllowed -Reason 'The requested action is not present in the policy allow list.'
+        return ConvertTo-AdminPolicyResolution -Allowed $false -PolicyDecision $decision -ExecutionSettings $executionSettings
+    }
+    $executionContextDecision = Get-AdminPolicyExecutionContextDecision -PolicyProfile $PolicyProfile -TargetMode $TargetMode -Transport $Transport
+    if ($executionContextDecision.decision -eq 'Denied') {
+        return ConvertTo-AdminPolicyResolution -Allowed $false -PolicyDecision $executionContextDecision -ExecutionSettings $executionSettings
+    }
+
+    if ($TargetMode -eq 'Remote') {
+        foreach ($computer in $Computers) {
+            if (@($PolicyProfile.TargetsDeny | Where-Object { Test-AdminPolicyTargetMatch -ComputerName $computer -Pattern $_ }).Count -gt 0) {
+                $decision = ConvertTo-AdminPolicyDecision @decisionParameters -Decision Denied -ReasonCode TargetDenied -Reason 'The policy explicitly denies one or more requested targets.'
+                return ConvertTo-AdminPolicyResolution -Allowed $false -PolicyDecision $decision -ExecutionSettings $executionSettings
+            }
+            if (@($PolicyProfile.TargetsAllow | Where-Object { Test-AdminPolicyTargetMatch -ComputerName $computer -Pattern $_ }).Count -eq 0) {
+                $decision = ConvertTo-AdminPolicyDecision @decisionParameters -Decision Denied -ReasonCode TargetNotAllowed -Reason 'One or more requested targets do not match the policy allow patterns.'
+                return ConvertTo-AdminPolicyResolution -Allowed $false -PolicyDecision $decision -ExecutionSettings $executionSettings
+            }
+        }
+    }
+    if ($null -ne $PolicyProfile.Limits.MaxTargets -and $Computers.Count -gt [int]$PolicyProfile.Limits.MaxTargets) {
+        $decision = ConvertTo-AdminPolicyDecision @decisionParameters -Decision Denied -ReasonCode TargetCountExceeded -Reason 'The request exceeds the policy target-count limit.'
+        return ConvertTo-AdminPolicyResolution -Allowed $false -PolicyDecision $decision -ExecutionSettings $executionSettings
+    }
+
+    $runtimeLimits = @(
+        [pscustomobject]@{ ParameterName = 'MaxConcurrentJobs'; SettingName = 'MaxConcurrentJobs'; LimitName = 'MaxConcurrentJobs' }
+        [pscustomobject]@{ ParameterName = 'RetryCount'; SettingName = 'RetryCount'; LimitName = 'MaxRetryCount' }
+        [pscustomobject]@{ ParameterName = 'RetryDelaySeconds'; SettingName = 'RetryDelaySeconds'; LimitName = 'MaxRetryDelaySeconds' }
+        [pscustomobject]@{ ParameterName = 'OperationTimeoutMinutes'; SettingName = 'OperationTimeoutMinutes'; LimitName = 'MaxOperationTimeoutMinutes' }
+        [pscustomobject]@{ ParameterName = 'ConnectivityTimeoutSeconds'; SettingName = 'ConnectivityTimeoutSeconds'; LimitName = 'MaxConnectivityTimeoutSeconds' }
+    )
+    foreach ($runtimeLimit in $runtimeLimits) {
+        $limit = $PolicyProfile.Limits.($runtimeLimit.LimitName)
+        if ($null -eq $limit) {
+            continue
+        }
+        $requestedValue = [int]$executionSettings.($runtimeLimit.SettingName)
+        if ((Test-AdminParameterBound -Parameters $Parameters -Name $runtimeLimit.ParameterName) -and $requestedValue -gt [int]$limit) {
+            $decision = ConvertTo-AdminPolicyDecision @decisionParameters -Decision Denied -ReasonCode RuntimeLimitExceeded -Reason 'An explicit runtime setting exceeds its policy limit.'
+            return ConvertTo-AdminPolicyResolution -Allowed $false -PolicyDecision $decision -ExecutionSettings $executionSettings
+        }
+        $executionSettings.($runtimeLimit.SettingName) = [math]::Min($requestedValue, [int]$limit)
+    }
+
+    if ($PolicyProfile.ActionInputs.Contains($ActionId)) {
+        $actionConstraints = $PolicyProfile.ActionInputs[$ActionId]
+        foreach ($inputName in @($actionConstraints.Keys)) {
+            if (-not $Inputs.Contains($inputName)) {
+                $decision = ConvertTo-AdminPolicyDecision @decisionParameters -Decision Denied -ReasonCode ActionInputDenied -Reason 'A policy-constrained action input was not resolved.'
+                return ConvertTo-AdminPolicyResolution -Allowed $false -PolicyDecision $decision -ExecutionSettings $executionSettings
+            }
+            $constraint = $actionConstraints[$inputName]
+            $inputValue = $Inputs[$inputName]
+            if ($null -ne $constraint.Minimum -and [int64]$inputValue -lt [int64]$constraint.Minimum) {
+                $decision = ConvertTo-AdminPolicyDecision @decisionParameters -Decision Denied -ReasonCode ActionInputDenied -Reason 'An action input is below its policy minimum.'
+                return ConvertTo-AdminPolicyResolution -Allowed $false -PolicyDecision $decision -ExecutionSettings $executionSettings
+            }
+            if ($null -ne $constraint.Maximum -and [int64]$inputValue -gt [int64]$constraint.Maximum) {
+                $decision = ConvertTo-AdminPolicyDecision @decisionParameters -Decision Denied -ReasonCode ActionInputDenied -Reason 'An action input exceeds its policy maximum.'
+                return ConvertTo-AdminPolicyResolution -Allowed $false -PolicyDecision $decision -ExecutionSettings $executionSettings
+            }
+            $inputItems = if ($inputValue -is [System.Array]) { @($inputValue) } else { @($inputValue) }
+            if ($null -ne $constraint.MaximumItems -and $inputItems.Count -gt [int]$constraint.MaximumItems) {
+                $decision = ConvertTo-AdminPolicyDecision @decisionParameters -Decision Denied -ReasonCode ActionInputDenied -Reason 'An action input contains more items than the policy permits.'
+                return ConvertTo-AdminPolicyResolution -Allowed $false -PolicyDecision $decision -ExecutionSettings $executionSettings
+            }
+            if ($null -ne $constraint.MaximumLength -and @($inputItems | Where-Object { ([string]$_).Length -gt [int]$constraint.MaximumLength }).Count -gt 0) {
+                $decision = ConvertTo-AdminPolicyDecision @decisionParameters -Decision Denied -ReasonCode ActionInputDenied -Reason 'An action input exceeds its policy length limit.'
+                return ConvertTo-AdminPolicyResolution -Allowed $false -PolicyDecision $decision -ExecutionSettings $executionSettings
+            }
+            if (@($constraint.AllowedValues).Count -gt 0) {
+                foreach ($inputItem in $inputItems) {
+                    if ([string]$inputItem -notin @($constraint.AllowedValues)) {
+                        $decision = ConvertTo-AdminPolicyDecision @decisionParameters -Decision Denied -ReasonCode ActionInputDenied -Reason 'An action input is not present in its policy allow list.'
+                        return ConvertTo-AdminPolicyResolution -Allowed $false -PolicyDecision $decision -ExecutionSettings $executionSettings
+                    }
+                }
+            }
+        }
+    }
+
+    $decision = ConvertTo-AdminPolicyDecision @decisionParameters -Decision Allowed -ReasonCode PolicyAllowed -Reason 'The request satisfies the supplied policy profile.'
+    return ConvertTo-AdminPolicyResolution -Allowed $true -PolicyDecision $decision -ExecutionSettings $executionSettings
+}
+
+function Use-AdminPolicyRuntimeLimit {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$PolicyProfile,
+
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$Parameters
+    )
+
+    $runtimeLimits = @(
+        [pscustomobject]@{ ParameterName = 'MaxConcurrentJobs'; SettingName = 'MaxConcurrentJobs'; LimitName = 'MaxConcurrentJobs' }
+        [pscustomobject]@{ ParameterName = 'RetryCount'; SettingName = 'RetryCount'; LimitName = 'MaxRetryCount' }
+        [pscustomobject]@{ ParameterName = 'RetryDelaySeconds'; SettingName = 'RetryDelaySeconds'; LimitName = 'MaxRetryDelaySeconds' }
+        [pscustomobject]@{ ParameterName = 'OperationTimeoutMinutes'; SettingName = 'OperationTimeoutMinutes'; LimitName = 'MaxOperationTimeoutMinutes' }
+        [pscustomobject]@{ ParameterName = 'ConnectivityTimeoutSeconds'; SettingName = 'ConnectivityTimeoutSeconds'; LimitName = 'MaxConnectivityTimeoutSeconds' }
+    )
+    foreach ($runtimeLimit in $runtimeLimits) {
+        $limit = $PolicyProfile.Limits.($runtimeLimit.LimitName)
+        if ($null -eq $limit) {
+            continue
+        }
+        $requestedValue = [int]$Script:State.($runtimeLimit.SettingName)
+        if ((Test-AdminParameterBound -Parameters $Parameters -Name $runtimeLimit.ParameterName) -and $requestedValue -gt [int]$limit) {
+            throw 'An explicit runtime setting exceeds its policy limit.'
+        }
+        $Script:State.($runtimeLimit.SettingName) = [math]::Min($requestedValue, [int]$limit)
+    }
+}
+
+function Resolve-AdminPolicyContext {
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [AllowNull()]
+        [psobject]$PolicyProfile,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Local', 'Remote')]
+        [string]$TargetMode,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Local', 'WinRM', 'PsExec')]
+        [string]$Transport,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$Computers,
+
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$Parameters
+    )
+
+    $executionSettings = Get-AdminRequestedExecutionSetting -Parameters $Parameters
+    if ($null -eq $PolicyProfile) {
+        $decision = ConvertTo-AdminPolicyDecision -Decision NotApplied -ReasonCode NoPolicy -Reason 'No policy profile was supplied.'
+        return ConvertTo-AdminPolicyResolution -Allowed $true -PolicyDecision $decision -ExecutionSettings $executionSettings
+    }
+    $decisionParameters = @{
+        Applied       = $true
+        SchemaVersion = $PolicyProfile.SchemaVersion
+        ProfileName   = $PolicyProfile.ProfileName
+    }
+    $executionContextDecision = Get-AdminPolicyExecutionContextDecision -PolicyProfile $PolicyProfile -TargetMode $TargetMode -Transport $Transport
+    if ($executionContextDecision.decision -eq 'Denied') {
+        return ConvertTo-AdminPolicyResolution -Allowed $false -PolicyDecision $executionContextDecision -ExecutionSettings $executionSettings
+    }
+    if ($TargetMode -eq 'Remote') {
+        foreach ($computer in $Computers) {
+            if (@($PolicyProfile.TargetsDeny | Where-Object { Test-AdminPolicyTargetMatch -ComputerName $computer -Pattern $_ }).Count -gt 0) {
+                $decision = ConvertTo-AdminPolicyDecision @decisionParameters -Decision Denied -ReasonCode TargetDenied -Reason 'The policy explicitly denies one or more selected targets.'
+                return ConvertTo-AdminPolicyResolution -Allowed $false -PolicyDecision $decision -ExecutionSettings $executionSettings
+            }
+            if (@($PolicyProfile.TargetsAllow | Where-Object { Test-AdminPolicyTargetMatch -ComputerName $computer -Pattern $_ }).Count -eq 0) {
+                $decision = ConvertTo-AdminPolicyDecision @decisionParameters -Decision Denied -ReasonCode TargetNotAllowed -Reason 'One or more selected targets do not match the policy allow patterns.'
+                return ConvertTo-AdminPolicyResolution -Allowed $false -PolicyDecision $decision -ExecutionSettings $executionSettings
+            }
+        }
+    }
+    if ($null -ne $PolicyProfile.Limits.MaxTargets -and $Computers.Count -gt [int]$PolicyProfile.Limits.MaxTargets) {
+        $decision = ConvertTo-AdminPolicyDecision @decisionParameters -Decision Denied -ReasonCode TargetCountExceeded -Reason 'The selected context exceeds the policy target-count limit.'
+        return ConvertTo-AdminPolicyResolution -Allowed $false -PolicyDecision $decision -ExecutionSettings $executionSettings
+    }
+    $decision = ConvertTo-AdminPolicyDecision @decisionParameters -Decision Allowed -ReasonCode PolicyAllowed -Reason 'The selected target context satisfies the supplied policy profile.'
+    return ConvertTo-AdminPolicyResolution -Allowed $true -PolicyDecision $decision -ExecutionSettings $executionSettings
+}
+
+function Get-AdminPolicyActionDecision {
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [AllowNull()]
+        [psobject]$PolicyProfile,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ActionId
+    )
+
+    if ($null -eq $PolicyProfile) {
+        return ConvertTo-AdminPolicyDecision -Decision NotApplied -ReasonCode NoPolicy -Reason 'No policy profile was supplied.'
+    }
+    if ($ActionId -cin $PolicyProfile.ActionsDeny) {
+        return ConvertTo-AdminPolicyDecision -Applied $true -SchemaVersion $PolicyProfile.SchemaVersion -ProfileName $PolicyProfile.ProfileName -Decision Denied -ReasonCode ActionDenied -Reason 'The policy explicitly denies the selected action.'
+    }
+    if ($ActionId -cnotin $PolicyProfile.ActionsAllow) {
+        return ConvertTo-AdminPolicyDecision -Applied $true -SchemaVersion $PolicyProfile.SchemaVersion -ProfileName $PolicyProfile.ProfileName -Decision Denied -ReasonCode ActionNotAllowed -Reason 'The selected action is not present in the policy allow list.'
+    }
+    return ConvertTo-AdminPolicyDecision -Applied $true -SchemaVersion $PolicyProfile.SchemaVersion -ProfileName $PolicyProfile.ProfileName -Decision Allowed -ReasonCode PolicyAllowed -Reason 'The selected action is present in the policy allow list.'
+}
+
+function ConvertTo-AdminActionInputMap {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ActionId,
+
+        [Parameter()]
+        [AllowEmptyCollection()]
+        [object[]]$ArgumentList = @()
+    )
+
+    $inputs = [ordered]@{}
+    switch ($ActionId) {
+        'RunningProcesses' { $inputs.TopCount = [int]$ArgumentList[0] }
+        'WindowsUpdate' { $inputs.IncludeKB = [string[]]@($ArgumentList[0]) }
+        'ScheduleReboot' { $inputs.RebootDelaySeconds = [int]$ArgumentList[0] }
+        'ServiceManagement' {
+            $inputs.ServiceName = [string]$ArgumentList[0]
+            $inputs.ServiceAction = [string]$ArgumentList[1]
+        }
+        'TerminateProcess' { $inputs.ProcessName = [string]$ArgumentList[0] }
+        'ClearTempFiles' {
+            $inputs.MinimumAgeDays = [int]$ArgumentList[0]
+            $inputs.MaximumFiles = [int]$ArgumentList[1]
+        }
+        'ScheduledTasks' {
+            $inputs.TaskPath = [string]$ArgumentList[0]
+            $inputs.MaximumTasks = [int]$ArgumentList[1]
+        }
+        'EventLogQuery' {
+            $inputs.EventLogName = [string]$ArgumentList[0]
+            $inputs.EntryCount = [int]$ArgumentList[1]
+            $inputs.EventLevel = [string[]]@($ArgumentList[2])
+        }
+        'RegistryRead' {
+            $inputs.RegistryPath = [string]$ArgumentList[0]
+            $inputs.RegistryValueName = [string]$ArgumentList[1]
+        }
+        'CustomCommand' { $inputs.CommandText = [string]$ArgumentList[0] }
+        'CustomPowerShell' { $inputs.PowerShellText = [string]$ArgumentList[0] }
+    }
+    return $inputs
+}
+
 function Resolve-AdminAutomationRequest {
     [CmdletBinding()]
     param(
@@ -4087,8 +5350,29 @@ function Resolve-AdminAutomationRequest {
         [System.Collections.IDictionary]$Parameters
     )
 
+    $Script:State.PolicyProfile = $null
+    if (Test-AdminParameterBound -Parameters $Parameters -Name 'PolicyPath') {
+        $requestedPolicyPath = ([string]$Parameters['PolicyPath']).Trim()
+        if ([string]::IsNullOrWhiteSpace($requestedPolicyPath)) {
+            $invalidPolicyDecision = ConvertTo-AdminPolicyDecision -Applied $true -Decision Invalid -ReasonCode PolicyInvalid -Reason 'The supplied policy profile could not be loaded or validated.'
+            return Get-AdminAutomationResolutionFailure -Category Validation -Message 'PolicyPath cannot be empty when supplied.' -PolicyDecision $invalidPolicyDecision
+        }
+        try {
+            $Script:State.PolicyProfile = Import-AdminPolicyProfile -LiteralPath $requestedPolicyPath
+        }
+        catch {
+            $invalidPolicyDecision = ConvertTo-AdminPolicyDecision -Applied $true -Decision Invalid -ReasonCode PolicyInvalid -Reason 'The supplied policy profile could not be loaded or validated.'
+            return Get-AdminAutomationResolutionFailure -Category Validation -Message $_.Exception.Message -PolicyDecision $invalidPolicyDecision
+        }
+    }
+
     if ((Test-AdminParameterBound -Parameters $Parameters -Name 'Confirm') -and [bool]$Parameters['Confirm']) {
         return Get-AdminAutomationResolutionFailure -Category Validation -Message 'Automation mode does not permit an interactive -Confirm prompt. Omit -Confirm or use -Confirm:$false.'
+    }
+    $preflightRequested = (Test-AdminParameterBound -Parameters $Parameters -Name 'Preflight') -and [bool]$Parameters['Preflight']
+    $whatIfRequested = (Test-AdminParameterBound -Parameters $Parameters -Name 'WhatIf') -and [bool]$Parameters['WhatIf']
+    if ($preflightRequested -and $whatIfRequested) {
+        return Get-AdminAutomationResolutionFailure -Category Validation -Message 'Preflight cannot be combined with WhatIf.'
     }
     $configurationError = Get-AdminRuntimeConfigurationError
     if (-not [string]::IsNullOrWhiteSpace($configurationError)) {
@@ -4106,6 +5390,13 @@ function Resolve-AdminAutomationRequest {
     $catalogItem = Get-AdminActionCatalogItem -ActionId $requestedActionId
     if ($null -eq $catalogItem) {
         return Get-AdminAutomationResolutionFailure -Category Validation -Message "Unknown action identifier: $requestedActionId"
+    }
+
+    # Deny a known action before resolving target lists or reading action input files.
+    # This keeps policy-denied requests free of avoidable file-system side effects.
+    $earlyActionDecision = Get-AdminPolicyActionDecision -PolicyProfile $Script:State.PolicyProfile -ActionId $catalogItem.Id
+    if ($earlyActionDecision.decision -eq 'Denied') {
+        return Get-AdminAutomationResolutionFailure -Category Authorization -Message $earlyActionDecision.reason -PolicyDecision $earlyActionDecision
     }
 
     $allowedInputs = @($Script:AutomationActionInputs[$catalogItem.Id])
@@ -4127,6 +5418,11 @@ function Resolve-AdminAutomationRequest {
     }
 
     $targetMode = if ($localSelected) { 'Local' } else { 'Remote' }
+    $policyTransport = if ($targetMode -eq 'Local') { 'Local' } else { $Script:State.Transport }
+    $earlyContextDecision = Get-AdminPolicyExecutionContextDecision -PolicyProfile $Script:State.PolicyProfile -TargetMode $targetMode -Transport $policyTransport
+    if ($earlyContextDecision.decision -eq 'Denied') {
+        return Get-AdminAutomationResolutionFailure -Category Authorization -Message $earlyContextDecision.reason -PolicyDecision $earlyContextDecision
+    }
     $computers = @()
     if ($targetMode -eq 'Local') {
         $remoteOnlyParameters = @(
@@ -4176,6 +5472,11 @@ function Resolve-AdminAutomationRequest {
         }
     }
 
+    $earlyTargetPolicyResolution = Resolve-AdminPolicyContext -PolicyProfile $Script:State.PolicyProfile -TargetMode $targetMode -Transport $policyTransport -Computers $computers -Parameters $Parameters
+    if (-not $earlyTargetPolicyResolution.Allowed) {
+        return Get-AdminAutomationResolutionFailure -Category Authorization -Message $earlyTargetPolicyResolution.PolicyDecision.reason -PolicyDecision $earlyTargetPolicyResolution.PolicyDecision
+    }
+
     if ($computers.Count -gt 25) {
         $targetAuthorization = if (Test-AdminParameterBound -Parameters $Parameters -Name 'TargetListConfirmationText') { [string]$Parameters['TargetListConfirmationText'] } else { '' }
         if ($targetAuthorization -cne 'USE TARGET LIST') {
@@ -4216,6 +5517,7 @@ function Resolve-AdminAutomationRequest {
     }
 
     $arguments = @()
+    $normalizedInputs = [ordered]@{}
     $effectiveReadOnly = [bool]$catalogItem.ReadOnly
     switch ($catalogItem.Id) {
         'RunningProcesses' {
@@ -4224,6 +5526,7 @@ function Resolve-AdminAutomationRequest {
                 return Get-AdminAutomationResolutionFailure -Category Validation -Message 'TopCount must be from 1 through 100.'
             }
             $arguments = @($value)
+            $normalizedInputs.TopCount = $value
         }
         'WindowsUpdate' {
             $requestedKbs = @(if (Test-AdminParameterBound -Parameters $Parameters -Name 'IncludeKB') { $Parameters['IncludeKB'] })
@@ -4245,6 +5548,7 @@ function Resolve-AdminAutomationRequest {
                 }
             }
             $arguments = @(, $normalizedKbs.ToArray())
+            $normalizedInputs.IncludeKB = [string[]]$normalizedKbs.ToArray()
         }
         'ScheduleReboot' {
             $value = if (Test-AdminParameterBound -Parameters $Parameters -Name 'RebootDelaySeconds') { [int]$Parameters['RebootDelaySeconds'] } else { 60 }
@@ -4252,6 +5556,7 @@ function Resolve-AdminAutomationRequest {
                 return Get-AdminAutomationResolutionFailure -Category Validation -Message 'RebootDelaySeconds must be from 30 through 3600.'
             }
             $arguments = @($value)
+            $normalizedInputs.RebootDelaySeconds = $value
         }
         'ServiceManagement' {
             $requestedService = if (Test-AdminParameterBound -Parameters $Parameters -Name 'ServiceName') { ([string]$Parameters['ServiceName']).Trim() } else { '' }
@@ -4272,6 +5577,8 @@ function Resolve-AdminAutomationRequest {
             $canonicalServiceAction = $serviceActionMap[$serviceActionKey]
             $effectiveReadOnly = $canonicalServiceAction -eq 'Query'
             $arguments = @($requestedService, $canonicalServiceAction)
+            $normalizedInputs.ServiceName = $requestedService
+            $normalizedInputs.ServiceAction = $canonicalServiceAction
         }
         'TerminateProcess' {
             $requestedProcess = if (Test-AdminParameterBound -Parameters $Parameters -Name 'ProcessName') { ([string]$Parameters['ProcessName']).Trim() } else { '' }
@@ -4284,6 +5591,7 @@ function Resolve-AdminAutomationRequest {
                 return Get-AdminAutomationResolutionFailure -Category Authorization -Message "The safety policy blocks termination of core Windows process '$baseName'."
             }
             $arguments = @($requestedProcess)
+            $normalizedInputs.ProcessName = $requestedProcess
         }
         'ClearTempFiles' {
             $age = if (Test-AdminParameterBound -Parameters $Parameters -Name 'MinimumAgeDays') { [int]$Parameters['MinimumAgeDays'] } else { 2 }
@@ -4295,6 +5603,8 @@ function Resolve-AdminAutomationRequest {
                 return Get-AdminAutomationResolutionFailure -Category Validation -Message 'MaximumFiles must be from 100 through 100000.'
             }
             $arguments = @($age, $maximum)
+            $normalizedInputs.MinimumAgeDays = $age
+            $normalizedInputs.MaximumFiles = $maximum
         }
         'ScheduledTasks' {
             $requestedTaskPath = if (Test-AdminParameterBound -Parameters $Parameters -Name 'TaskPath') { ([string]$Parameters['TaskPath']).Trim() } else { '\' }
@@ -4312,6 +5622,8 @@ function Resolve-AdminAutomationRequest {
                 return Get-AdminAutomationResolutionFailure -Category Validation -Message 'MaximumTasks must be from 1 through 500.'
             }
             $arguments = @($requestedTaskPath, $maximum)
+            $normalizedInputs.TaskPath = $requestedTaskPath
+            $normalizedInputs.MaximumTasks = $maximum
         }
         'EventLogQuery' {
             $requestedLogName = if (Test-AdminParameterBound -Parameters $Parameters -Name 'EventLogName') { ([string]$Parameters['EventLogName']).Trim() } else { 'System' }
@@ -4355,6 +5667,9 @@ function Resolve-AdminAutomationRequest {
                 return Get-AdminAutomationResolutionFailure -Category Validation -Message 'At least one EventLevel is required.'
             }
             $arguments = @($requestedLogName, $count, [string[]]$levels.ToArray())
+            $normalizedInputs.EventLogName = $requestedLogName
+            $normalizedInputs.EntryCount = $count
+            $normalizedInputs.EventLevel = [string[]]$levels.ToArray()
         }
         'RegistryRead' {
             $requestedRegistryPath = if (Test-AdminParameterBound -Parameters $Parameters -Name 'RegistryPath') { ([string]$Parameters['RegistryPath']).Trim() } else { '' }
@@ -4366,6 +5681,8 @@ function Resolve-AdminAutomationRequest {
                 return Get-AdminAutomationResolutionFailure -Category Validation -Message 'RegistryValueName is invalid.'
             }
             $arguments = @($requestedRegistryPath, $requestedValueName)
+            $normalizedInputs.RegistryPath = $requestedRegistryPath
+            $normalizedInputs.RegistryValueName = $requestedValueName
         }
         'CustomCommand' {
             $requestedCommand = if (Test-AdminParameterBound -Parameters $Parameters -Name 'CommandText') { [string]$Parameters['CommandText'] } else { '' }
@@ -4373,6 +5690,7 @@ function Resolve-AdminAutomationRequest {
                 return Get-AdminAutomationResolutionFailure -Category Validation -Message 'CustomCommand requires nonempty CommandText no longer than 32767 characters.'
             }
             $arguments = @($requestedCommand)
+            $normalizedInputs.CommandText = $requestedCommand
         }
         'CustomPowerShell' {
             $requestedScriptText = if (Test-AdminParameterBound -Parameters $Parameters -Name 'PowerShellText') { [string]$Parameters['PowerShellText'] } else { '' }
@@ -4386,6 +5704,7 @@ function Resolve-AdminAutomationRequest {
                 try {
                     $resolvedScriptPath = Resolve-AdminAutomationInputFile -LiteralPath $requestedScriptFile -RequiredExtension '.ps1'
                     $requestedScriptText = Read-AdminBoundedUtf8File -LiteralPath $resolvedScriptPath -MaximumBytes 1048576
+                    $normalizedInputs.PowerShellFile = $resolvedScriptPath
                 }
                 catch {
                     return Get-AdminAutomationResolutionFailure -Category Validation -Message $_.Exception.Message
@@ -4396,24 +5715,29 @@ function Resolve-AdminAutomationRequest {
                 return Get-AdminAutomationResolutionFailure -Category Validation -Message 'PowerShell source is invalid and was not executed.'
             }
             $arguments = @($requestedScriptText)
+            $normalizedInputs.PowerShellText = $requestedScriptText
         }
+    }
+
+    $policyResolution = Resolve-AdminPolicyRequest -PolicyProfile $Script:State.PolicyProfile -ActionId $catalogItem.Id -TargetMode $targetMode -Transport $policyTransport -Computers $computers -Inputs $normalizedInputs -Parameters $Parameters
+    if (-not $policyResolution.Allowed) {
+        return Get-AdminAutomationResolutionFailure -Category Authorization -Message $policyResolution.PolicyDecision.reason -PolicyDecision $policyResolution.PolicyDecision
     }
 
     $expectedConfirmation = if ($Script:AutomationConfirmations.Contains($catalogItem.Id)) { [string]$Script:AutomationConfirmations[$catalogItem.Id] } else { $null }
     $providedConfirmation = if (Test-AdminParameterBound -Parameters $Parameters -Name 'ConfirmationText') { [string]$Parameters['ConfirmationText'] } else { '' }
-    $whatIfRequested = (Test-AdminParameterBound -Parameters $Parameters -Name 'WhatIf') -and [bool]$Parameters['WhatIf']
     if ($effectiveReadOnly) {
         if (-not [string]::IsNullOrWhiteSpace($providedConfirmation)) {
-            return Get-AdminAutomationResolutionFailure -Category Validation -Message 'ConfirmationText is not accepted for a read-only request.'
+            return Get-AdminAutomationResolutionFailure -Category Validation -Message 'ConfirmationText is not accepted for a read-only request.' -PolicyDecision $policyResolution.PolicyDecision
         }
     }
-    elseif ($whatIfRequested) {
+    elseif ($whatIfRequested -or $preflightRequested) {
         if (-not [string]::IsNullOrWhiteSpace($providedConfirmation) -and $providedConfirmation -cne $expectedConfirmation) {
-            return Get-AdminAutomationResolutionFailure -Category Authorization -Message "The supplied ConfirmationText does not match the exact value $expectedConfirmation."
+            return Get-AdminAutomationResolutionFailure -Category Authorization -Message "The supplied ConfirmationText does not match the exact value $expectedConfirmation." -PolicyDecision $policyResolution.PolicyDecision
         }
     }
     elseif ($providedConfirmation -cne $expectedConfirmation) {
-        return Get-AdminAutomationResolutionFailure -Category Authorization -Message "This action requires -ConfirmationText with the exact value $expectedConfirmation."
+        return Get-AdminAutomationResolutionFailure -Category Authorization -Message "This action requires -ConfirmationText with the exact value $expectedConfirmation." -PolicyDecision $policyResolution.PolicyDecision
     }
 
     $warnings = New-Object 'System.Collections.Generic.List[string]'
@@ -4431,13 +5755,19 @@ function Resolve-AdminAutomationRequest {
         ExpectedConfirmation = $expectedConfirmation
         TargetMode          = $targetMode
         Computers           = @($computers)
+        Inputs              = $normalizedInputs
+        Preflight           = $preflightRequested
+        PolicyProfile       = $Script:State.PolicyProfile
+        PolicyDecision      = $policyResolution.PolicyDecision
+        ExecutionSettings   = $policyResolution.ExecutionSettings
         Warnings            = @($warnings.ToArray())
     }
     return [pscustomobject][ordered]@{
-        Success  = $true
-        Category = $null
-        Message  = $null
-        Request  = $request
+        Success       = $true
+        Category      = $null
+        Message       = $null
+        PolicyDecision = $policyResolution.PolicyDecision
+        Request       = $request
     }
 }
 
@@ -4505,11 +5835,18 @@ function Invoke-AdminAutomation {
     $transportName = $requestedTargetSummary.Transport
     $transportAuthentication = $requestedTargetSummary.Authentication
     $transportUseSsl = $requestedTargetSummary.UseSsl
+    $preflightRequested = (Test-AdminParameterBound -Parameters $Parameters -Name 'Preflight') -and [bool]$Parameters['Preflight']
+    $requestedPolicyDecision = if (Test-AdminParameterBound -Parameters $Parameters -Name 'PolicyPath') {
+        ConvertTo-AdminPolicyDecision -Applied $true -Decision NotEvaluated -ReasonCode NotEvaluated -Reason 'The policy profile has not been evaluated.'
+    }
+    else {
+        ConvertTo-AdminPolicyDecision -Decision NotApplied -ReasonCode NoPolicy -Reason 'No policy profile was supplied.'
+    }
 
     if ((Test-AdminParameterBound -Parameters $Parameters -Name 'ListActions') -and [bool]$Parameters['ListActions']) {
         if (Test-AdminParameterBound -Parameters $Parameters -Name 'Action') {
             $finishedAtUtc = [datetime]::UtcNow
-            return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -ActionId $requestedActionId -Status ValidationFailed -Outcome ValidationFailure -ExitCode $Script:AutomationExitCodes.ValidationFailure -Errors @([pscustomobject]@{ Category = 'Validation'; Message = 'ListActions cannot be combined with Action.' }) -ReportPaths $reportPaths
+            return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -ActionId $requestedActionId -PolicyDecision $requestedPolicyDecision -Status ValidationFailed -Outcome ValidationFailure -ExitCode $Script:AutomationExitCodes.ValidationFailure -Errors @([pscustomobject]@{ Category = 'Validation'; Message = 'ListActions cannot be combined with Action.' }) -ReportPaths $reportPaths
         }
         $catalogOnlyParameters = @(
             'Transport',
@@ -4531,24 +5868,42 @@ function Invoke-AdminAutomation {
             'ConfirmationText',
             'TargetListConfirmationText',
             'PsExecConfirmationText',
+            'Preflight',
             'WhatIf',
             'Confirm'
         ) + $Script:AutomationInputNames
         foreach ($parameterName in $catalogOnlyParameters) {
             if (Test-AdminParameterBound -Parameters $Parameters -Name $parameterName) {
                 $finishedAtUtc = [datetime]::UtcNow
-                return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -Status ValidationFailed -Outcome ValidationFailure -ExitCode $Script:AutomationExitCodes.ValidationFailure -Errors @([pscustomobject]@{ Category = 'Validation'; Message = "Parameter -$parameterName cannot be combined with -ListActions." }) -ReportPaths $reportPaths
+                return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -PolicyDecision $requestedPolicyDecision -Status ValidationFailed -Outcome ValidationFailure -ExitCode $Script:AutomationExitCodes.ValidationFailure -Errors @([pscustomobject]@{ Category = 'Validation'; Message = "Parameter -$parameterName cannot be combined with -ListActions." }) -ReportPaths $reportPaths
             }
         }
 
-        $actions = @(Get-AdminAutomationActionCatalog)
+        $catalogPolicyProfile = $null
+        $catalogPolicyDecision = $requestedPolicyDecision
+        if (Test-AdminParameterBound -Parameters $Parameters -Name 'PolicyPath') {
+            $requestedCatalogPolicyPath = ([string]$Parameters['PolicyPath']).Trim()
+            try {
+                if ([string]::IsNullOrWhiteSpace($requestedCatalogPolicyPath)) {
+                    throw 'PolicyPath cannot be empty when supplied.'
+                }
+                $catalogPolicyProfile = Import-AdminPolicyProfile -LiteralPath $requestedCatalogPolicyPath
+                $catalogPolicyDecision = ConvertTo-AdminPolicyDecision -Applied $true -SchemaVersion $catalogPolicyProfile.SchemaVersion -ProfileName $catalogPolicyProfile.ProfileName -Decision Allowed -ReasonCode PolicyLoaded -Reason 'The policy profile was validated and applied to the action catalog.'
+            }
+            catch {
+                $invalidPolicyDecision = ConvertTo-AdminPolicyDecision -Applied $true -Decision Invalid -ReasonCode PolicyInvalid -Reason 'The supplied policy profile could not be loaded or validated.'
+                $finishedAtUtc = [datetime]::UtcNow
+                return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -PolicyDecision $invalidPolicyDecision -Status ValidationFailed -Outcome ValidationFailure -ExitCode $Script:AutomationExitCodes.ValidationFailure -Errors @([pscustomobject]@{ Category = 'Validation'; Message = $_.Exception.Message }) -ReportPaths $reportPaths
+            }
+        }
+        $actions = @(Get-AdminAutomationActionCatalog -PolicyProfile $catalogPolicyProfile)
         $finishedAtUtc = [datetime]::UtcNow
-        return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -Status Succeeded -Outcome CompleteSuccess -ExitCode $Script:AutomationExitCodes.CompleteSuccess -Actions $actions -ReportPaths $reportPaths
+        return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -PolicyDecision $catalogPolicyDecision -Status Succeeded -Outcome CompleteSuccess -ExitCode $Script:AutomationExitCodes.CompleteSuccess -Actions $actions -ReportPaths $reportPaths
     }
 
     if (-not (Test-WindowsPlatform)) {
         $finishedAtUtc = [datetime]::UtcNow
-        return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -ActionId $requestedActionId -Status ValidationFailed -Outcome ValidationFailure -ExitCode $Script:AutomationExitCodes.ValidationFailure -Errors @([pscustomobject]@{ Category = 'Validation'; Message = 'Windows Admin Toolkit runs only on Windows.' }) -ReportPaths $reportPaths
+        return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -ActionId $requestedActionId -PolicyDecision $requestedPolicyDecision -Status ValidationFailed -Outcome ValidationFailure -ExitCode $Script:AutomationExitCodes.ValidationFailure -Errors @([pscustomobject]@{ Category = 'Validation'; Message = 'Windows Admin Toolkit runs only on Windows.' }) -ReportPaths $reportPaths
     }
 
     $resolution = Resolve-AdminAutomationRequest -Parameters $Parameters
@@ -4559,8 +5914,19 @@ function Invoke-AdminAutomation {
         $outcome = if ($resolution.Category -eq 'Authorization') { 'AuthorizationFailure' } else { 'ValidationFailure' }
         $status = if ($resolution.Category -eq 'Authorization') { 'AuthorizationFailed' } else { 'ValidationFailed' }
         $exitCode = if ($resolution.Category -eq 'Authorization') { $Script:AutomationExitCodes.AuthorizationFailure } else { $Script:AutomationExitCodes.ValidationFailure }
+        $resolutionWarnings = New-Object 'System.Collections.Generic.List[string]'
+        if ($resolution.PolicyDecision.applied) {
+            try {
+                $requestedFailureLogPath = if (Test-AdminParameterBound -Parameters $Parameters -Name 'LogFile') { [string]$Parameters['LogFile'] } else { $null }
+                [void](Initialize-AdminLog -RequestedPath $requestedFailureLogPath)
+                Write-AdminLog -Message ("Automation run {0} policy decision: {1} ({2})." -f $runId, $resolution.PolicyDecision.decision, $resolution.PolicyDecision.reasonCode) -NoConsole
+            }
+            catch {
+                $resolutionWarnings.Add('The policy decision was returned in JSON, but the safe log could not be initialized.') | Out-Null
+            }
+        }
         $finishedAtUtc = [datetime]::UtcNow
-        return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -ActionId $requestedActionId -ActionName $actionName -ReadOnly $readOnly -TargetMode $requestedTargetSummary.TargetMode -Transport $transportName -Authentication $transportAuthentication -UseSsl $transportUseSsl -Status $status -Outcome $outcome -ExitCode $exitCode -RequestedTargetCount $requestedTargetSummary.RequestedTargetCount -Errors @([pscustomobject]@{ Category = $resolution.Category; Message = $resolution.Message }) -ReportPaths $reportPaths
+        return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -ActionId $requestedActionId -ActionName $actionName -ReadOnly $readOnly -Preflight $preflightRequested -PolicyDecision $resolution.PolicyDecision -TargetMode $requestedTargetSummary.TargetMode -Transport $transportName -Authentication $transportAuthentication -UseSsl $transportUseSsl -Status $status -Outcome $outcome -ExitCode $exitCode -RequestedTargetCount $requestedTargetSummary.RequestedTargetCount -Errors @([pscustomobject]@{ Category = $resolution.Category; Message = $resolution.Message }) -Warnings $resolutionWarnings.ToArray() -ReportPaths $reportPaths
     }
 
     $request = $resolution.Request
@@ -4571,13 +5937,14 @@ function Invoke-AdminAutomation {
         $requestedLogPath = if (Test-AdminParameterBound -Parameters $Parameters -Name 'LogFile') { [string]$Parameters['LogFile'] } else { $null }
         [void](Initialize-AdminLog -RequestedPath $requestedLogPath)
         Write-AdminLog -Message ("Automation run {0} prepared action '{1}' for {2} target(s)." -f $runId, $request.ActionName, $request.Computers.Count) -NoConsole
+        Write-AdminLog -Message ("Automation run {0} policy decision: {1} ({2})." -f $runId, $request.PolicyDecision.decision, $request.PolicyDecision.reasonCode) -NoConsole
     }
     catch {
         $finishedAtUtc = [datetime]::UtcNow
-        return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -ActionId $request.ActionId -ActionName $request.ActionName -ReadOnly $request.ReadOnly -TargetMode $request.TargetMode -Transport $transportName -Authentication $transportAuthentication -UseSsl $transportUseSsl -Status ValidationFailed -Outcome ValidationFailure -ExitCode $Script:AutomationExitCodes.ValidationFailure -RequestedTargetCount $request.Computers.Count -Errors @([pscustomobject]@{ Category = 'Validation'; Message = "Unable to initialize the log: $($_.Exception.Message)" }) -ReportPaths $reportPaths
+        return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -ActionId $request.ActionId -ActionName $request.ActionName -ReadOnly $request.ReadOnly -Preflight $request.Preflight -PolicyDecision $request.PolicyDecision -TargetMode $request.TargetMode -Transport $transportName -Authentication $transportAuthentication -UseSsl $transportUseSsl -Status ValidationFailed -Outcome ValidationFailure -ExitCode $Script:AutomationExitCodes.ValidationFailure -RequestedTargetCount $request.Computers.Count -Errors @([pscustomobject]@{ Category = 'Validation'; Message = "Unable to initialize the log: $($_.Exception.Message)" }) -ReportPaths $reportPaths
     }
 
-    if (-not $request.ReadOnly) {
+    if (-not $request.ReadOnly -and -not $request.Preflight) {
         $whatIfRequested = (Test-AdminParameterBound -Parameters $Parameters -Name 'WhatIf') -and [bool]$Parameters['WhatIf']
         if ($whatIfRequested) {
             $previewResults = New-Object 'System.Collections.Generic.List[object]'
@@ -4588,14 +5955,14 @@ function Invoke-AdminAutomation {
             $warnings = @($request.Warnings) + @('WhatIf preview completed. No target operation was started.')
             $finishedAtUtc = [datetime]::UtcNow
             Write-AdminLog -Message ("Automation run {0} completed as a WhatIf preview." -f $runId) -NoConsole
-            return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -ActionId $request.ActionId -ActionName $request.ActionName -ReadOnly $request.ReadOnly -TargetMode $request.TargetMode -Transport $transportName -Authentication $transportAuthentication -UseSsl $transportUseSsl -Status WhatIf -Outcome CompleteSuccess -ExitCode $Script:AutomationExitCodes.CompleteSuccess -RequestedTargetCount $request.Computers.Count -TargetResults $previewResults.ToArray() -Warnings $warnings -ReportPaths $reportPaths
+            return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -ActionId $request.ActionId -ActionName $request.ActionName -ReadOnly $request.ReadOnly -PolicyDecision $request.PolicyDecision -TargetMode $request.TargetMode -Transport $transportName -Authentication $transportAuthentication -UseSsl $transportUseSsl -Status WhatIf -Outcome CompleteSuccess -ExitCode $Script:AutomationExitCodes.CompleteSuccess -RequestedTargetCount $request.Computers.Count -TargetResults $previewResults.ToArray() -Warnings $warnings -ReportPaths $reportPaths
         }
 
         $targetDescription = if ($request.TargetMode -eq 'Local') { "local computer $env:COMPUTERNAME" } else { "$($request.Computers.Count) remote target(s)" }
         $shouldProcess = $PSCmdlet.ShouldProcess($targetDescription, $request.ActionName)
         if (-not $shouldProcess) {
             $finishedAtUtc = [datetime]::UtcNow
-            return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -ActionId $request.ActionId -ActionName $request.ActionName -ReadOnly $request.ReadOnly -TargetMode $request.TargetMode -Transport $transportName -Authentication $transportAuthentication -UseSsl $transportUseSsl -Status AuthorizationFailed -Outcome AuthorizationFailure -ExitCode $Script:AutomationExitCodes.AuthorizationFailure -RequestedTargetCount $request.Computers.Count -Errors @([pscustomobject]@{ Category = 'Authorization'; Message = 'PowerShell ShouldProcess did not authorize the operation.' }) -Warnings $request.Warnings -ReportPaths $reportPaths
+            return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -ActionId $request.ActionId -ActionName $request.ActionName -ReadOnly $request.ReadOnly -PolicyDecision $request.PolicyDecision -TargetMode $request.TargetMode -Transport $transportName -Authentication $transportAuthentication -UseSsl $transportUseSsl -Status AuthorizationFailed -Outcome AuthorizationFailure -ExitCode $Script:AutomationExitCodes.AuthorizationFailure -RequestedTargetCount $request.Computers.Count -Errors @([pscustomobject]@{ Category = 'Authorization'; Message = 'PowerShell ShouldProcess did not authorize the operation.' }) -Warnings $request.Warnings -ReportPaths $reportPaths
         }
     }
 
@@ -4609,7 +5976,7 @@ function Invoke-AdminAutomation {
         $port = if ($Script:State.Transport -eq 'PsExec') { 445 } elseif ($Script:State.UseSsl) { 5986 } else { 5985 }
         $preflightStartedAtUtc = [datetime]::UtcNow
         try {
-            $preflight = Test-AdminTargetConnectivity -Computers $request.Computers -Port $port -TimeoutSeconds $Script:State.ConnectivityTimeoutSeconds -BatchSize $Script:State.MaxConcurrentJobs
+            $preflight = Test-AdminTargetConnectivity -Computers $request.Computers -Port $port -TimeoutSeconds $request.ExecutionSettings.ConnectivityTimeoutSeconds -BatchSize $request.ExecutionSettings.MaxConcurrentJobs
             $executionComputers = @($preflight.Reachable)
             foreach ($unreachableComputer in @($preflight.Unreachable)) {
                 $preflightFinishedAtUtc = [datetime]::UtcNow
@@ -4629,21 +5996,38 @@ function Invoke-AdminAutomation {
         }
     }
 
+    $executionActionName = $request.Script
+    $executionArguments = @($request.Arguments)
+    $executionReadOnly = $request.ReadOnly
+    if ($request.Preflight) {
+        $capabilityRequirements = Get-AdminActionCapabilityRequirement -ActionId $request.ActionId -Inputs $request.Inputs
+        $executionActionName = 'CapabilityPreflight'
+        $capabilityArguments = New-Object 'System.Collections.Generic.List[object]'
+        $capabilityArguments.Add([string]$request.ActionId) | Out-Null
+        $capabilityArguments.Add([string[]]@($capabilityRequirements.Commands)) | Out-Null
+        $capabilityArguments.Add([string[]]@($capabilityRequirements.Executables)) | Out-Null
+        $capabilityArguments.Add([string[]]@($capabilityRequirements.ComObjects)) | Out-Null
+        $capabilityArguments.Add([bool]$capabilityRequirements.RequiresAdministrator) | Out-Null
+        $executionArguments = $capabilityArguments.ToArray()
+        $executionReadOnly = $true
+        $warnings.Add('Capability preflight completed without executing the requested action.') | Out-Null
+    }
+
     $executionResults = @()
     if ($executionComputers.Count -gt 0) {
         try {
-            $executionResults = @(Invoke-AdminTargetDetailed -TargetMode $request.TargetMode -Computers $executionComputers -ActionName $request.Script -ArgumentList $request.Arguments -ReadOnly $request.ReadOnly)
+            $executionResults = @(Invoke-AdminTargetDetailed -TargetMode $request.TargetMode -Computers $executionComputers -ActionName $executionActionName -ArgumentList $executionArguments -ReadOnly $executionReadOnly -MaxConcurrentJobs $request.ExecutionSettings.MaxConcurrentJobs -RetryCount $request.ExecutionSettings.RetryCount -RetryDelaySeconds $request.ExecutionSettings.RetryDelaySeconds -OperationTimeoutMinutes $request.ExecutionSettings.OperationTimeoutMinutes)
         }
         catch [System.Management.Automation.PipelineStoppedException] {
             $finishedAtUtc = [datetime]::UtcNow
             Write-AdminLog -Message ("Automation run {0} was cancelled before completion." -f $runId) -Level WARN -NoConsole
-            return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -ActionId $request.ActionId -ActionName $request.ActionName -ReadOnly $request.ReadOnly -TargetMode $request.TargetMode -Transport $transportName -Authentication $transportAuthentication -UseSsl $transportUseSsl -Status InternalFailure -Outcome InternalFailure -ExitCode $Script:AutomationExitCodes.InternalFailure -RequestedTargetCount $request.Computers.Count -Errors @([pscustomobject]@{ Category = 'Internal'; Message = 'The automation run was cancelled before completion.' }) -Warnings $warnings.ToArray() -ReportPaths $reportPaths
+            return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -ActionId $request.ActionId -ActionName $request.ActionName -ReadOnly $request.ReadOnly -Preflight $request.Preflight -PolicyDecision $request.PolicyDecision -TargetMode $request.TargetMode -Transport $transportName -Authentication $transportAuthentication -UseSsl $transportUseSsl -Status InternalFailure -Outcome InternalFailure -ExitCode $Script:AutomationExitCodes.InternalFailure -RequestedTargetCount $request.Computers.Count -Errors @([pscustomobject]@{ Category = 'Internal'; Message = 'The automation run was cancelled before completion.' }) -Warnings $warnings.ToArray() -ReportPaths $reportPaths
         }
         catch {
             $finishedAtUtc = [datetime]::UtcNow
             $internalErrorMessage = if ($request.Script -in @('CustomCommand', 'CustomPowerShell')) { 'The custom action failed internally. Operator-supplied error text was omitted.' } else { ConvertTo-AdminSafeErrorMessage -Message $_.Exception.Message }
             Write-AdminLog -Message ("Automation run {0} failed internally: {1}" -f $runId, $internalErrorMessage) -Level ERROR -NoConsole
-            return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -ActionId $request.ActionId -ActionName $request.ActionName -ReadOnly $request.ReadOnly -TargetMode $request.TargetMode -Transport $transportName -Authentication $transportAuthentication -UseSsl $transportUseSsl -Status InternalFailure -Outcome InternalFailure -ExitCode $Script:AutomationExitCodes.InternalFailure -RequestedTargetCount $request.Computers.Count -Errors @([pscustomobject]@{ Category = 'Internal'; Message = $internalErrorMessage }) -Warnings $warnings.ToArray() -ReportPaths $reportPaths
+            return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -ActionId $request.ActionId -ActionName $request.ActionName -ReadOnly $request.ReadOnly -Preflight $request.Preflight -PolicyDecision $request.PolicyDecision -TargetMode $request.TargetMode -Transport $transportName -Authentication $transportAuthentication -UseSsl $transportUseSsl -Status InternalFailure -Outcome InternalFailure -ExitCode $Script:AutomationExitCodes.InternalFailure -RequestedTargetCount $request.Computers.Count -Errors @([pscustomobject]@{ Category = 'Internal'; Message = $internalErrorMessage }) -Warnings $warnings.ToArray() -ReportPaths $reportPaths
         }
     }
 
@@ -4676,7 +6060,7 @@ function Invoke-AdminAutomation {
 
     $finishedAtUtc = [datetime]::UtcNow
     Write-AdminLog -Message ("Automation run {0} finished with outcome {1}." -f $runId, $aggregate.Outcome) -NoConsole
-    return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -ActionId $request.ActionId -ActionName $request.ActionName -ReadOnly $request.ReadOnly -TargetMode $request.TargetMode -Transport $transportName -Authentication $transportAuthentication -UseSsl $transportUseSsl -Status $aggregate.Status -Outcome $aggregate.Outcome -ExitCode $aggregate.ExitCode -RequestedTargetCount $request.Computers.Count -TargetResults $orderedResults.ToArray() -Warnings $warnings.ToArray() -ReportPaths $reportPaths
+    return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -ActionId $request.ActionId -ActionName $request.ActionName -ReadOnly $request.ReadOnly -Preflight $request.Preflight -PolicyDecision $request.PolicyDecision -TargetMode $request.TargetMode -Transport $transportName -Authentication $transportAuthentication -UseSsl $transportUseSsl -Status $aggregate.Status -Outcome $aggregate.Outcome -ExitCode $aggregate.ExitCode -RequestedTargetCount $request.Computers.Count -TargetResults $orderedResults.ToArray() -Warnings $warnings.ToArray() -ReportPaths $reportPaths
 }
 
 function Show-AdminResult {
@@ -4722,6 +6106,18 @@ function Invoke-WindowsAdminToolkit {
         throw 'Windows Admin Toolkit runs only on Windows.'
     }
 
+    $interactivePolicyProfile = $null
+    $Script:State.PolicyProfile = $null
+    if (Test-AdminParameterBound -Parameters $Script:InvocationParameters -Name 'PolicyPath') {
+        $requestedPolicyPath = ([string]$Script:InvocationParameters['PolicyPath']).Trim()
+        if ([string]::IsNullOrWhiteSpace($requestedPolicyPath)) {
+            throw 'PolicyPath cannot be empty when supplied.'
+        }
+        $interactivePolicyProfile = Import-AdminPolicyProfile -LiteralPath $requestedPolicyPath
+        $Script:State.PolicyProfile = $interactivePolicyProfile
+        Use-AdminPolicyRuntimeLimit -PolicyProfile $interactivePolicyProfile -Parameters $Script:InvocationParameters
+    }
+
     if ($null -ne $Script:State.Credential -and $Script:State.Credential -isnot [System.Management.Automation.PSCredential]) {
         if ($Script:State.Transport -eq 'PsExec') {
             throw 'PsExec does not accept alternate credentials in this toolkit.'
@@ -4745,6 +6141,10 @@ function Invoke-WindowsAdminToolkit {
     [void](Initialize-AdminLog -RequestedPath $LogFile)
     Write-AdminBanner
     Write-AdminLog -Message "Windows Admin Toolkit $Script:ToolkitVersion started under PowerShell $($PSVersionTable.PSVersion)." -NoConsole
+    if ($interactivePolicyProfile) {
+        Write-Host "Policy profile: $($interactivePolicyProfile.ProfileName)" -ForegroundColor Gray
+        Write-AdminLog -Message ("Policy profile '{0}' loaded and validated." -f $interactivePolicyProfile.ProfileName) -NoConsole
+    }
 
     if (-not (Test-Administrator)) {
         Write-Host 'Warning: The current PowerShell session is not elevated. Some actions will fail.' -ForegroundColor Yellow
@@ -4755,8 +6155,17 @@ function Invoke-WindowsAdminToolkit {
         Write-Host ("WinRM security: Authentication={0}, SSL={1}" -f $Script:State.Authentication, $Script:State.UseSsl) -ForegroundColor Gray
     }
 
-    $context = Select-AdminTargetContext
+    $context = Select-AdminTargetContext -PolicyProfile $interactivePolicyProfile
     Write-AdminLog -Message ("Selected {0} mode with {1} target(s)." -f $context.Mode, $context.Computers.Count) -NoConsole
+    $contextTransport = if ($context.Mode -eq 'Local') { 'Local' } else { $Script:State.Transport }
+    $contextPolicyResolution = Resolve-AdminPolicyContext -PolicyProfile $interactivePolicyProfile -TargetMode $context.Mode -Transport $contextTransport -Computers $context.Computers -Parameters $Script:InvocationParameters
+    if (-not $contextPolicyResolution.Allowed) {
+        Write-AdminLog -Message ("Policy denied the selected target context: {0}." -f $contextPolicyResolution.PolicyDecision.reasonCode) -Level ERROR -NoConsole
+        throw $contextPolicyResolution.PolicyDecision.reason
+    }
+    if ($interactivePolicyProfile) {
+        Write-AdminLog -Message ("Policy allowed the selected target context: {0}." -f $contextPolicyResolution.PolicyDecision.reasonCode) -NoConsole
+    }
 
     while ($true) {
         Show-AdminMenu -TargetMode $context.Mode
@@ -4775,6 +6184,14 @@ function Invoke-WindowsAdminToolkit {
             continue
         }
 
+        $selectedCatalogItem = Get-AdminActionCatalogItemByMenuNumber -MenuNumber $choice
+        $actionPolicyDecision = Get-AdminPolicyActionDecision -PolicyProfile $interactivePolicyProfile -ActionId $selectedCatalogItem.Id
+        if ($actionPolicyDecision.decision -eq 'Denied') {
+            Write-Host ("Policy denied this action: {0}" -f $actionPolicyDecision.reason) -ForegroundColor Red
+            Write-AdminLog -Message ("Policy denied action '{0}': {1}." -f $selectedCatalogItem.Id, $actionPolicyDecision.reasonCode) -Level WARN -NoConsole
+            continue
+        }
+
         try {
             $request = Get-AdminActionRequest -Choice $choice
         }
@@ -4785,6 +6202,17 @@ function Invoke-WindowsAdminToolkit {
 
         if ($request.Cancelled) {
             continue
+        }
+
+        $interactiveInputs = ConvertTo-AdminActionInputMap -ActionId $request.Script -ArgumentList $request.Arguments
+        $interactivePolicyResolution = Resolve-AdminPolicyRequest -PolicyProfile $interactivePolicyProfile -ActionId $request.Script -TargetMode $context.Mode -Transport $contextTransport -Computers $context.Computers -Inputs $interactiveInputs -Parameters $Script:InvocationParameters
+        if (-not $interactivePolicyResolution.Allowed) {
+            Write-Host ("Policy denied this request: {0}" -f $interactivePolicyResolution.PolicyDecision.reason) -ForegroundColor Red
+            Write-AdminLog -Message ("Policy denied action '{0}': {1}." -f $request.Script, $interactivePolicyResolution.PolicyDecision.reasonCode) -Level WARN -NoConsole
+            continue
+        }
+        if ($interactivePolicyProfile) {
+            Write-AdminLog -Message ("Policy allowed action '{0}': {1}." -f $request.Script, $interactivePolicyResolution.PolicyDecision.reasonCode) -NoConsole
         }
 
         if (-not $request.ReadOnly) {
@@ -4802,6 +6230,14 @@ function Invoke-WindowsAdminToolkit {
         $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
         $results = @(Invoke-AdminTarget -TargetMode $context.Mode -Computers $context.Computers -ActionName $request.Script -ArgumentList $request.Arguments -ReadOnly $request.ReadOnly)
         $stopwatch.Stop()
+
+        if ($interactivePolicyProfile) {
+            foreach ($result in $results) {
+                $result | Add-Member -NotePropertyName PolicyProfile -NotePropertyValue $interactivePolicyProfile.ProfileName -Force
+                $result | Add-Member -NotePropertyName PolicyDecision -NotePropertyValue $interactivePolicyResolution.PolicyDecision.decision -Force
+                $result | Add-Member -NotePropertyName PolicyReasonCode -NotePropertyValue $interactivePolicyResolution.PolicyDecision.reasonCode -Force
+            }
+        }
 
         Show-AdminResult -Results $results
         Write-AdminLog -Message ("Action '{0}' completed in {1:n1} seconds with {2} result record(s)." -f $request.Name, $stopwatch.Elapsed.TotalSeconds, $results.Count) -Level SUCCESS
@@ -4839,7 +6275,9 @@ if (-not $Script:WasDotSourced) {
             $failureActionName = if ($failureCatalogItem) { $failureCatalogItem.Name } else { $null }
             $failureReadOnly = if ($failureCatalogItem -and $failureCatalogItem.Classification -ne 'Conditional') { [bool]$failureCatalogItem.ReadOnly } else { $null }
             $failureTargetSummary = Get-AdminRequestedTargetSummary -Parameters $Script:InvocationParameters
-            $failureEnvelope = ConvertTo-AdminAutomationEnvelope -RunId ([guid]::NewGuid()) -StartedAtUtc $failureStartedAtUtc -FinishedAtUtc ([datetime]::UtcNow) -ActionId $failureActionId -ActionName $failureActionName -ReadOnly $failureReadOnly -TargetMode $failureTargetSummary.TargetMode -Transport $failureTargetSummary.Transport -Authentication $failureTargetSummary.Authentication -UseSsl $failureTargetSummary.UseSsl -Status ValidationFailed -Outcome ValidationFailure -ExitCode $Script:AutomationExitCodes.ValidationFailure -RequestedTargetCount $failureTargetSummary.RequestedTargetCount -Errors @([pscustomobject]@{ Category = 'Validation'; Message = $_.Exception.Message })
+            $failurePolicyDecision = if (Test-AdminParameterBound -Parameters $Script:InvocationParameters -Name 'PolicyPath') { ConvertTo-AdminPolicyDecision -Applied $true -Decision NotEvaluated -ReasonCode NotEvaluated -Reason 'The output request failed before the policy profile could be evaluated.' } else { ConvertTo-AdminPolicyDecision -Decision NotApplied -ReasonCode NoPolicy -Reason 'No policy profile was supplied.' }
+            $failurePreflight = (Test-AdminParameterBound -Parameters $Script:InvocationParameters -Name 'Preflight') -and [bool]$Script:InvocationParameters['Preflight']
+            $failureEnvelope = ConvertTo-AdminAutomationEnvelope -RunId ([guid]::NewGuid()) -StartedAtUtc $failureStartedAtUtc -FinishedAtUtc ([datetime]::UtcNow) -ActionId $failureActionId -ActionName $failureActionName -ReadOnly $failureReadOnly -Preflight $failurePreflight -PolicyDecision $failurePolicyDecision -TargetMode $failureTargetSummary.TargetMode -Transport $failureTargetSummary.Transport -Authentication $failureTargetSummary.Authentication -UseSsl $failureTargetSummary.UseSsl -Status ValidationFailed -Outcome ValidationFailure -ExitCode $Script:AutomationExitCodes.ValidationFailure -RequestedTargetCount $failureTargetSummary.RequestedTargetCount -Errors @([pscustomobject]@{ Category = 'Validation'; Message = $_.Exception.Message })
             [Console]::Error.WriteLine((ConvertTo-AdminAutomationJson -Envelope $failureEnvelope))
             exit $Script:AutomationExitCodes.ValidationFailure
         }
@@ -4871,7 +6309,9 @@ if (-not $Script:WasDotSourced) {
                     ConvertTo-AdminOutputSinkFailureEnvelope -OriginalEnvelope $automationEnvelope -Message ("The requested JSON output sink failed: {0}" -f $_.Exception.Message)
                 }
                 else {
-                    ConvertTo-AdminAutomationEnvelope -RunId ([guid]::NewGuid()) -StartedAtUtc $failureStartedAtUtc -FinishedAtUtc ([datetime]::UtcNow) -ActionId (Get-AdminSafeActionId -ActionId $Action) -Status InternalFailure -Outcome InternalFailure -ExitCode $Script:AutomationExitCodes.InternalFailure -Errors @([pscustomobject]@{ Category = 'Internal'; Message = $_.Exception.Message })
+                    $failurePolicyDecision = if (Test-AdminParameterBound -Parameters $Script:InvocationParameters -Name 'PolicyPath') { ConvertTo-AdminPolicyDecision -Applied $true -Decision NotEvaluated -ReasonCode NotEvaluated -Reason 'The run failed before the policy profile could be evaluated.' } else { ConvertTo-AdminPolicyDecision -Decision NotApplied -ReasonCode NoPolicy -Reason 'No policy profile was supplied.' }
+                    $failurePreflight = (Test-AdminParameterBound -Parameters $Script:InvocationParameters -Name 'Preflight') -and [bool]$Script:InvocationParameters['Preflight']
+                    ConvertTo-AdminAutomationEnvelope -RunId ([guid]::NewGuid()) -StartedAtUtc $failureStartedAtUtc -FinishedAtUtc ([datetime]::UtcNow) -ActionId (Get-AdminSafeActionId -ActionId $Action) -Preflight $failurePreflight -PolicyDecision $failurePolicyDecision -Status InternalFailure -Outcome InternalFailure -ExitCode $Script:AutomationExitCodes.InternalFailure -Errors @([pscustomobject]@{ Category = 'Internal'; Message = $_.Exception.Message })
                 }
                 [Console]::Error.WriteLine((ConvertTo-AdminAutomationJson -Envelope $failureEnvelope))
             }
@@ -4885,6 +6325,7 @@ if (-not $Script:WasDotSourced) {
     $automationOnlyParameters = @(
         'Action',
         'ListActions',
+        'Preflight',
         'Local',
         'ComputerName',
         'ComputerListPath',

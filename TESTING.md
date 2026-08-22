@@ -2,18 +2,18 @@
 
 Windows Admin Toolkit uses a dependency-free test harness so the same checks run under Windows PowerShell 5.1 and PowerShell 7.x without a test-framework bootstrap.
 
-## Current 2.1.0 native validation
+## Current 2.2.0 native validation
 
-The 2.1.0 automation milestone was validated natively on August 22, 2026.
+The 2.2.0 policy and least-privilege milestone was validated natively on August 22, 2026.
 
 | Environment | PowerShell | Checks | Result |
 | --- | --- | ---: | --- |
-| Windows native host | Windows PowerShell 5.1.26100.9168 | 379 | Passed |
-| Windows native host | PowerShell 7.6.4 | 379 | Passed |
+| Windows 11 Pro 25H2, build 26200.9168 native host | Windows PowerShell 5.1.26100.9168 | 504 | Passed |
+| Windows 11 Pro 25H2, build 26200.9168 native host | PowerShell 7.6.4 | 504 | Passed |
 
-Total completed 2.1.0 native checks: 758.
+Total completed 2.2.0 native checks: 1,008.
 
-PSScriptAnalyzer 1.25.0 completed with zero findings under the committed settings. The 2.1.0 working tree was not rerun in Windows containers in this development environment because an available Windows container runtime was not established. The container results below remain the exact historical record for release 2.0.0 and are not presented as 2.1.0 validation.
+PSScriptAnalyzer 1.25.0 completed with zero findings under the committed settings. The 2.2.0 working tree was not rerun in Windows containers because Docker Desktop 4.87.0 was running its Linux engine rather than a Windows container runtime. The container results below remain the exact historical record for release 2.0.0 and are not presented as 2.2.0 validation.
 
 ## Historical 2.0.0 release matrix
 
@@ -94,6 +94,14 @@ The test suite verifies:
 - Read-only retry behavior and zero retries for state-changing actions
 - `ShouldProcess` and clean no-connection `WhatIf` previews
 - Stable JSON schema, fields, ordering, arrays, UTC dates, normalized casing, and safe serialization depth
+- Result schema version 1.1 policy and preflight fields, plus eight committed result examples
+- Policy schema version 1.0, two committed profiles, stable action IDs, and absolute built-in ceilings
+- Strict policy UTF-8 and size bounds, duplicate and case-conflicting JSON keys, unknown fields, unsupported values, and inconsistent rules
+- Policy action, transport, target-mode, exact-target, suffix-target, target-count, runtime, and action-input decisions
+- Policy precedence, explicit-value denial, omitted-value clamping, and deny-before-connect behavior
+- Policy-aware action catalog annotations and explicit allowed, denied, invalid, not-evaluated, and not-applied result states
+- Capability preflight under native Windows PowerShell and PowerShell 7 child processes
+- Proof that custom PowerShell capability preflight neither executes supplied content nor writes it to the safe log
 - Clean stdout JSON, deterministic exit codes, and stderr separation for unusable output destinations
 - Complete-success, partial-success, execution-failure, timeout, validation, and authorization aggregation
 - Atomic automation JSON output and overwrite refusal

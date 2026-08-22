@@ -1,0 +1,518 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/fusiontechstrategies/Windows-Admin-Toolkit/schemas/policy-profile-v1.schema.json",
+  "title": "Windows Admin Toolkit policy profile version 1.0",
+  "description": "Draft 2020-12 structural contract. The toolkit also rejects case-equivalent duplicates or conflicts, incompatible target-mode and transport rules, inert target rules, action constraints for disallowed actions, and inconsistent constraint combinations.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "profileName",
+    "actions",
+    "transports",
+    "targetModes",
+    "targets"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "1.0"
+    },
+    "profileName": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$"
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 512,
+      "pattern": "^[^\\u0000-\\u001F\\u007F]*$"
+    },
+    "actions": {
+      "$ref": "#/$defs/actionRules"
+    },
+    "transports": {
+      "description": "Allowed transport classes must align with targetModes: Local pairs with Local, and WinRM or PsExec pair with Remote.",
+      "$ref": "#/$defs/transportRules"
+    },
+    "targetModes": {
+      "description": "Allowed target modes must align with transports so every allowed value forms a viable execution path.",
+      "$ref": "#/$defs/targetModeRules"
+    },
+    "targets": {
+      "$ref": "#/$defs/targetRules"
+    },
+    "limits": {
+      "$ref": "#/$defs/limits"
+    },
+    "actionInputs": {
+      "description": "Optional constraints for actions that are present in actions.allow and absent from actions.deny.",
+      "$ref": "#/$defs/actionInputs"
+    }
+  },
+  "$defs": {
+    "actionId": {
+      "type": "string",
+      "enum": [
+        "SystemInfo",
+        "DiskSpace",
+        "HardwareInfo",
+        "NetworkConfig",
+        "LoggedOnUsers",
+        "RunningProcesses",
+        "SoftwareInventory",
+        "LicenseStatus",
+        "WindowsUpdate",
+        "ScheduleReboot",
+        "PendingReboot",
+        "ServiceManagement",
+        "TerminateProcess",
+        "ClearTempFiles",
+        "ScheduledTasks",
+        "FirewallStatus",
+        "EventLogQuery",
+        "RegistryRead",
+        "CustomCommand",
+        "CustomPowerShell"
+      ]
+    },
+    "actionRules": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allow"],
+      "properties": {
+        "allow": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 20,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/actionId"
+          }
+        },
+        "deny": {
+          "type": "array",
+          "maxItems": 20,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/actionId"
+          }
+        }
+      }
+    },
+    "transportRules": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allow"],
+      "properties": {
+        "allow": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": {
+            "enum": ["Local", "WinRM", "PsExec"]
+          }
+        },
+        "deny": {
+          "type": "array",
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": {
+            "enum": ["Local", "WinRM", "PsExec"]
+          }
+        }
+      }
+    },
+    "targetModeRules": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allow"],
+      "properties": {
+        "allow": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {
+            "enum": ["Local", "Remote"]
+          }
+        },
+        "deny": {
+          "type": "array",
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {
+            "enum": ["Local", "Remote"]
+          }
+        }
+      }
+    },
+    "targetPattern": {
+      "type": "string",
+      "maxLength": 255,
+      "pattern": "^(?:\\*\\.)?(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.)*[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$"
+    },
+    "targetRules": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allow"],
+      "properties": {
+        "allow": {
+          "type": "array",
+          "maxItems": 500,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/targetPattern"
+          }
+        },
+        "deny": {
+          "type": "array",
+          "maxItems": 500,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/targetPattern"
+          }
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxTargets": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500
+        },
+        "maxConcurrentJobs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32
+        },
+        "maxRetryCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3
+        },
+        "maxRetryDelaySeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 60
+        },
+        "maxOperationTimeoutMinutes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 180
+        },
+        "maxConnectivityTimeoutSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 60
+        }
+      }
+    },
+    "integer1To100": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "minimum": {"type": "integer", "minimum": 1, "maximum": 100},
+        "maximum": {"type": "integer", "minimum": 1, "maximum": 100}
+      }
+    },
+    "integer30To3600": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "minimum": {"type": "integer", "minimum": 30, "maximum": 3600},
+        "maximum": {"type": "integer", "minimum": 30, "maximum": 3600}
+      }
+    },
+    "integer1To30": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "minimum": {"type": "integer", "minimum": 1, "maximum": 30},
+        "maximum": {"type": "integer", "minimum": 1, "maximum": 30}
+      }
+    },
+    "integer100To100000": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "minimum": {"type": "integer", "minimum": 100, "maximum": 100000},
+        "maximum": {"type": "integer", "minimum": 100, "maximum": 100000}
+      }
+    },
+    "integer1To500": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "minimum": {"type": "integer", "minimum": 1, "maximum": 500},
+        "maximum": {"type": "integer", "minimum": 1, "maximum": 500}
+      }
+    },
+    "integer1To1000": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "minimum": {"type": "integer", "minimum": 1, "maximum": 1000},
+        "maximum": {"type": "integer", "minimum": 1, "maximum": 1000}
+      }
+    },
+    "actionInputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "RunningProcesses": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "TopCount": {"$ref": "#/$defs/integer1To100"}
+          }
+        },
+        "WindowsUpdate": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "IncludeKB": {
+              "type": "object",
+              "additionalProperties": false,
+              "minProperties": 1,
+              "properties": {
+                "maximumLength": {"type": "integer", "minimum": 1, "maximum": 10},
+                "maximumItems": {"type": "integer", "minimum": 1, "maximum": 100},
+                "allowedValues": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 100,
+                  "uniqueItems": true,
+                  "items": {"type": "string", "pattern": "^KB[0-9]{4,8}$"}
+                }
+              }
+            }
+          }
+        },
+        "ScheduleReboot": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "RebootDelaySeconds": {"$ref": "#/$defs/integer30To3600"}
+          }
+        },
+        "ServiceManagement": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "ServiceName": {
+              "type": "object",
+              "additionalProperties": false,
+              "minProperties": 1,
+              "properties": {
+                "maximumLength": {"type": "integer", "minimum": 1, "maximum": 256},
+                "allowedValues": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 100,
+                  "uniqueItems": true,
+                  "items": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,256}$"}
+                }
+              }
+            },
+            "ServiceAction": {
+              "type": "object",
+              "additionalProperties": false,
+              "minProperties": 1,
+              "properties": {
+                "maximumLength": {"type": "integer", "minimum": 1, "maximum": 7},
+                "allowedValues": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 4,
+                  "uniqueItems": true,
+                  "items": {"enum": ["Query", "Start", "Stop", "Restart"]}
+                }
+              }
+            }
+          }
+        },
+        "TerminateProcess": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "ProcessName": {
+              "type": "object",
+              "additionalProperties": false,
+              "minProperties": 1,
+              "properties": {
+                "maximumLength": {"type": "integer", "minimum": 1, "maximum": 128},
+                "allowedValues": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 100,
+                  "uniqueItems": true,
+                  "items": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$"}
+                }
+              }
+            }
+          }
+        },
+        "ClearTempFiles": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "MinimumAgeDays": {"$ref": "#/$defs/integer1To30"},
+            "MaximumFiles": {"$ref": "#/$defs/integer100To100000"}
+          }
+        },
+        "ScheduledTasks": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "TaskPath": {
+              "type": "object",
+              "additionalProperties": false,
+              "minProperties": 1,
+              "properties": {
+                "maximumLength": {"type": "integer", "minimum": 1, "maximum": 512},
+                "allowedValues": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 100,
+                  "uniqueItems": true,
+                  "items": {"type": "string", "maxLength": 512}
+                }
+              }
+            },
+            "MaximumTasks": {"$ref": "#/$defs/integer1To500"}
+          }
+        },
+        "EventLogQuery": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "EventLogName": {
+              "type": "object",
+              "additionalProperties": false,
+              "minProperties": 1,
+              "properties": {
+                "maximumLength": {"type": "integer", "minimum": 1, "maximum": 256},
+                "allowedValues": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 100,
+                  "uniqueItems": true,
+                  "items": {"type": "string", "maxLength": 256}
+                }
+              }
+            },
+            "EntryCount": {"$ref": "#/$defs/integer1To1000"},
+            "EventLevel": {
+              "type": "object",
+              "additionalProperties": false,
+              "minProperties": 1,
+              "properties": {
+                "maximumLength": {"type": "integer", "minimum": 1, "maximum": 11},
+                "maximumItems": {"type": "integer", "minimum": 1, "maximum": 20},
+                "allowedValues": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 5,
+                  "uniqueItems": true,
+                  "items": {"enum": ["Critical", "Error", "Warning", "Information", "Verbose"]}
+                }
+              }
+            }
+          }
+        },
+        "RegistryRead": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "RegistryPath": {
+              "type": "object",
+              "additionalProperties": false,
+              "minProperties": 1,
+              "properties": {
+                "maximumLength": {"type": "integer", "minimum": 1, "maximum": 2048},
+                "allowedValues": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 100,
+                  "uniqueItems": true,
+                  "items": {"type": "string", "maxLength": 2048}
+                }
+              }
+            },
+            "RegistryValueName": {
+              "type": "object",
+              "additionalProperties": false,
+              "minProperties": 1,
+              "properties": {
+                "maximumLength": {"type": "integer", "minimum": 1, "maximum": 16383},
+                "allowedValues": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 100,
+                  "uniqueItems": true,
+                  "items": {"type": "string", "maxLength": 16383}
+                }
+              }
+            }
+          }
+        },
+        "CustomCommand": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "CommandText": {
+              "type": "object",
+              "additionalProperties": false,
+              "minProperties": 1,
+              "properties": {
+                "maximumLength": {"type": "integer", "minimum": 1, "maximum": 32767}
+              }
+            }
+          }
+        },
+        "CustomPowerShell": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "PowerShellText": {
+              "type": "object",
+              "additionalProperties": false,
+              "minProperties": 1,
+              "properties": {
+                "maximumLength": {"type": "integer", "minimum": 1, "maximum": 1048576}
+              }
+            },
+            "PowerShellFile": {
+              "type": "object",
+              "additionalProperties": false,
+              "minProperties": 1,
+              "properties": {
+                "maximumLength": {"type": "integer", "minimum": 1, "maximum": 32767}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,72 @@
+{
+  "schemaVersion": "1.0",
+  "profileName": "Helpdesk WinRM operations",
+  "description": "Allows selected inventory and service workflows on synthetic example.com targets over WinRM.",
+  "actions": {
+    "allow": [
+      "SystemInfo",
+      "DiskSpace",
+      "RunningProcesses",
+      "PendingReboot",
+      "ServiceManagement",
+      "EventLogQuery"
+    ],
+    "deny": [
+      "WindowsUpdate",
+      "ScheduleReboot",
+      "TerminateProcess",
+      "ClearTempFiles",
+      "CustomCommand",
+      "CustomPowerShell"
+    ]
+  },
+  "transports": {
+    "allow": ["WinRM"],
+    "deny": ["Local", "PsExec"]
+  },
+  "targetModes": {
+    "allow": ["Remote"],
+    "deny": ["Local"]
+  },
+  "targets": {
+    "allow": ["*.example.com"],
+    "deny": ["restricted.example.com"]
+  },
+  "limits": {
+    "maxTargets": 25,
+    "maxConcurrentJobs": 4,
+    "maxRetryCount": 1,
+    "maxRetryDelaySeconds": 5,
+    "maxOperationTimeoutMinutes": 30,
+    "maxConnectivityTimeoutSeconds": 10
+  },
+  "actionInputs": {
+    "RunningProcesses": {
+      "TopCount": {
+        "minimum": 1,
+        "maximum": 50
+      }
+    },
+    "ServiceManagement": {
+      "ServiceName": {
+        "allowedValues": ["Spooler", "wuauserv"]
+      },
+      "ServiceAction": {
+        "allowedValues": ["Query", "Start", "Restart"]
+      }
+    },
+    "EventLogQuery": {
+      "EventLogName": {
+        "allowedValues": ["Application", "System"]
+      },
+      "EntryCount": {
+        "minimum": 1,
+        "maximum": 200
+      },
+      "EventLevel": {
+        "maximumItems": 4,
+        "allowedValues": ["Critical", "Error", "Warning", "Information"]
+      }
+    }
+  }
+}

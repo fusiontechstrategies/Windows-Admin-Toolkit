@@ -1,6 +1,6 @@
 # Automation interface
 
-Windows Admin Toolkit 2.1.0 can run one named action without menus, prompts, or credential UI. Automation mode uses the same 20 action implementations as the interactive menu and returns a versioned JSON result with a stable process exit code.
+Windows Admin Toolkit 2.2.0 can run one named action without menus, prompts, or credential UI. Automation mode uses the same 20 action implementations as the interactive menu and returns a versioned JSON result with a stable process exit code. Optional policy profiles narrow the request, and capability preflight assesses readiness without executing the requested action.
 
 Use automation mode only in an already authorized Windows administration context. The toolkit does not enable WinRM, alter TrustedHosts, open firewall ports, bypass execution policy, or place passwords in process arguments.
 
@@ -14,6 +14,8 @@ Every action run requires:
 - `-JsonOutputPath -` or `-JsonOutputPath STDOUT` for JSON on stdout, or a new `.json` file path
 - Any inputs required by the selected action
 - The exact `-ConfirmationText` for an actual state-changing action
+
+Optional controls include `-PolicyPath <literal .json path>` and `-Preflight`. Policy and preflight behavior is documented in [POLICY.md](POLICY.md).
 
 This local inventory command writes exactly one compressed JSON document to stdout:
 
@@ -103,7 +105,7 @@ Enumerate the live catalog without executing an action:
 .\WindowsAdminToolkit.ps1 -Automation -ListActions -JsonOutputPath -
 ```
 
-The returned `actions` array includes identifiers, display names, classifications, confirmation text, input types, defaults, allowed values, and numeric bounds. `-ListActions` accepts only the automation, catalog, and JSON destination controls.
+The returned `actions` array includes identifiers, display names, classifications, confirmation text, input types, defaults, allowed values, numeric bounds, and an action-level policy decision. `-ListActions` accepts only the automation, catalog, optional policy, and JSON destination controls.
 
 ## State-changing safety
 
@@ -114,11 +116,13 @@ Actual state-changing execution retains both safeguards:
 
 `-WhatIf` validates the complete request and returns a successful preview without connecting to or changing a target. Confirmation text is not required for a preview; if supplied, it must be exact. State-changing actions always use zero automatic retries.
 
+`-Preflight` also validates the complete request, including policy and action inputs, but executes only the built-in capability discovery script in the selected target context. It is mutually exclusive with `-WhatIf`. It does not require a missing state-change confirmation, although an incorrect supplied confirmation still fails closed.
+
 Custom CMD and custom PowerShell remain unsandboxed expert actions. Their source text and returned output are excluded from logs, although their bounded output is present in the requested JSON result.
 
 ## Result schema
 
-The machine contract is JSON Schema Draft 2020-12 in [`schemas/automation-result-v1.schema.json`](schemas/automation-result-v1.schema.json). Schema version `1.0` has 22 stable root fields:
+The machine contract is JSON Schema Draft 2020-12 in [`schemas/automation-result-v1.schema.json`](schemas/automation-result-v1.schema.json). Schema version `1.1` has 24 stable root fields:
 
 | Field | Meaning |
 | --- | --- |
@@ -127,27 +131,29 @@ The machine contract is JSON Schema Draft 2020-12 in [`schemas/automation-result
 | `startedAtUtc`, `finishedAtUtc`, `durationMs` | UTC timestamps with millisecond precision and elapsed time |
 | `actionId`, `actionName` | Canonical action identity, or null when the request cannot resolve a supported action |
 | `readOnly`, `stateChanging` | Effective classification, including ServiceManagement Query behavior |
+| `preflight` | Whether the run assessed capabilities instead of executing the requested action |
 | `targetMode` | `Local`, `Remote`, or null before target resolution |
 | `transport` | Canonical name, authentication mechanism, and SSL flag without secrets |
+| `policy` | Applied state, policy schema and profile, decision, reason code, and safe reason |
 | `status`, `outcome`, `exitCode` | Overall machine-readable result |
 | `targetCount`, `recordCount` | Requested targets and returned data records |
 | `targets` | Deterministically ordered per-target status, timings, attempts, normalized error, and data array |
 | `warnings`, `errors` | Safe summaries for incomplete, preview, and failed runs |
 | `reportPaths` | JSON paths actually created |
-| `actions` | Catalog descriptors for `-ListActions`, otherwise an empty array |
+| `actions` | Policy-annotated catalog descriptors for `-ListActions`, otherwise an empty array |
 
 Arrays remain arrays even when empty or when they contain one item. Dates are formatted as `yyyy-MM-ddTHH:mm:ss.fffZ`. Credentials, secure strings, scriptblocks, raw exceptions, invocation details, and remoting metadata are excluded. Nested output is bounded to a safe serialization depth.
 
-Examples for success, partial success, validation failure, timeout, `WhatIf`, and execution failure are in [`examples/automation/results`](examples/automation/results).
+Examples for success, partial success, validation failure, timeout, `WhatIf`, execution failure, policy denial, and capability preflight are in [`examples/automation/results`](examples/automation/results).
 
 ## Exit codes
 
 | Code | Outcome | Meaning |
 | ---: | --- | --- |
-| 0 | `CompleteSuccess` | Every target succeeded, or a valid `WhatIf` preview completed |
+| 0 | `CompleteSuccess` | Every target succeeded, or a valid `WhatIf` or successful capability preflight completed |
 | 1 | `PartialSuccess` | A multi-target run contains mixed success, partial, failure, or timeout results |
-| 2 | `ValidationFailure` | Inputs, paths, targets, transport, or configuration are invalid |
-| 3 | `AuthorizationFailure` | An exact confirmation or another authorization gate failed |
+| 2 | `ValidationFailure` | Inputs, paths, targets, transport, configuration, or a supplied policy profile are invalid |
+| 3 | `AuthorizationFailure` | An exact confirmation, valid policy decision, or another authorization gate denied the request |
 | 4 | `ExecutionFailure` | No target completed successfully and the run was not entirely timed out |
 | 5 | `Timeout` | Every attempted target timed out |
 | 10 | `InternalFailure` | The toolkit encountered an unhandled failure or best-effort cancellation |
@@ -160,4 +166,4 @@ A timeout means the toolkit stopped waiting for a definitive result; it does not
 
 ## Operational examples
 
-Copy-pasteable WinRM, target-list, RMM, scheduled-task, CI, and `WhatIf` examples are in [`examples/automation/README.md`](examples/automation/README.md).
+Copy-pasteable WinRM, target-list, RMM, scheduled-task, CI, `WhatIf`, policy, and preflight examples are in [`examples/automation/README.md`](examples/automation/README.md).
