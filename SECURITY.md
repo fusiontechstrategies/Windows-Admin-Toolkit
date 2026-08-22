@@ -29,6 +29,7 @@ Reports will be acknowledged as soon as practical. Valid reports will be investi
 - The toolkit does not automatically enable WinRM, open firewall ports, change TrustedHosts, or bypass execution policy.
 - Optional policy profiles are local security configuration. They narrow toolkit behavior but do not grant Windows authorization.
 - Audit sinks are opt-in evidence destinations. They do not authorize an action or configure Windows security services.
+- Plan and checkpoint hashes are tamper-evident integrity fields, not signatures, identities, or substitutes for filesystem access control.
 
 ## Automation security
 
@@ -78,6 +79,24 @@ Audit schema version 1.0 records bounded run, request, policy, target, failure, 
 
 Restrict read and write access to audit files because they may contain target names, policy profile names, action IDs, outcomes, timings, and normalized errors. Move completed files and expected hashes to an access-controlled external collector when stronger retention or immutability is required. Review [AUDITING.md](AUDITING.md) for the complete event, canonicalization, data-minimization, and sink-failure contract.
 
-The JSON schema and stable exit codes are documented in [AUTOMATION.md](AUTOMATION.md). Treat changes to action IDs, classifications, confirmation phrases, result schema version 1.2, policy schema version 1.0, audit schema version 1.0, canonicalization identifier, or exit-code meanings as security-sensitive public-interface changes.
+## Controlled orchestration security
+
+Orchestration plan, checkpoint, and operation-result schemas are version 1.0. Plan parsing is a strict security boundary: it rejects a byte-order mark, invalid UTF-8, duplicate or case-conflicting keys, unknown properties, unsafe or noncanonical paths, inconsistent action metadata, invalid lifecycle values, policy or PsExec reference changes, and canonical hash mismatches.
+
+- Plan creation validates the complete request without executing the requested action and writes a new pending artifact.
+- Approval requires the exact complete plan hash and writes a different new artifact with separately hashed review metadata.
+- Execute and Resume reject action, input, target, transport, policy, and runtime overrides, hold approved policy and PsExec files open without write or replacement sharing, and re-resolve the complete approved request before target work.
+- Version 1 plans use only the current Windows identity and exclude both unsandboxed custom-code actions.
+- Existing exact action, large-list, and PsExec confirmations remain required during execution and resume. `ShouldProcess`, `WhatIf`, policy caps, protected resources, and built-in limits remain active.
+- Checkpoints are atomically replaced before and after each one-target attempt. Resume processes only `Pending` targets and never automatically repeats a terminal target.
+- An interrupted `InProgress` target becomes `Unknown` and is not repeated because completion cannot be proved safely.
+
+An identity with write access to an artifact can potentially replace its contents and recompute unkeyed hashes. Store pending plans, approved plans, checkpoints, results, logs, and external approval records in appropriately separated access-controlled locations. Verify `Unknown`, timeout, and output-failure cases manually before authorizing new state-changing work. Review [ORCHESTRATION.md](ORCHESTRATION.md) for the complete contract.
+
+## Release integrity
+
+The release builder copies an explicit source allowlist into a new destination, can optionally sign only the copied toolkit with an existing code-signing certificate and SHA-256, creates an SPDX 2.3 SBOM, and writes and verifies a SHA-256 manifest. It never creates trust, exports keys, alters execution policy, tags, uploads, or publishes a release. Treat the signing key, timestamp service, authenticated publication channel, manifest, SBOM, commit ID, and independent review as separate parts of the release trust chain. See [RELEASING.md](RELEASING.md).
+
+The JSON schemas and stable exit codes are documented in [AUTOMATION.md](AUTOMATION.md) and [ORCHESTRATION.md](ORCHESTRATION.md). Treat changes to action IDs, classifications, confirmation phrases, result schema version 1.2, policy schema version 1.0, audit schema version 1.0, orchestration schema version 1.0, canonicalization identifiers, lifecycle meanings, or exit-code meanings as security-sensitive public-interface changes.
 
 See [RESPONSIBLE_USE.md](RESPONSIBLE_USE.md) for operational guidance.

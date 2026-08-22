@@ -2,18 +2,18 @@
 
 Windows Admin Toolkit uses a dependency-free test harness so the same checks run under Windows PowerShell 5.1 and PowerShell 7.x without a test-framework bootstrap.
 
-## Current 2.3.0 native validation
+## Current 3.0.0 native validation
 
-The 2.3.0 enterprise auditability milestone was validated natively on August 22, 2026.
+The 3.0.0 controlled orchestration milestone was validated natively on August 22, 2026.
 
 | Environment | PowerShell | Checks | Result |
 | --- | --- | ---: | --- |
-| Windows 11 Pro 25H2, build 26200.9168 native host | Windows PowerShell 5.1.26100.9168 | 570 | Passed |
-| Windows 11 Pro 25H2, build 26200.9168 native host | PowerShell 7.6.4 | 570 | Passed |
+| Windows 11 Pro 25H2, build 26200.9168 native host | Windows PowerShell 5.1.26100.9168 | 643 | Passed |
+| Windows 11 Pro 25H2, build 26200.9168 native host | PowerShell 7.6.4 | 643 | Passed |
 
-Total completed 2.3.0 native checks: 1,140.
+Total completed 3.0.0 native checks: 1,286.
 
-PSScriptAnalyzer 1.25.0 completed with zero findings under the committed settings. The 2.3.0 working tree was not rerun in Windows containers because Docker Desktop 4.87.0 was running its Linux engine rather than a Windows container runtime. The container results below remain the exact historical record for release 2.0.0 and are not presented as 2.3.0 validation.
+PSScriptAnalyzer 1.25.0 completed with zero findings under the committed settings. The 3.0.0 working tree was not rerun in Windows containers because Docker Desktop 4.87.0 was running its Linux engine rather than a Windows container runtime. The container results below remain the exact historical record for release 2.0.0 and are not presented as 3.0.0 validation.
 
 ## Historical 2.0.0 release matrix
 
@@ -103,6 +103,16 @@ The test suite verifies:
 - Native successful audit lifecycles, sequence continuity, result correlation, and summary-hash verification
 - Visible audit-sink mutation failure with preserved target evidence and exit code 10
 - Post-execution JSON result-sink failure events and authoritative replacement audit summaries
+- Orchestration plan, checkpoint, and operation-result schema version 1.0 plus four committed correlated examples
+- Strict plan and checkpoint UTF-8, size, suffix, duplicate-key, case-conflict, unknown-property, lifecycle, and canonical-hash validation
+- Separate pending and approved plan files with full-hash authorization and approval-metadata hash verification
+- Rejection of credentials, audit sinks, custom-code actions, and execution-time overrides in plan workflows
+- Atomic checkpoint creation and replacement without temporary artifacts, overwrite, or terminal-target repetition
+- Safe Resume behavior for completed targets and interrupted `InProgress` targets converted to `Unknown`
+- Preservation of action-specific confirmation and zero retries for approved state-changing `WhatIf` plans
+- Canonical path and raw SHA-256 binding for policy files referenced by approved plans
+- Unsigned release-candidate generation under both PowerShell editions without changing source bytes
+- SPDX 2.3 payload inventory, verified SHA-256 manifest coverage, and no-overwrite release destinations
 - Strict policy UTF-8 and size bounds, duplicate and case-conflicting JSON keys, unknown fields, unsupported values, and inconsistent rules
 - Policy action, transport, target-mode, exact-target, suffix-target, target-count, runtime, and action-input decisions
 - Policy precedence, explicit-value denial, omitted-value clamping, and deny-before-connect behavior

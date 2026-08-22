@@ -41,11 +41,15 @@ Implementation status: complete for release review.
 
 ## 3.0.0: Controlled orchestration
 
-- Reviewable change-plan files
-- Execution of an approved plan without changing its target or action definition
-- Checkpointed and resumable large-target runs
-- Per-target lifecycle status and deterministic completion summaries
-- Authenticode-signed releases, SHA-256 manifests, and software bill of materials
+Implementation status: complete for release review.
+
+- Strict versioned pending and approved change-plan files with canonical SHA-256 request hashes and separately hashed approval metadata
+- Exact full-hash approval, execution, and resume phrases without mutable action, input, target, transport, policy, or runtime overrides
+- Atomic per-target checkpoints with explicit `Pending`, `InProgress`, `Completed`, `Failed`, `TimedOut`, `Skipped`, and `Unknown` lifecycle states
+- Resume of only pending targets, with interrupted in-progress work converted to unknown and no automatic repetition of terminal state changes
+- Current-Windows-identity plan boundary, custom-code exclusion, policy and PsExec file-hash binding, and preservation of every existing safety gate
+- Orchestration plan, checkpoint, and result JSON Schemas plus deterministic synthetic examples
+- Release-candidate tooling for optional SHA-256 Authenticode signing, verified SHA-256 manifests, and SPDX 2.3 software bills of materials
 
 ## Proposals
 

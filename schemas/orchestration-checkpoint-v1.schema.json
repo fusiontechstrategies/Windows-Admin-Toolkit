@@ -1,0 +1,141 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/fusiontechstrategies/Windows-Admin-Toolkit/schemas/orchestration-checkpoint-v1.schema.json",
+  "title": "Windows Admin Toolkit orchestration checkpoint",
+  "description": "Version 1.0 tamper-evident lifecycle checkpoint for Windows Admin Toolkit 3.0.0.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "toolkitVersion", "checkpointId", "planId", "planHash", "createdAtUtc", "updatedAtUtc", "revision", "lastRunId", "targets", "summary", "checkpointHash"],
+  "properties": {
+    "schemaVersion": { "const": "1.0" },
+    "toolkitVersion": { "const": "3.0.0" },
+    "checkpointId": { "type": "string", "format": "uuid" },
+    "planId": { "type": "string", "format": "uuid" },
+    "planHash": { "$ref": "#/$defs/sha256" },
+    "createdAtUtc": { "$ref": "#/$defs/utcTimestamp" },
+    "updatedAtUtc": { "$ref": "#/$defs/utcTimestamp" },
+    "revision": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+    "lastRunId": { "type": "string", "format": "uuid" },
+    "targets": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 500,
+      "items": { "$ref": "#/$defs/lifecycleTarget" }
+    },
+    "summary": { "$ref": "#/$defs/summary" },
+    "checkpointHash": { "$ref": "#/$defs/checkpointHash" }
+  },
+  "$defs": {
+    "utcTimestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "lifecycleTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index", "targetId", "target", "state", "previousState", "startedAtUtc", "finishedAtUtc", "attempts", "executionRunId", "resultStatus", "resultOutcome", "resultExitCode", "errorCategory", "errorMessage"],
+      "properties": {
+        "index": { "type": "integer", "minimum": 0, "maximum": 499 },
+        "targetId": { "type": "string", "pattern": "^t-[0-9a-f]{24}$" },
+        "target": { "type": "string", "minLength": 1, "maxLength": 253 },
+        "state": { "type": "string", "enum": ["Pending", "InProgress", "Completed", "Failed", "TimedOut", "Skipped", "Unknown"] },
+        "previousState": { "type": ["string", "null"], "enum": ["Pending", "InProgress", "Completed", "Failed", "TimedOut", "Skipped", "Unknown", null] },
+        "startedAtUtc": {
+          "anyOf": [
+            { "$ref": "#/$defs/utcTimestamp" },
+            { "type": "null" }
+          ]
+        },
+        "finishedAtUtc": {
+          "anyOf": [
+            { "$ref": "#/$defs/utcTimestamp" },
+            { "type": "null" }
+          ]
+        },
+        "attempts": { "type": "integer", "minimum": 0, "maximum": 1 },
+        "executionRunId": { "type": ["string", "null"], "format": "uuid" },
+        "resultStatus": {
+          "type": ["string", "null"],
+          "enum": ["Success", "Partial", "Failed", "TimedOut", "WhatIf", "Skipped", "Succeeded", "PartiallySucceeded", "ValidationFailed", "AuthorizationFailed", "InternalFailure", null]
+        },
+        "resultOutcome": {
+          "type": ["string", "null"],
+          "enum": ["CompleteSuccess", "PartialSuccess", "ValidationFailure", "AuthorizationFailure", "ExecutionFailure", "Timeout", "InternalFailure", null]
+        },
+        "resultExitCode": { "type": ["integer", "null"], "enum": [0, 1, 2, 3, 4, 5, 10, null] },
+        "errorCategory": { "type": ["string", "null"], "pattern": "^[A-Za-z][A-Za-z0-9]{0,63}$" },
+        "errorMessage": { "type": ["string", "null"], "maxLength": 1036 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "state": { "const": "Pending" } }, "required": ["state"] },
+          "then": { "properties": { "previousState": { "type": "null" }, "startedAtUtc": { "type": "null" }, "finishedAtUtc": { "type": "null" }, "attempts": { "const": 0 }, "executionRunId": { "type": "null" }, "resultStatus": { "type": "null" }, "resultOutcome": { "type": "null" }, "resultExitCode": { "type": "null" }, "errorCategory": { "type": "null" }, "errorMessage": { "type": "null" } } }
+        },
+        {
+          "if": { "properties": { "state": { "const": "InProgress" } }, "required": ["state"] },
+          "then": { "properties": { "previousState": { "const": "Pending" }, "startedAtUtc": { "$ref": "#/$defs/utcTimestamp" }, "finishedAtUtc": { "type": "null" }, "attempts": { "const": 1 }, "executionRunId": { "type": "string", "format": "uuid" }, "resultStatus": { "type": "null" }, "resultOutcome": { "type": "null" }, "resultExitCode": { "type": "null" }, "errorCategory": { "type": "null" }, "errorMessage": { "type": "null" } } }
+        },
+        {
+          "if": { "properties": { "state": { "enum": ["Completed", "Failed", "TimedOut", "Skipped", "Unknown"] } }, "required": ["state"] },
+          "then": { "properties": { "previousState": { "const": "InProgress" }, "startedAtUtc": { "$ref": "#/$defs/utcTimestamp" }, "finishedAtUtc": { "$ref": "#/$defs/utcTimestamp" }, "attempts": { "const": 1 }, "executionRunId": { "type": "string", "format": "uuid" }, "resultStatus": { "type": "string" }, "resultOutcome": { "type": "string" }, "resultExitCode": { "type": "integer" } } }
+        },
+        {
+          "if": { "properties": { "state": { "const": "Completed" } }, "required": ["state"] },
+          "then": {
+            "oneOf": [
+              { "properties": { "resultStatus": { "enum": ["Success", "WhatIf", "Succeeded"] }, "resultOutcome": { "const": "CompleteSuccess" }, "resultExitCode": { "const": 0 } } },
+              { "properties": { "resultStatus": { "enum": ["Partial", "PartiallySucceeded"] }, "resultOutcome": { "const": "PartialSuccess" }, "resultExitCode": { "const": 1 } } }
+            ]
+          }
+        },
+        {
+          "if": { "properties": { "state": { "const": "Failed" } }, "required": ["state"] },
+          "then": { "properties": { "resultStatus": { "const": "Failed" }, "resultOutcome": { "const": "ExecutionFailure" }, "resultExitCode": { "const": 4 } } }
+        },
+        {
+          "if": { "properties": { "state": { "const": "TimedOut" } }, "required": ["state"] },
+          "then": { "properties": { "resultStatus": { "const": "TimedOut" }, "resultOutcome": { "const": "Timeout" }, "resultExitCode": { "const": 5 } } }
+        },
+        {
+          "if": { "properties": { "state": { "const": "Skipped" } }, "required": ["state"] },
+          "then": {
+            "oneOf": [
+              { "properties": { "resultStatus": { "enum": ["Skipped", "ValidationFailed"] }, "resultOutcome": { "const": "ValidationFailure" }, "resultExitCode": { "const": 2 } } },
+              { "properties": { "resultStatus": { "enum": ["Skipped", "AuthorizationFailed"] }, "resultOutcome": { "const": "AuthorizationFailure" }, "resultExitCode": { "const": 3 } } }
+            ]
+          }
+        },
+        {
+          "if": { "properties": { "state": { "const": "Unknown" } }, "required": ["state"] },
+          "then": { "properties": { "resultStatus": { "const": "InternalFailure" }, "resultOutcome": { "const": "InternalFailure" }, "resultExitCode": { "const": 10 } } }
+        }
+      ]
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["targetCount", "pendingCount", "inProgressCount", "completedCount", "failedCount", "timedOutCount", "skippedCount", "unknownCount"],
+      "properties": {
+        "targetCount": { "type": "integer", "minimum": 1, "maximum": 500 },
+        "pendingCount": { "type": "integer", "minimum": 0, "maximum": 500 },
+        "inProgressCount": { "type": "integer", "minimum": 0, "maximum": 500 },
+        "completedCount": { "type": "integer", "minimum": 0, "maximum": 500 },
+        "failedCount": { "type": "integer", "minimum": 0, "maximum": 500 },
+        "timedOutCount": { "type": "integer", "minimum": 0, "maximum": 500 },
+        "skippedCount": { "type": "integer", "minimum": 0, "maximum": 500 },
+        "unknownCount": { "type": "integer", "minimum": 0, "maximum": 500 }
+      }
+    },
+    "checkpointHash": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "canonicalization", "value"],
+      "properties": {
+        "algorithm": { "const": "SHA-256" },
+        "canonicalization": { "const": "WAT-CHECKPOINT-1" },
+        "value": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  }
+}

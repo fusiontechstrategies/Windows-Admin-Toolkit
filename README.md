@@ -20,6 +20,8 @@ Windows Admin Toolkit turns common Windows administration work into a focused in
 - Optional least-privilege policy profiles with explicit machine-readable decisions
 - Capability preflight that checks action readiness without executing the requested action
 - Opt-in JSON Lines and Windows Event Log auditing with stable target IDs and tamper-evident summaries
+- Reviewable change plans, separate approvals, atomic checkpoints, and safe resume semantics
+- Release tooling for optional Authenticode signing, SHA-256 manifests, and SPDX 2.3 SBOMs
 - CSV, JSON, and self-contained HTML reporting
 - No automatic firewall, WinRM, TrustedHosts, or execution-policy changes
 
@@ -48,6 +50,7 @@ Windows Admin Toolkit treats remote administration as a privileged security boun
 - Logs record action summaries, not credentials, custom code, or custom-command output.
 - Optional policies can only narrow actions, transports, target modes, targets, runtime limits, and supported action inputs.
 - Audit records exclude credentials, custom source text, and raw action output; configured sink failures are explicit.
+- Approved plans bind actions, inputs, ordered targets, transports, policies, and safety settings; completed or ambiguous state changes are never repeated automatically.
 
 Read [SECURITY.md](SECURITY.md) and [RESPONSIBLE_USE.md](RESPONSIBLE_USE.md) before operating the toolkit in a production environment.
 
@@ -103,6 +106,9 @@ The toolkit does not require or recommend an execution-policy bypass.
 
 # Create a new per-run JSON Lines audit alongside the JSON result
 .\WindowsAdminToolkit.ps1 -Automation -Action SystemInfo -Local -AuditPath C:\Audit\wat-system-info.jsonl -JsonOutputPath C:\Results\wat-system-info.json
+
+# Create a reviewable plan without executing its action
+.\WindowsAdminToolkit.ps1 -Automation -PlanOperation Create -PlanPath C:\ChangePlans\system-info-pending.watplan.json -Action SystemInfo -Local -JsonOutputPath -
 ```
 
 | Parameter | Default | Purpose |
@@ -125,12 +131,15 @@ The toolkit does not require or recommend an execution-policy bypass.
 | `AuditPath` | None | In automation mode, creates one new bounded JSON Lines audit file for the run |
 | `AuditEventLog` | Off | Forwards bounded audit records through an already-registered Windows Event Log source |
 | `AuditEventSource` | `WindowsAdminToolkit` | Selects the pre-registered source; valid only with `AuditEventLog` |
+| `PlanOperation` | None | Selects controlled orchestration `Create`, `Approve`, `Execute`, or `Resume` |
+| `PlanPath` | None | Selects a pending or approved `.watplan.json` artifact for the requested operation |
+| `CheckpointPath` | None | Selects the `.watcheckpoint.json` lifecycle evidence for `Execute` or `Resume` |
 
 Automation mode accepts `WinRmIdentity` (or its backward-compatible `Credential` alias) only as an in-memory `PSCredential` object from a calling PowerShell session. It rejects username strings instead of allowing native parameter binding to open credential UI. Scheduled tasks and RMM jobs should run under their authorized Windows identity or invoke the toolkit from a wrapper that already holds an approved `PSCredential`; never place passwords in command text.
 
-## Automation, policy, preflight, and audit
+## Automation, policy, audit, and controlled orchestration
 
-Version 2.3.0 builds on the fail-closed automation and least-privilege policy interfaces with enterprise auditability. Automation runs one stable named action without menus or prompts and uses the same action implementations as the interactive menu.
+Version 3.0.0 builds on the fail-closed automation, least-privilege policy, and enterprise audit interfaces with controlled orchestration. Direct automation runs one stable named action without menus or prompts and uses the same action implementations as the interactive menu.
 
 ```powershell
 # Enumerate all stable action IDs and input requirements
@@ -185,6 +194,8 @@ Policy schema version 1.0 uses explicit action, transport, target-mode, and targ
 
 Audit schema version 1.0 records run, request, policy, target, failure, and summary lifecycle events without raw action data. Each run has a UUID; each validated target has a deterministic cross-run ID; and the authoritative summary contains a documented SHA-256 canonical hash. Auditing is opt-in, never creates Event Log configuration, never overwrites a file, and converts a configured sink failure into a visible non-success result. See [AUDITING.md](AUDITING.md). Copy-pasteable RMM, scheduled-task, WinRM, target-list, policy, preflight, audit, and CI examples are in [examples/automation/README.md](examples/automation/README.md).
 
+Controlled orchestration separates plan creation, exact-hash approval, execution, and resume. Plan schema 1.0 freezes the validated action, inputs, ordered targets, transport, policy snapshot, current-identity mode, and safety settings. Checkpoint schema 1.0 records `Pending`, `InProgress`, `Completed`, `Failed`, `TimedOut`, `Skipped`, and `Unknown` states with a one-attempt ceiling. Resume runs only `Pending` targets; an interrupted `InProgress` target becomes `Unknown` and is not repeated. See [ORCHESTRATION.md](ORCHESTRATION.md) and the synthetic examples in [examples/orchestration](examples/orchestration).
+
 ## Remote target lists
 
 Copy [computers_example.txt](computers_example.txt) and replace its synthetic examples with systems you are authorized to administer. Use one hostname, fully qualified domain name, or canonical IPv4 address per line. Blank lines and lines beginning with `#` are ignored.
@@ -217,7 +228,7 @@ Opt-in enterprise audit files are separate per-run `.jsonl` artifacts. They are 
 
 ## Testing and validation
 
-Release 2.0.0 completed 496 automated checks across four Windows and PowerShell environments on August 12, 2026. The 2.3.0 auditability milestone contains 570 deterministic checks and has passed natively under both Windows PowerShell 5.1 and PowerShell 7.6.4, for 1,140 completed native checks.
+Release 2.0.0 completed 496 automated checks across four Windows and PowerShell environments on August 12, 2026. The 3.0.0 controlled-orchestration milestone contains 643 deterministic checks and has passed natively under both Windows PowerShell 5.1 and PowerShell 7.6.4, for 1,286 completed native checks.
 
 | Environment | PowerShell | Result |
 | --- | --- | --- |
@@ -226,13 +237,13 @@ Release 2.0.0 completed 496 automated checks across four Windows and PowerShell 
 | Microsoft Windows Server Core 2025, Hyper-V-isolated container | Windows PowerShell 5.1.26100.33296 | 124 passed |
 | Microsoft PowerShell Server Core 2022, Hyper-V-isolated container | PowerShell 7.5.0 | 124 passed |
 
-The displayed container matrix is the historical 2.0.0 release record. Its tests mounted the repository read-only. The current native suite adds strict policy parsing, capability preflight, JSON Lines audit lifecycles, cross-run target IDs, canonical SHA-256 summary verification, sink-mutation detection, post-execution output-failure evidence, and data-minimization checks. PSScriptAnalyzer 1.25.0 reports zero findings under the committed settings. The automated suite makes no destructive system changes.
+The displayed container matrix is the historical 2.0.0 release record. Its tests mounted the repository read-only. The current native suite adds strict policy parsing, capability preflight, JSON Lines audit lifecycles, cross-run target IDs, canonical SHA-256 summary verification, strict plan and checkpoint parsing, hash-bound approvals, interruption recovery, no-repeat lifecycle semantics, and release-manifest/SBOM checks. PSScriptAnalyzer 1.25.0 reports zero findings under the committed settings. The automated suite makes no destructive system changes.
 
 The prior release's container tags, digests, commands, and the exact current native validation record are in [TESTING.md](TESTING.md). Continuous integration repeats the dependency-free suite on Windows Server 2022 and Windows Server 2025 with both Windows PowerShell and PowerShell 7.
 
 ## Enterprise roadmap
 
-The 2.1.0 automation interface, 2.2.0 policy boundary, and 2.3.0 enterprise auditability implementation are complete for release review. The next milestone is 3.0.0 controlled orchestration with approved plans, safe resume, and signed release artifacts. See [ROADMAP.md](ROADMAP.md).
+The 2.1.0 automation interface, 2.2.0 policy boundary, 2.3.0 enterprise auditability, and 3.0.0 controlled orchestration implementation are complete for release review. Release candidates can be built with optional Authenticode signing, a verified SHA-256 manifest, and an SPDX 2.3 SBOM; no tag or public artifact is created automatically. See [ROADMAP.md](ROADMAP.md) and [RELEASING.md](RELEASING.md).
 
 ## Contributing
 

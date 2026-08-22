@@ -1,6 +1,6 @@
 # Policy profiles and least privilege
 
-Windows Admin Toolkit 2.3.0 supports optional JSON policy profiles for both automation and interactive runs. A profile narrows what the toolkit may do. It never grants Windows permissions, relaxes a built-in safety ceiling, replaces `ShouldProcess`, or replaces an exact confirmation phrase.
+Windows Admin Toolkit 3.0.0 supports optional JSON policy profiles for interactive runs, direct automation, and plan creation. A profile narrows what the toolkit may do. It never grants Windows permissions, relaxes a built-in safety ceiling, replaces `ShouldProcess`, or replaces an exact confirmation phrase.
 
 The public policy contract is JSON Schema Draft 2020-12 in [`schemas/policy-profile-v1.schema.json`](schemas/policy-profile-v1.schema.json). The current `schemaVersion` is `1.0`.
 
@@ -157,5 +157,7 @@ Treat a policy profile as security configuration:
 - Review changes through source control or another auditable configuration process.
 - Use synthetic values in public examples.
 - Never add passwords, tokens, private keys, or credential material.
+
+A controlled orchestration plan records the policy's canonical absolute path, raw file SHA-256, schema version, profile name, and allowed decision. Approval and execution both require the same policy bytes and metadata. Any file change, including a semantically harmless formatting change, invalidates the approved reference before a checkpoint is created. Review the plan and policy together, protect both locations with NTFS access controls, and create a new plan after an intentional policy change. See [ORCHESTRATION.md](ORCHESTRATION.md).
 
 The committed examples are [`read-only-local.json`](examples/policies/read-only-local.json) and [`helpdesk-winrm.json`](examples/policies/helpdesk-winrm.json).

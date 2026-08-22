@@ -1,0 +1,63 @@
+{
+  "schemaVersion": "1.0",
+  "toolkitVersion": "3.0.0",
+  "planId": "77777777-7777-4777-8777-777777777777",
+  "createdAtUtc": "2026-08-22T15:00:00.000Z",
+  "request": {
+    "actionId": "SystemInfo",
+    "actionName": "OS Version and Uptime",
+    "readOnly": true,
+    "targetMode": "Remote",
+    "targets": [
+      {
+        "index": 0,
+        "targetId": "t-cbf9596dcad9113727edd4e3",
+        "name": "server01.example.com"
+      }
+    ],
+    "transport": {
+      "name": "WinRM",
+      "authentication": "Kerberos",
+      "useSsl": true,
+      "psExecPath": null,
+      "psExecSha256": null
+    },
+    "inputs": [],
+    "policy": {
+      "applied": false,
+      "path": null,
+      "fileSha256": null,
+      "schemaVersion": null,
+      "profileName": null,
+      "decision": "NotApplied",
+      "reasonCode": "NoPolicy"
+    },
+    "safety": {
+      "preflight": false,
+      "whatIf": false,
+      "maxConcurrentJobs": 8,
+      "retryCount": 0,
+      "retryDelaySeconds": 3,
+      "operationTimeoutMinutes": 30,
+      "connectivityTimeoutSeconds": 5,
+      "skipConnectivityCheck": false,
+      "requiredConfirmationText": null,
+      "targetListConfirmationRequired": false,
+      "psExecConfirmationRequired": false,
+      "identityMode": "CurrentWindowsIdentity"
+    }
+  },
+  "approval": {
+    "status": "Approved",
+    "approvedBy": "Change Advisory Board",
+    "approvedAtUtc": "2026-08-22T16:00:00.000Z",
+    "reference": "CHG-2026-0822",
+    "planHash": "acf439b73021b3dd82747dcdbf2c2ddd8ed9423acd254caf8cb839f064f2a752",
+    "approvalHash": "fadc1b7a1ed6c8fb00ceff78f2ca5e4c5ff8f620c8bccb7a7ce307b0a1be6354"
+  },
+  "planHash": {
+    "algorithm": "SHA-256",
+    "canonicalization": "WAT-PLAN-1",
+    "value": "acf439b73021b3dd82747dcdbf2c2ddd8ed9423acd254caf8cb839f064f2a752"
+  }
+}

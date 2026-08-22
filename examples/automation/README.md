@@ -277,3 +277,5 @@ Apply `-PolicyPath` to annotate every catalog entry with its allow or deny decis
 ## Committed result examples
 
 The [`results`](results) directory contains schema version 1.2 examples for complete success, audited success, partial success, validation failure, execution failure, timeout, `WhatIf`, policy denial, and capability preflight. The complete audit stream for the audited result is in [`../audit/audited-success.jsonl`](../audit/audited-success.jsonl). The examples use synthetic hostnames and contain no credentials or private environment data.
+
+Controlled plan creation, approval, execution, and resume use a separate orchestration result contract. See [`../../ORCHESTRATION.md`](../../ORCHESTRATION.md) and the correlated synthetic artifacts in [`../orchestration`](../orchestration).

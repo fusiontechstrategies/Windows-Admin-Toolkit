@@ -1,6 +1,6 @@
 # Automation interface
 
-Windows Admin Toolkit 2.3.0 can run one named action without menus, prompts, or credential UI. Automation mode uses the same 20 action implementations as the interactive menu and returns a versioned JSON result with a stable process exit code. Optional policy profiles narrow the request, capability preflight assesses readiness without executing the requested action, and opt-in enterprise audit sinks record bounded lifecycle evidence.
+Windows Admin Toolkit 3.0.0 can run one named action without menus, prompts, or credential UI. Automation mode uses the same 20 action implementations as the interactive menu and returns a versioned JSON result with a stable process exit code. Optional policy profiles narrow the request, capability preflight assesses readiness without executing the requested action, and opt-in enterprise audit sinks record bounded lifecycle evidence. Controlled orchestration adds separate plan, approval, execution, and resume operations without changing this direct-run contract.
 
 Use automation mode only in an already authorized Windows administration context. The toolkit does not enable WinRM, alter TrustedHosts, open firewall ports, bypass execution policy, or place passwords in process arguments.
 
@@ -16,6 +16,8 @@ Every action run requires:
 - The exact `-ConfirmationText` for an actual state-changing action
 
 Optional controls include `-PolicyPath <literal .json path>`, `-Preflight`, `-AuditPath <new literal .jsonl path>`, and `-AuditEventLog`. Policy and preflight behavior is documented in [POLICY.md](POLICY.md). Audit records, stable target IDs, summary hashing, Event Log behavior, and sink failures are documented in [AUDITING.md](AUDITING.md).
+
+Alternatively, `-Automation -PlanOperation Create|Approve|Execute|Resume` selects the controlled orchestration contract. Plan operations emit orchestration result schema `1.0`, use `.watplan.json` and `.watcheckpoint.json` artifacts, reject direct execution overrides, and intentionally do not accept direct-run audit sinks. The complete workflow and recovery semantics are documented in [ORCHESTRATION.md](ORCHESTRATION.md).
 
 This local inventory command writes exactly one compressed JSON document to stdout:
 
@@ -167,4 +169,4 @@ A timeout means the toolkit stopped waiting for a definitive result; it does not
 
 ## Operational examples
 
-Copy-pasteable WinRM, target-list, RMM, scheduled-task, CI, `WhatIf`, policy, preflight, and audit examples are in [`examples/automation/README.md`](examples/automation/README.md).
+Copy-pasteable WinRM, target-list, RMM, scheduled-task, CI, `WhatIf`, policy, preflight, and audit examples are in [`examples/automation/README.md`](examples/automation/README.md). Controlled orchestration commands and artifacts are in [ORCHESTRATION.md](ORCHESTRATION.md) and [`examples/orchestration`](examples/orchestration).

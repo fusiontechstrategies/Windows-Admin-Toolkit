@@ -42,6 +42,17 @@ Custom CMD commands and PowerShell code run as supplied with the privileges of t
 - Apply a reviewed least-privilege `PolicyPath` where practical. Restrict who can edit the profile, and treat policy denial as an authorization result that should not be bypassed by rerunning without the profile.
 - Do not place credentials in command text, custom PowerShell, environment-specific examples, logs, or report paths.
 
+## Controlled plans and resume
+
+- Review the entire pending plan, not only its displayed hash. Confirm the canonical action, inputs, ordered targets, transport, policy reference, safety settings, current-identity boundary, and `WhatIf` state.
+- Keep plan authors, approvers, and execution identities separate where practical. A hash is integrity evidence, not proof that the named approver performed the review.
+- Store approved plans and checkpoints in access-controlled locations and retain them with the external change record and final result.
+- Never edit an approved plan or checkpoint to force a retry. Create and review a new plan when additional work is required.
+- Resume processes only `Pending` targets. Manually investigate `Failed`, `TimedOut`, `Skipped`, and `Unknown` targets before deciding on a new request.
+- Treat a prior `InProgress` target converted to `Unknown` as potentially changed. The toolkit deliberately will not repeat it automatically.
+- Keep the exact action, large-list, and PsExec confirmations in the executing workflow. Plan approval does not replace them.
+- Do not embed credentials, secrets, real production evidence, or custom code in public plan examples. Version 1 plans intentionally reject credentials and both custom-code actions.
+
 ## Policy and preflight
 
 A policy profile narrows toolkit behavior but does not prove that a caller is authorized by Windows or by the organization. Keep operating-system permissions, JEA role design, RMM controls, change approval, exact confirmation phrases, and `ShouldProcess` in place.

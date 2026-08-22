@@ -3,7 +3,7 @@
     Provides interactive and noninteractive tools for authorized Windows administration.
 
 .DESCRIPTION
-    Windows Admin Toolkit 2.3.0 supports local administration and
+    Windows Admin Toolkit 3.0.0 supports local administration and
     bounded remote execution through PowerShell Remoting or PsExec. PowerShell
     Remoting is the default because it does not place passwords on process
     command lines. The optional PsExec transport uses only the current Windows
@@ -79,6 +79,28 @@
 .PARAMETER AuditEventSource
     Existing Windows Event Log source used with AuditEventLog. The toolkit never
     creates or modifies event-source registration.
+
+.PARAMETER PlanOperation
+    Controlled-orchestration operation: Create, Approve, Execute, or Resume.
+
+.PARAMETER PlanPath
+    New plan path for Create, or an existing reviewed plan for later operations.
+
+.PARAMETER ApprovedPlanPath
+    New immutable plan path written by Approve.
+
+.PARAMETER CheckpointPath
+    New checkpoint path for Execute, or an existing checkpoint for Resume.
+
+.PARAMETER ApprovedBy
+    Bounded reviewer identity recorded by Approve. It is metadata, not proof of
+    Windows identity or a digital signature.
+
+.PARAMETER ApprovalReference
+    Bounded ticket, change, or review reference recorded by Approve.
+
+.PARAMETER PlanApprovalText
+    Exact approval text containing the complete canonical plan hash.
 
 .PARAMETER Action
     Stable action identifier used by automation mode.
@@ -189,8 +211,11 @@
 .EXAMPLE
     .\WindowsAdminToolkit.ps1 -Automation -Action SystemInfo -Local -AuditPath C:\Audit\system-info.jsonl -JsonOutputPath C:\Results\system-info.json
 
+.EXAMPLE
+    .\WindowsAdminToolkit.ps1 -Automation -PlanOperation Create -PlanPath C:\ChangePlans\system-info-pending.watplan.json -Action SystemInfo -Local -JsonOutputPath -
+
 .NOTES
-    Version: 2.3.0
+    Version: 3.0.0
     License: MIT
     Use only on systems you own or are explicitly authorized to administer.
 #>
@@ -257,6 +282,34 @@ param(
     [Parameter()]
     [AllowEmptyString()]
     [string]$AuditEventSource = 'WindowsAdminToolkit',
+
+    [Parameter()]
+    [AllowEmptyString()]
+    [string]$PlanOperation = '',
+
+    [Parameter()]
+    [AllowEmptyString()]
+    [string]$PlanPath = '',
+
+    [Parameter()]
+    [AllowEmptyString()]
+    [string]$ApprovedPlanPath = '',
+
+    [Parameter()]
+    [AllowEmptyString()]
+    [string]$CheckpointPath = '',
+
+    [Parameter()]
+    [AllowEmptyString()]
+    [string]$ApprovedBy = '',
+
+    [Parameter()]
+    [AllowEmptyString()]
+    [string]$ApprovalReference = '',
+
+    [Parameter()]
+    [AllowEmptyString()]
+    [string]$PlanApprovalText = '',
 
     [Parameter()]
     [AllowEmptyString()]
@@ -359,7 +412,7 @@ param(
     [string]$PowerShellFile = ''
 )
 
-$Script:ToolkitVersion = '2.3.0'
+$Script:ToolkitVersion = '3.0.0'
 $Script:WasDotSourced = $MyInvocation.InvocationName -eq '.'
 $Script:ToolkitPath = $PSCommandPath
 $Script:InvocationParameters = @{}
@@ -1940,6 +1993,14 @@ $Script:PolicySchemaVersion = '1.0'
 $Script:AuditSchemaVersion = '1.0'
 $Script:AuditCanonicalization = 'WAT-AUDIT-SUMMARY-1'
 $Script:AuditMaximumBytes = 16777216
+$Script:PlanSchemaVersion = '1.0'
+$Script:CheckpointSchemaVersion = '1.0'
+$Script:OrchestrationResultSchemaVersion = '1.0'
+$Script:PlanCanonicalization = 'WAT-PLAN-1'
+$Script:PlanApprovalCanonicalization = 'WAT-PLAN-APPROVAL-1'
+$Script:CheckpointCanonicalization = 'WAT-CHECKPOINT-1'
+$Script:PlanMaximumBytes = 1048576
+$Script:CheckpointMaximumBytes = 4194304
 $Script:AutomationExitCodes = [ordered]@{
     CompleteSuccess      = 0
     PartialSuccess       = 1
@@ -6156,6 +6217,7 @@ function Resolve-AdminAutomationRequest {
     }
     $preflightRequested = (Test-AdminParameterBound -Parameters $Parameters -Name 'Preflight') -and [bool]$Parameters['Preflight']
     $whatIfRequested = (Test-AdminParameterBound -Parameters $Parameters -Name 'WhatIf') -and [bool]$Parameters['WhatIf']
+    $planValidation = (Test-AdminParameterBound -Parameters $Parameters -Name '_PlanValidation') -and [bool]$Parameters['_PlanValidation']
     if ($preflightRequested -and $whatIfRequested) {
         return Get-AdminAutomationResolutionFailure -Category Validation -Message 'Preflight cannot be combined with WhatIf.'
     }
@@ -6194,10 +6256,12 @@ function Resolve-AdminAutomationRequest {
     $localSelected = (Test-AdminParameterBound -Parameters $Parameters -Name 'Local') -and [bool]$Parameters['Local']
     $singleTarget = if (Test-AdminParameterBound -Parameters $Parameters -Name 'ComputerName') { ([string]$Parameters['ComputerName']).Trim() } else { '' }
     $listPath = if (Test-AdminParameterBound -Parameters $Parameters -Name 'ComputerListPath') { ([string]$Parameters['ComputerListPath']).Trim() } else { '' }
+    $planComputersSelected = Test-AdminParameterBound -Parameters $Parameters -Name '_PlanComputers'
     $selectorCount = 0
     if ($localSelected) { $selectorCount++ }
     if (-not [string]::IsNullOrWhiteSpace($singleTarget)) { $selectorCount++ }
     if (-not [string]::IsNullOrWhiteSpace($listPath)) { $selectorCount++ }
+    if ($planComputersSelected) { $selectorCount++ }
     if ($selectorCount -ne 1) {
         return Get-AdminAutomationResolutionFailure -Category Validation -Message 'Select exactly one target source: -Local, -ComputerName, or -ComputerListPath.'
     }
@@ -6239,6 +6303,28 @@ function Resolve-AdminAutomationRequest {
         }
         $computers = @($singleTarget)
     }
+    elseif ($planComputersSelected) {
+        if ($Parameters['_PlanComputers'] -isnot [System.Array]) {
+            return Get-AdminAutomationResolutionFailure -Category Validation -Message 'The approved plan target collection is invalid.'
+        }
+        $planComputerValues = @($Parameters['_PlanComputers'])
+        if ($planComputerValues.Count -lt 1 -or $planComputerValues.Count -gt 500) {
+            return Get-AdminAutomationResolutionFailure -Category Validation -Message 'The approved plan must contain from 1 through 500 targets.'
+        }
+        $planComputerList = New-Object 'System.Collections.Generic.List[string]'
+        $seenPlanComputers = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($planComputerValue in $planComputerValues) {
+            if ($planComputerValue -isnot [string]) {
+                return Get-AdminAutomationResolutionFailure -Category Validation -Message 'The approved plan target collection accepts strings only.'
+            }
+            $planComputer = ([string]$planComputerValue).Trim()
+            if (-not (Test-AdminHostname -ComputerName $planComputer) -or -not $seenPlanComputers.Add($planComputer)) {
+                return Get-AdminAutomationResolutionFailure -Category Validation -Message 'The approved plan contains an invalid or duplicate target.'
+            }
+            $planComputerList.Add($planComputer) | Out-Null
+        }
+        $computers = @($planComputerList.ToArray())
+    }
     else {
         try {
             $resolvedListPath = Resolve-AdminAutomationInputFile -LiteralPath $listPath
@@ -6262,14 +6348,16 @@ function Resolve-AdminAutomationRequest {
         return Get-AdminAutomationResolutionFailure -Category Authorization -Message $earlyTargetPolicyResolution.PolicyDecision.reason -PolicyDecision $earlyTargetPolicyResolution.PolicyDecision
     }
 
-    if ($computers.Count -gt 25) {
-        $targetAuthorization = if (Test-AdminParameterBound -Parameters $Parameters -Name 'TargetListConfirmationText') { [string]$Parameters['TargetListConfirmationText'] } else { '' }
-        if ($targetAuthorization -cne 'USE TARGET LIST') {
-            return Get-AdminAutomationResolutionFailure -Category Authorization -Message 'More than 25 targets require -TargetListConfirmationText with the exact value USE TARGET LIST.'
+    if (-not $planValidation) {
+        if ($computers.Count -gt 25) {
+            $targetAuthorization = if (Test-AdminParameterBound -Parameters $Parameters -Name 'TargetListConfirmationText') { [string]$Parameters['TargetListConfirmationText'] } else { '' }
+            if ($targetAuthorization -cne 'USE TARGET LIST') {
+                return Get-AdminAutomationResolutionFailure -Category Authorization -Message 'More than 25 targets require -TargetListConfirmationText with the exact value USE TARGET LIST.'
+            }
         }
-    }
-    elseif ((Test-AdminParameterBound -Parameters $Parameters -Name 'TargetListConfirmationText') -and -not [string]::IsNullOrWhiteSpace([string]$Parameters['TargetListConfirmationText'])) {
-        return Get-AdminAutomationResolutionFailure -Category Validation -Message 'TargetListConfirmationText is accepted only when the request contains more than 25 targets.'
+        elseif ((Test-AdminParameterBound -Parameters $Parameters -Name 'TargetListConfirmationText') -and -not [string]::IsNullOrWhiteSpace([string]$Parameters['TargetListConfirmationText'])) {
+            return Get-AdminAutomationResolutionFailure -Category Validation -Message 'TargetListConfirmationText is accepted only when the request contains more than 25 targets.'
+        }
     }
 
     if ($targetMode -eq 'Remote' -and $Script:State.Transport -eq 'PsExec') {
@@ -6281,9 +6369,11 @@ function Resolve-AdminAutomationRequest {
         if ($Script:State.Credential) {
             return Get-AdminAutomationResolutionFailure -Category Validation -Message 'PsExec does not accept alternate credentials in this toolkit.'
         }
-        $psExecAuthorization = if (Test-AdminParameterBound -Parameters $Parameters -Name 'PsExecConfirmationText') { [string]$Parameters['PsExecConfirmationText'] } else { '' }
-        if ($psExecAuthorization -cne 'USE PSEXEC') {
-            return Get-AdminAutomationResolutionFailure -Category Authorization -Message 'PsExec requires -PsExecConfirmationText with the exact value USE PSEXEC.'
+        if (-not $planValidation) {
+            $psExecAuthorization = if (Test-AdminParameterBound -Parameters $Parameters -Name 'PsExecConfirmationText') { [string]$Parameters['PsExecConfirmationText'] } else { '' }
+            if ($psExecAuthorization -cne 'USE PSEXEC') {
+                return Get-AdminAutomationResolutionFailure -Category Authorization -Message 'PsExec requires -PsExecConfirmationText with the exact value USE PSEXEC.'
+            }
         }
         try {
             $Script:State.PsExecFullPath = Resolve-AdminPsExec -Path $Script:State.PsExecPath
@@ -6511,7 +6601,10 @@ function Resolve-AdminAutomationRequest {
 
     $expectedConfirmation = if ($Script:AutomationConfirmations.Contains($catalogItem.Id)) { [string]$Script:AutomationConfirmations[$catalogItem.Id] } else { $null }
     $providedConfirmation = if (Test-AdminParameterBound -Parameters $Parameters -Name 'ConfirmationText') { [string]$Parameters['ConfirmationText'] } else { '' }
-    if ($effectiveReadOnly) {
+    if ($planValidation) {
+        # Plan creation validates the action contract without treating review as execution authorization.
+    }
+    elseif ($effectiveReadOnly) {
         if (-not [string]::IsNullOrWhiteSpace($providedConfirmation)) {
             return Get-AdminAutomationResolutionFailure -Category Validation -Message 'ConfirmationText is not accepted for a read-only request.' -PolicyDecision $policyResolution.PolicyDecision
         }
@@ -6971,6 +7064,1622 @@ function Invoke-AdminAutomation {
     return $envelope
 }
 
+function Get-AdminFileSha256Hex {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$LiteralPath
+    )
+
+    if (-not (Test-Path -LiteralPath $LiteralPath -PathType Leaf)) {
+        throw "Input file not found: $LiteralPath"
+    }
+    $stream = $null
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [System.IO.File]::Open($LiteralPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+        $hashBytes = $sha256.ComputeHash($stream)
+        return ([System.BitConverter]::ToString($hashBytes)).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        if ($stream) {
+            $stream.Dispose()
+        }
+        $sha256.Dispose()
+    }
+}
+
+function Resolve-AdminOrchestrationArtifactPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$LiteralPath,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Plan', 'Checkpoint')]
+        [string]$ArtifactType,
+
+        [Parameter()]
+        [switch]$Existing
+    )
+
+    if (-not (Test-AdminLiteralFilePathText -LiteralPath $LiteralPath)) {
+        throw "The $($ArtifactType.ToLowerInvariant()) path contains an unsafe or unsupported component."
+    }
+    $fullPath = [System.IO.Path]::GetFullPath($LiteralPath)
+    $requiredSuffix = if ($ArtifactType -eq 'Plan') { '.watplan.json' } else { '.watcheckpoint.json' }
+    if (-not $fullPath.EndsWith($requiredSuffix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "The $($ArtifactType.ToLowerInvariant()) path must end with $requiredSuffix."
+    }
+
+    if ($Existing) {
+        if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
+            throw "$ArtifactType file not found: $fullPath"
+        }
+        $item = Get-Item -LiteralPath $fullPath -Force -ErrorAction Stop
+        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "$ArtifactType files cannot be symbolic links or reparse points."
+        }
+    }
+    else {
+        if (Test-Path -LiteralPath $fullPath) {
+            throw "Refusing to overwrite an existing $($ArtifactType.ToLowerInvariant()) file: $fullPath"
+        }
+        $parent = Split-Path -Parent $fullPath
+        if ([string]::IsNullOrWhiteSpace($parent)) {
+            throw "The $($ArtifactType.ToLowerInvariant()) path must include a valid parent directory."
+        }
+        if ((Test-Path -LiteralPath $parent) -and -not (Test-Path -LiteralPath $parent -PathType Container)) {
+            throw "The $($ArtifactType.ToLowerInvariant()) parent path is not a directory."
+        }
+    }
+    return $fullPath
+}
+
+function Test-AdminOrchestrationPathCollision {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$LiteralPath,
+
+        [Parameter()]
+        [AllowEmptyCollection()]
+        [string[]]$OtherPath = @()
+    )
+
+    $fullPath = [System.IO.Path]::GetFullPath($LiteralPath)
+    foreach ($candidate in @($OtherPath)) {
+        if ([string]::IsNullOrWhiteSpace([string]$candidate) -or [string]$candidate -in @('-', 'STDOUT')) {
+            continue
+        }
+        if (-not (Test-AdminLiteralFilePathText -LiteralPath ([string]$candidate))) {
+            continue
+        }
+        $fullCandidate = [System.IO.Path]::GetFullPath([string]$candidate)
+        if ($fullPath.Equals($fullCandidate, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Read-AdminStrictOrchestrationJson {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$LiteralPath,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(1, 4194304)]
+        [int]$MaximumBytes,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$ArtifactName
+    )
+
+    $bytes = [System.IO.File]::ReadAllBytes($LiteralPath)
+    if ($bytes.Length -gt $MaximumBytes) {
+        throw "The $ArtifactName exceeds the $MaximumBytes byte limit."
+    }
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+        throw "The $ArtifactName must use UTF-8 without a byte-order mark."
+    }
+    try {
+        $strictUtf8 = New-Object System.Text.UTF8Encoding($false, $true)
+        $jsonText = $strictUtf8.GetString($bytes)
+    }
+    catch [System.Text.DecoderFallbackException] {
+        throw "The $ArtifactName must contain valid UTF-8 text."
+    }
+    if (Test-AdminJsonHasDuplicateProperty -JsonText $jsonText) {
+        throw "The $ArtifactName contains duplicate or case-conflicting property names."
+    }
+    try {
+        $jsonObject = ConvertFrom-Json -InputObject $jsonText -ErrorAction Stop
+    }
+    catch {
+        throw "The $ArtifactName must contain valid JSON."
+    }
+    return $jsonObject
+}
+
+function ConvertTo-AdminPlanInputValue {
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [AllowNull()]
+        $Value,
+
+        [Parameter()]
+        [ValidateRange(0, 2)]
+        [int]$Depth = 0
+    )
+
+    if ($null -eq $Value) {
+        return $null
+    }
+    if ($Value -is [string]) {
+        if ($Value.Length -gt 32767 -or $Value -match '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]') {
+            throw 'A plan input string is unsafe or exceeds the supported length.'
+        }
+        return [string]$Value
+    }
+    if ($Value -is [bool]) {
+        return [bool]$Value
+    }
+    if ($Value -is [byte] -or $Value -is [sbyte] -or $Value -is [int16] -or $Value -is [uint16] -or $Value -is [int32] -or $Value -is [uint32] -or $Value -is [int64]) {
+        $integer = [int64]$Value
+        if ($integer -lt [int]::MinValue -or $integer -gt [int]::MaxValue) {
+            throw 'A plan input integer exceeds the supported range.'
+        }
+        return [int]$integer
+    }
+    if ($Depth -eq 0 -and $Value -is [System.Array]) {
+        $items = @($Value)
+        if ($items.Count -gt 100) {
+            throw 'A plan input array exceeds the supported item limit.'
+        }
+        $safeItems = New-Object 'System.Collections.Generic.List[object]'
+        foreach ($item in $items) {
+            $safeItems.Add((ConvertTo-AdminPlanInputValue -Value $item -Depth 1)) | Out-Null
+        }
+        return , $safeItems.ToArray()
+    }
+    throw 'A plan input contains an unsupported JSON value type.'
+}
+
+function Get-AdminPlanHashPayload {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Plan
+    )
+
+    return [pscustomobject][ordered]@{
+        canonicalization = $Script:PlanCanonicalization
+        schemaVersion    = [string]$Plan.schemaVersion
+        toolkitVersion   = [string]$Plan.toolkitVersion
+        planId           = [string]$Plan.planId
+        createdAtUtc     = ConvertTo-AdminNormalizedUtcTimestamp -Value $Plan.createdAtUtc
+        request          = $Plan.request
+    }
+}
+
+function Get-AdminPlanHash {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Plan
+    )
+
+    $payload = Get-AdminPlanHashPayload -Plan $Plan
+    return Get-AdminSha256Hex -Text (ConvertTo-AdminCanonicalJson -Value $payload)
+}
+
+function Get-AdminPlanApprovalHash {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Approval
+    )
+
+    $payload = [pscustomobject][ordered]@{
+        canonicalization = $Script:PlanApprovalCanonicalization
+        planHash         = [string]$Approval.planHash
+        status           = [string]$Approval.status
+        approvedBy       = [string]$Approval.approvedBy
+        approvedAtUtc    = ConvertTo-AdminNormalizedUtcTimestamp -Value $Approval.approvedAtUtc
+        reference        = [string]$Approval.reference
+    }
+    return Get-AdminSha256Hex -Text (ConvertTo-AdminCanonicalJson -Value $payload)
+}
+
+function Get-AdminCheckpointHashPayload {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Checkpoint
+    )
+
+    return [pscustomobject][ordered]@{
+        canonicalization = $Script:CheckpointCanonicalization
+        schemaVersion    = [string]$Checkpoint.schemaVersion
+        toolkitVersion   = [string]$Checkpoint.toolkitVersion
+        checkpointId     = [string]$Checkpoint.checkpointId
+        planId           = [string]$Checkpoint.planId
+        planHash         = [string]$Checkpoint.planHash
+        createdAtUtc     = ConvertTo-AdminNormalizedUtcTimestamp -Value $Checkpoint.createdAtUtc
+        updatedAtUtc     = ConvertTo-AdminNormalizedUtcTimestamp -Value $Checkpoint.updatedAtUtc
+        revision         = [int]$Checkpoint.revision
+        lastRunId        = [string]$Checkpoint.lastRunId
+        targets          = @($Checkpoint.targets)
+        summary          = $Checkpoint.summary
+    }
+}
+
+function Get-AdminCheckpointHash {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Checkpoint
+    )
+
+    $payload = Get-AdminCheckpointHashPayload -Checkpoint $Checkpoint
+    return Get-AdminSha256Hex -Text (ConvertTo-AdminCanonicalJson -Value $payload)
+}
+
+function Get-AdminLifecycleSummary {
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [AllowEmptyCollection()]
+        [object[]]$Target = @()
+    )
+
+    $states = @('Pending', 'InProgress', 'Completed', 'Failed', 'TimedOut', 'Skipped', 'Unknown')
+    $counts = [ordered]@{}
+    foreach ($state in $states) {
+        $counts[$state] = [int]@($Target | Where-Object { [string]$_.state -ceq $state }).Count
+    }
+    return [pscustomobject][ordered]@{
+        targetCount     = [int]@($Target).Count
+        pendingCount    = $counts.Pending
+        inProgressCount = $counts.InProgress
+        completedCount  = $counts.Completed
+        failedCount     = $counts.Failed
+        timedOutCount   = $counts.TimedOut
+        skippedCount    = $counts.Skipped
+        unknownCount    = $counts.Unknown
+    }
+}
+
+function ConvertTo-AdminHashedCheckpoint {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Checkpoint
+    )
+
+    $Checkpoint.summary = Get-AdminLifecycleSummary -Target @($Checkpoint.targets)
+    $Checkpoint.checkpointHash = [pscustomobject][ordered]@{
+        algorithm        = 'SHA-256'
+        canonicalization = $Script:CheckpointCanonicalization
+        value            = Get-AdminCheckpointHash -Checkpoint $Checkpoint
+    }
+    return $Checkpoint
+}
+
+function Write-AdminCheckpoint {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$LiteralPath,
+
+        [Parameter(Mandatory = $true)]
+        [psobject]$Checkpoint,
+
+        [Parameter()]
+        [switch]$Create
+    )
+
+    $fullPath = [System.IO.Path]::GetFullPath($LiteralPath)
+    $Checkpoint.updatedAtUtc = ConvertTo-AdminUtcTimestamp -Value ([datetime]::UtcNow)
+    $Checkpoint.revision = [int]$Checkpoint.revision + 1
+    [void](ConvertTo-AdminHashedCheckpoint -Checkpoint $Checkpoint)
+    $json = ConvertTo-Json -InputObject $Checkpoint -Depth 20
+    $encoding = New-Object System.Text.UTF8Encoding($false, $true)
+    $bytes = $encoding.GetBytes($json)
+    if ($bytes.Length -gt $Script:CheckpointMaximumBytes) {
+        throw "The checkpoint exceeds the $Script:CheckpointMaximumBytes byte limit."
+    }
+
+    $parent = Split-Path -Parent $fullPath
+    if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
+        [void][System.IO.Directory]::CreateDirectory($parent)
+    }
+    $temporaryPath = Join-Path $parent ('.wat-checkpoint-{0}.tmp' -f [guid]::NewGuid().ToString('N'))
+    $backupPath = Join-Path $parent ('.wat-checkpoint-backup-{0}.tmp' -f [guid]::NewGuid().ToString('N'))
+    try {
+        [System.IO.File]::WriteAllText($temporaryPath, $json, $encoding)
+        if ($Create) {
+            if (Test-Path -LiteralPath $fullPath) {
+                throw "Refusing to overwrite an existing checkpoint file: $fullPath"
+            }
+            [System.IO.File]::Move($temporaryPath, $fullPath)
+        }
+        else {
+            if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
+                throw "Checkpoint file not found during atomic update: $fullPath"
+            }
+            [System.IO.File]::Replace($temporaryPath, $fullPath, $backupPath, $true)
+            if (Test-Path -LiteralPath $backupPath -PathType Leaf) {
+                [System.IO.File]::Delete($backupPath)
+            }
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $temporaryPath -PathType Leaf) {
+            [System.IO.File]::Delete($temporaryPath)
+        }
+        if (Test-Path -LiteralPath $backupPath -PathType Leaf) {
+            [System.IO.File]::Delete($backupPath)
+        }
+    }
+    return $Checkpoint
+}
+
+function ConvertTo-AdminOrchestrationResult {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Create', 'Approve', 'Execute', 'Resume', 'Unknown')]
+        [string]$Operation,
+
+        [Parameter(Mandatory = $true)]
+        [guid]$RunId,
+
+        [Parameter(Mandatory = $true)]
+        [datetime]$StartedAtUtc,
+
+        [Parameter(Mandatory = $true)]
+        [datetime]$FinishedAtUtc,
+
+        [Parameter()]
+        [AllowNull()]
+        [string]$PlanId,
+
+        [Parameter()]
+        [AllowNull()]
+        [string]$PlanHash,
+
+        [Parameter()]
+        [AllowNull()]
+        [string]$CheckpointPath,
+
+        [Parameter()]
+        [AllowNull()]
+        [string]$CheckpointHash,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Status,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Outcome,
+
+        [Parameter(Mandatory = $true)]
+        [int]$ExitCode,
+
+        [Parameter()]
+        [AllowEmptyCollection()]
+        [object[]]$Target = @(),
+
+        [Parameter()]
+        [AllowEmptyCollection()]
+        [string[]]$Warning = @(),
+
+        [Parameter()]
+        [AllowEmptyCollection()]
+        [object[]]$ErrorRecord = @(),
+
+        [Parameter()]
+        [AllowEmptyCollection()]
+        [string[]]$ReportPath = @()
+    )
+
+    $safeErrors = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($errorItem in @($ErrorRecord)) {
+        $safeErrors.Add([pscustomobject][ordered]@{
+                category = ConvertTo-AdminSafeErrorMessage -Message ([string]$errorItem.category)
+                message  = ConvertTo-AdminSafeErrorMessage -Message ([string]$errorItem.message)
+            }) | Out-Null
+    }
+    $durationMilliseconds = [math]::Max(0, [math]::Round(($FinishedAtUtc - $StartedAtUtc).TotalMilliseconds))
+    return [pscustomobject][ordered]@{
+        schemaVersion  = $Script:OrchestrationResultSchemaVersion
+        toolkitVersion = $Script:ToolkitVersion
+        operation      = $Operation
+        runId          = $RunId.ToString('D')
+        startedAtUtc   = ConvertTo-AdminUtcTimestamp -Value $StartedAtUtc
+        finishedAtUtc  = ConvertTo-AdminUtcTimestamp -Value $FinishedAtUtc
+        durationMs     = [int64]$durationMilliseconds
+        planId         = if ([string]::IsNullOrWhiteSpace($PlanId)) { $null } else { [string]$PlanId }
+        planHash       = if ([string]::IsNullOrWhiteSpace($PlanHash)) { $null } else { [string]$PlanHash }
+        checkpointPath = if ([string]::IsNullOrWhiteSpace($CheckpointPath)) { $null } else { [string]$CheckpointPath }
+        checkpointHash = if ([string]::IsNullOrWhiteSpace($CheckpointHash)) { $null } else { [string]$CheckpointHash }
+        status         = $Status
+        outcome        = $Outcome
+        exitCode       = [int]$ExitCode
+        targetCount    = [int]@($Target).Count
+        summary        = Get-AdminLifecycleSummary -Target @($Target)
+        targets        = @($Target)
+        warnings       = @($Warning | ForEach-Object { ConvertTo-AdminSafeErrorMessage -Message ([string]$_) })
+        errors         = @($safeErrors.ToArray())
+        reportPaths    = @($ReportPath | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { [string]$_ })
+    }
+}
+
+function Test-AdminCanonicalAbsolutePath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$LiteralPath
+    )
+
+    if (-not [System.IO.Path]::IsPathRooted($LiteralPath) -or -not (Test-AdminLiteralFilePathText -LiteralPath $LiteralPath)) {
+        return $false
+    }
+    try {
+        $fullPath = [System.IO.Path]::GetFullPath($LiteralPath)
+    }
+    catch {
+        return $false
+    }
+    return $LiteralPath.Equals($fullPath, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Import-AdminOrchestrationPlan {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$LiteralPath
+    )
+
+    $resolvedPath = Resolve-AdminOrchestrationArtifactPath -LiteralPath $LiteralPath -ArtifactType Plan -Existing
+    $planObject = Read-AdminStrictOrchestrationJson -LiteralPath $resolvedPath -MaximumBytes $Script:PlanMaximumBytes -ArtifactName 'orchestration plan'
+    $rootError = Get-AdminPolicyPropertyError -InputObject $planObject -AllowedProperties @('schemaVersion', 'toolkitVersion', 'planId', 'createdAtUtc', 'request', 'approval', 'planHash') -RequiredProperties @('schemaVersion', 'toolkitVersion', 'planId', 'createdAtUtc', 'request', 'approval', 'planHash') -Context 'The orchestration plan'
+    if ($rootError) { throw $rootError }
+    if ($planObject.schemaVersion -isnot [string] -or [string]$planObject.schemaVersion -cne $Script:PlanSchemaVersion) {
+        throw "The orchestration plan schemaVersion must be $Script:PlanSchemaVersion."
+    }
+    if ($planObject.toolkitVersion -isnot [string] -or [string]$planObject.toolkitVersion -cne $Script:ToolkitVersion) {
+        throw "The orchestration plan was not created for toolkit version $Script:ToolkitVersion."
+    }
+    $planGuid = [guid]::Empty
+    if ($planObject.planId -isnot [string] -or -not [guid]::TryParse([string]$planObject.planId, [ref]$planGuid) -or $planGuid -eq [guid]::Empty -or [string]$planObject.planId -cne $planGuid.ToString('D')) {
+        throw 'The orchestration plan planId must be a canonical nonempty UUID.'
+    }
+    try {
+        $createdAtUtc = ConvertTo-AdminNormalizedUtcTimestamp -Value $planObject.createdAtUtc
+    }
+    catch {
+        throw 'The orchestration plan createdAtUtc value is invalid.'
+    }
+
+    $requestError = Get-AdminPolicyPropertyError -InputObject $planObject.request -AllowedProperties @('actionId', 'actionName', 'readOnly', 'targetMode', 'targets', 'transport', 'inputs', 'policy', 'safety') -RequiredProperties @('actionId', 'actionName', 'readOnly', 'targetMode', 'targets', 'transport', 'inputs', 'policy', 'safety') -Context 'The orchestration plan request'
+    if ($requestError) { throw $requestError }
+    if ($planObject.request.actionId -isnot [string]) { throw 'The orchestration plan actionId is invalid.' }
+    $actionId = Get-AdminSafeActionId -ActionId ([string]$planObject.request.actionId)
+    $catalogItem = if ($actionId) { Get-AdminActionCatalogItem -ActionId $actionId } else { $null }
+    if ($null -eq $catalogItem -or [string]$planObject.request.actionId -cne $catalogItem.Id) {
+        throw 'The orchestration plan actionId is unsupported or noncanonical.'
+    }
+    if ($catalogItem.Id -in @('CustomCommand', 'CustomPowerShell')) {
+        throw 'Controlled orchestration plans do not accept unsandboxed custom-code actions.'
+    }
+    if ($planObject.request.actionName -isnot [string] -or [string]$planObject.request.actionName -cne $catalogItem.Name) {
+        throw 'The orchestration plan actionName does not match the canonical action catalog.'
+    }
+    if ($planObject.request.readOnly -isnot [bool]) { throw 'The orchestration plan readOnly value must be Boolean.' }
+    if ($planObject.request.targetMode -isnot [string] -or [string]$planObject.request.targetMode -cnotin @('Local', 'Remote')) {
+        throw 'The orchestration plan targetMode is invalid.'
+    }
+    $targetMode = [string]$planObject.request.targetMode
+
+    if ($planObject.request.targets -isnot [System.Array]) { throw 'The orchestration plan targets value must be a JSON array.' }
+    $targetValues = @($planObject.request.targets)
+    if ($targetValues.Count -lt 1 -or $targetValues.Count -gt 500 -or ($targetMode -eq 'Local' -and $targetValues.Count -ne 1)) {
+        throw 'The orchestration plan contains an unsupported target count.'
+    }
+    $targets = New-Object 'System.Collections.Generic.List[object]'
+    $seenTargets = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    for ($targetIndex = 0; $targetIndex -lt $targetValues.Count; $targetIndex++) {
+        $targetValue = $targetValues[$targetIndex]
+        $targetError = Get-AdminPolicyPropertyError -InputObject $targetValue -AllowedProperties @('index', 'targetId', 'name') -RequiredProperties @('index', 'targetId', 'name') -Context 'An orchestration plan target'
+        if ($targetError) { throw $targetError }
+        $indexValue = ConvertTo-AdminPolicyInteger -Value $targetValue.index -Minimum 0 -Maximum 499 -Context 'A plan target index'
+        if ($indexValue -ne $targetIndex) { throw 'Orchestration plan target indexes must be contiguous and input ordered.' }
+        if ($targetValue.name -isnot [string]) { throw 'An orchestration plan target name must be a string.' }
+        $targetName = ([string]$targetValue.name).Trim()
+        if (-not (Test-AdminHostname -ComputerName $targetName) -or -not $seenTargets.Add($targetName)) {
+            throw 'The orchestration plan contains an invalid or duplicate target name.'
+        }
+        $expectedTargetId = Get-AdminStableTargetId -ComputerName $targetName
+        if ($targetValue.targetId -isnot [string] -or [string]$targetValue.targetId -cne $expectedTargetId) {
+            throw 'An orchestration plan targetId does not match its canonical target name.'
+        }
+        $targets.Add([pscustomobject][ordered]@{ index = $indexValue; targetId = $expectedTargetId; name = $targetName }) | Out-Null
+    }
+
+    $transportValue = $planObject.request.transport
+    $transportError = Get-AdminPolicyPropertyError -InputObject $transportValue -AllowedProperties @('name', 'authentication', 'useSsl', 'psExecPath', 'psExecSha256') -RequiredProperties @('name', 'authentication', 'useSsl', 'psExecPath', 'psExecSha256') -Context 'The orchestration plan transport'
+    if ($transportError) { throw $transportError }
+    if ($transportValue.name -isnot [string] -or [string]$transportValue.name -cnotin @('Local', 'WinRM', 'PsExec') -or $transportValue.useSsl -isnot [bool]) {
+        throw 'The orchestration plan transport values are invalid.'
+    }
+    $transportName = [string]$transportValue.name
+    $transportAuthentication = if ($null -eq $transportValue.authentication) { $null } elseif ($transportValue.authentication -is [string] -and [string]$transportValue.authentication -cin @('Default', 'Kerberos', 'Negotiate')) { [string]$transportValue.authentication } else { throw 'The orchestration plan authentication value is invalid.' }
+    $psExecPath = if ($null -eq $transportValue.psExecPath) { $null } elseif ($transportValue.psExecPath -is [string] -and (Test-AdminCanonicalAbsolutePath -LiteralPath ([string]$transportValue.psExecPath))) { [string]$transportValue.psExecPath } else { throw 'The orchestration plan PsExec path is invalid or noncanonical.' }
+    $psExecSha256 = if ($null -eq $transportValue.psExecSha256) { $null } elseif ($transportValue.psExecSha256 -is [string] -and [string]$transportValue.psExecSha256 -cmatch '^[0-9a-f]{64}$') { [string]$transportValue.psExecSha256 } else { throw 'The orchestration plan PsExec hash is invalid.' }
+    if ($targetMode -eq 'Local') {
+        if ($transportName -cne 'Local' -or $null -ne $transportAuthentication -or [bool]$transportValue.useSsl -or $null -ne $psExecPath -or $null -ne $psExecSha256) {
+            throw 'A local orchestration plan contains remote transport settings.'
+        }
+    }
+    elseif ($transportName -eq 'WinRM') {
+        if ($null -eq $transportAuthentication -or $null -ne $psExecPath -or $null -ne $psExecSha256) {
+            throw 'A WinRM orchestration plan contains inconsistent transport settings.'
+        }
+    }
+    elseif ($transportName -eq 'PsExec') {
+        if ($null -ne $transportAuthentication -or [bool]$transportValue.useSsl -or $null -eq $psExecPath -or $null -eq $psExecSha256) {
+            throw 'A PsExec orchestration plan contains inconsistent transport settings.'
+        }
+    }
+    else {
+        throw 'A remote orchestration plan must use WinRM or PsExec.'
+    }
+    $transport = [pscustomobject][ordered]@{
+        name         = $transportName
+        authentication = $transportAuthentication
+        useSsl       = [bool]$transportValue.useSsl
+        psExecPath   = $psExecPath
+        psExecSha256 = $psExecSha256
+    }
+
+    if ($planObject.request.inputs -isnot [System.Array]) { throw 'The orchestration plan inputs value must be a JSON array.' }
+    $inputValues = @($planObject.request.inputs)
+    if ($inputValues.Count -gt 20) { throw 'The orchestration plan contains too many action inputs.' }
+    $allowedInputNames = @($Script:AutomationActionInputs[$catalogItem.Id])
+    $seenInputs = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $inputs = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($inputValue in $inputValues) {
+        $inputError = Get-AdminPolicyPropertyError -InputObject $inputValue -AllowedProperties @('name', 'value') -RequiredProperties @('name', 'value') -Context 'An orchestration plan input'
+        if ($inputError) { throw $inputError }
+        if ($inputValue.name -isnot [string] -or [string]$inputValue.name -cnotin $allowedInputNames -or -not $seenInputs.Add([string]$inputValue.name)) {
+            throw 'The orchestration plan contains an unsupported or duplicate action input.'
+        }
+        $inputs.Add([pscustomobject][ordered]@{ name = [string]$inputValue.name; value = ConvertTo-AdminPlanInputValue -Value $inputValue.value }) | Out-Null
+    }
+
+    $policyValue = $planObject.request.policy
+    $policyError = Get-AdminPolicyPropertyError -InputObject $policyValue -AllowedProperties @('applied', 'path', 'fileSha256', 'schemaVersion', 'profileName', 'decision', 'reasonCode') -RequiredProperties @('applied', 'path', 'fileSha256', 'schemaVersion', 'profileName', 'decision', 'reasonCode') -Context 'The orchestration plan policy'
+    if ($policyError) { throw $policyError }
+    if ($policyValue.applied -isnot [bool]) { throw 'The orchestration plan policy applied value must be Boolean.' }
+    if ([bool]$policyValue.applied) {
+        if ($policyValue.path -isnot [string] -or -not (Test-AdminCanonicalAbsolutePath -LiteralPath ([string]$policyValue.path)) -or
+            $policyValue.fileSha256 -isnot [string] -or [string]$policyValue.fileSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+            $policyValue.schemaVersion -isnot [string] -or [string]$policyValue.schemaVersion -cne $Script:PolicySchemaVersion -or
+            $policyValue.profileName -isnot [string] -or [string]$policyValue.profileName -notmatch '^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$' -or
+            $policyValue.decision -isnot [string] -or [string]$policyValue.decision -cne 'Allowed' -or
+            $policyValue.reasonCode -isnot [string] -or [string]$policyValue.reasonCode -cne 'PolicyAllowed') {
+            throw 'The orchestration plan policy snapshot is invalid.'
+        }
+    }
+    elseif ($null -ne $policyValue.path -or $null -ne $policyValue.fileSha256 -or $null -ne $policyValue.schemaVersion -or $null -ne $policyValue.profileName -or [string]$policyValue.decision -cne 'NotApplied' -or [string]$policyValue.reasonCode -cne 'NoPolicy') {
+        throw 'An orchestration plan without a policy contains inconsistent policy metadata.'
+    }
+    $policy = [pscustomobject][ordered]@{
+        applied       = [bool]$policyValue.applied
+        path          = if ($policyValue.applied) { [string]$policyValue.path } else { $null }
+        fileSha256    = if ($policyValue.applied) { [string]$policyValue.fileSha256 } else { $null }
+        schemaVersion = if ($policyValue.applied) { [string]$policyValue.schemaVersion } else { $null }
+        profileName   = if ($policyValue.applied) { [string]$policyValue.profileName } else { $null }
+        decision      = [string]$policyValue.decision
+        reasonCode    = [string]$policyValue.reasonCode
+    }
+
+    $safetyValue = $planObject.request.safety
+    $safetyError = Get-AdminPolicyPropertyError -InputObject $safetyValue -AllowedProperties @('preflight', 'whatIf', 'maxConcurrentJobs', 'retryCount', 'retryDelaySeconds', 'operationTimeoutMinutes', 'connectivityTimeoutSeconds', 'skipConnectivityCheck', 'requiredConfirmationText', 'targetListConfirmationRequired', 'psExecConfirmationRequired', 'identityMode') -RequiredProperties @('preflight', 'whatIf', 'maxConcurrentJobs', 'retryCount', 'retryDelaySeconds', 'operationTimeoutMinutes', 'connectivityTimeoutSeconds', 'skipConnectivityCheck', 'requiredConfirmationText', 'targetListConfirmationRequired', 'psExecConfirmationRequired', 'identityMode') -Context 'The orchestration plan safety settings'
+    if ($safetyError) { throw $safetyError }
+    foreach ($booleanName in @('preflight', 'whatIf', 'skipConnectivityCheck', 'targetListConfirmationRequired', 'psExecConfirmationRequired')) {
+        if ($safetyValue.$booleanName -isnot [bool]) { throw "The orchestration plan safety setting $booleanName must be Boolean." }
+    }
+    if ($safetyValue.preflight -and $safetyValue.whatIf) { throw 'An orchestration plan cannot combine preflight and WhatIf.' }
+    $maxConcurrentJobs = ConvertTo-AdminPolicyInteger -Value $safetyValue.maxConcurrentJobs -Minimum 1 -Maximum 32 -Context 'Plan maxConcurrentJobs'
+    $retryCount = ConvertTo-AdminPolicyInteger -Value $safetyValue.retryCount -Minimum 0 -Maximum 3 -Context 'Plan retryCount'
+    $retryDelaySeconds = ConvertTo-AdminPolicyInteger -Value $safetyValue.retryDelaySeconds -Minimum 1 -Maximum 60 -Context 'Plan retryDelaySeconds'
+    $operationTimeoutMinutes = ConvertTo-AdminPolicyInteger -Value $safetyValue.operationTimeoutMinutes -Minimum 1 -Maximum 180 -Context 'Plan operationTimeoutMinutes'
+    $connectivityTimeoutSeconds = ConvertTo-AdminPolicyInteger -Value $safetyValue.connectivityTimeoutSeconds -Minimum 1 -Maximum 60 -Context 'Plan connectivityTimeoutSeconds'
+    if ($safetyValue.identityMode -isnot [string] -or [string]$safetyValue.identityMode -cne 'CurrentWindowsIdentity') {
+        throw 'Controlled orchestration plans require the current Windows identity.'
+    }
+    $requiredConfirmationText = if ($null -eq $safetyValue.requiredConfirmationText) { $null } elseif ($safetyValue.requiredConfirmationText -is [string]) { [string]$safetyValue.requiredConfirmationText } else { throw 'The orchestration plan required confirmation is invalid.' }
+    $inputMap = @{}
+    foreach ($planInput in $inputs) { $inputMap[[string]$planInput.name] = $planInput.value }
+    $expectedReadOnly = [bool]$catalogItem.ReadOnly
+    if ($catalogItem.Classification -eq 'Conditional') {
+        $expectedReadOnly = $inputMap.ContainsKey('ServiceAction') -and [string]$inputMap.ServiceAction -ceq 'Query'
+    }
+    $expectedConfirmation = if ($expectedReadOnly) { $null } else { [string]$Script:AutomationConfirmations[$catalogItem.Id] }
+    if ([bool]$planObject.request.readOnly -ne $expectedReadOnly -or $requiredConfirmationText -cne $expectedConfirmation) {
+        throw 'The orchestration plan action classification or required confirmation is inconsistent.'
+    }
+    if ([bool]$safetyValue.targetListConfirmationRequired -ne ($targets.Count -gt 25) -or [bool]$safetyValue.psExecConfirmationRequired -ne ($transportName -eq 'PsExec')) {
+        throw 'The orchestration plan safety authorization flags are inconsistent.'
+    }
+    if (-not $expectedReadOnly -and $retryCount -ne 0) { throw 'State-changing orchestration plans cannot enable automatic retries.' }
+    $safety = [pscustomobject][ordered]@{
+        preflight                      = [bool]$safetyValue.preflight
+        whatIf                         = [bool]$safetyValue.whatIf
+        maxConcurrentJobs              = $maxConcurrentJobs
+        retryCount                     = $retryCount
+        retryDelaySeconds              = $retryDelaySeconds
+        operationTimeoutMinutes        = $operationTimeoutMinutes
+        connectivityTimeoutSeconds     = $connectivityTimeoutSeconds
+        skipConnectivityCheck          = [bool]$safetyValue.skipConnectivityCheck
+        requiredConfirmationText       = $requiredConfirmationText
+        targetListConfirmationRequired = [bool]$safetyValue.targetListConfirmationRequired
+        psExecConfirmationRequired     = [bool]$safetyValue.psExecConfirmationRequired
+        identityMode                   = 'CurrentWindowsIdentity'
+    }
+
+    $approvalValue = $planObject.approval
+    $approvalError = Get-AdminPolicyPropertyError -InputObject $approvalValue -AllowedProperties @('status', 'approvedBy', 'approvedAtUtc', 'reference', 'planHash', 'approvalHash') -RequiredProperties @('status', 'approvedBy', 'approvedAtUtc', 'reference', 'planHash', 'approvalHash') -Context 'The orchestration plan approval'
+    if ($approvalError) { throw $approvalError }
+    if ($approvalValue.status -isnot [string] -or [string]$approvalValue.status -cnotin @('Pending', 'Approved')) { throw 'The orchestration plan approval status is invalid.' }
+    if ($approvalValue.planHash -isnot [string] -or [string]$approvalValue.planHash -cnotmatch '^[0-9a-f]{64}$') { throw 'The orchestration plan approval hash is invalid.' }
+    $approvedBy = $null
+    $approvedAtUtc = $null
+    $approvalReference = $null
+    if ([string]$approvalValue.status -ceq 'Pending') {
+        if ($null -ne $approvalValue.approvedBy -or $null -ne $approvalValue.approvedAtUtc -or $null -ne $approvalValue.reference -or $null -ne $approvalValue.approvalHash) {
+            throw 'A pending orchestration plan contains approval metadata.'
+        }
+    }
+    else {
+        if ($approvalValue.approvedBy -isnot [string] -or [string]$approvalValue.approvedBy -notmatch '^[^\x00-\x1F\x7F]{1,128}$' -or ([string]$approvalValue.approvedBy).Trim() -cne [string]$approvalValue.approvedBy) {
+            throw 'The orchestration plan approvedBy value is invalid.'
+        }
+        if ($approvalValue.reference -isnot [string] -or [string]$approvalValue.reference -notmatch '^[^\x00-\x1F\x7F]{1,256}$' -or ([string]$approvalValue.reference).Trim() -cne [string]$approvalValue.reference) {
+            throw 'The orchestration plan approval reference is invalid.'
+        }
+        try { $approvedAtUtc = ConvertTo-AdminNormalizedUtcTimestamp -Value $approvalValue.approvedAtUtc } catch { throw 'The orchestration plan approvedAtUtc value is invalid.' }
+        if ([string]::CompareOrdinal($approvedAtUtc, $createdAtUtc) -lt 0) { throw 'The orchestration plan approval timestamp precedes plan creation.' }
+        $approvedBy = [string]$approvalValue.approvedBy
+        $approvalReference = [string]$approvalValue.reference
+        if ($approvalValue.approvalHash -isnot [string] -or [string]$approvalValue.approvalHash -cnotmatch '^[0-9a-f]{64}$') { throw 'The orchestration plan approvalHash is invalid.' }
+    }
+    $approval = [pscustomobject][ordered]@{
+        status        = [string]$approvalValue.status
+        approvedBy    = $approvedBy
+        approvedAtUtc = $approvedAtUtc
+        reference     = $approvalReference
+        planHash      = [string]$approvalValue.planHash
+        approvalHash  = if ([string]$approvalValue.status -ceq 'Approved') { [string]$approvalValue.approvalHash } else { $null }
+    }
+
+    $hashValue = $planObject.planHash
+    $hashError = Get-AdminPolicyPropertyError -InputObject $hashValue -AllowedProperties @('algorithm', 'canonicalization', 'value') -RequiredProperties @('algorithm', 'canonicalization', 'value') -Context 'The orchestration plan hash'
+    if ($hashError) { throw $hashError }
+    if ($hashValue.algorithm -isnot [string] -or [string]$hashValue.algorithm -cne 'SHA-256' -or
+        $hashValue.canonicalization -isnot [string] -or [string]$hashValue.canonicalization -cne $Script:PlanCanonicalization -or
+        $hashValue.value -isnot [string] -or [string]$hashValue.value -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'The orchestration plan hash metadata is invalid.'
+    }
+
+    $normalizedPlan = [pscustomobject][ordered]@{
+        schemaVersion  = $Script:PlanSchemaVersion
+        toolkitVersion = [string]$planObject.toolkitVersion
+        planId         = $planGuid.ToString('D')
+        createdAtUtc   = $createdAtUtc
+        request        = [pscustomobject][ordered]@{
+            actionId   = $catalogItem.Id
+            actionName = $catalogItem.Name
+            readOnly   = $expectedReadOnly
+            targetMode = $targetMode
+            targets    = @($targets.ToArray())
+            transport  = $transport
+            inputs     = @($inputs.ToArray())
+            policy     = $policy
+            safety     = $safety
+        }
+        approval       = $approval
+        planHash       = [pscustomobject][ordered]@{
+            algorithm        = 'SHA-256'
+            canonicalization = $Script:PlanCanonicalization
+            value            = [string]$hashValue.value
+        }
+    }
+    $computedHash = Get-AdminPlanHash -Plan $normalizedPlan
+    if ($computedHash -cne [string]$hashValue.value -or $computedHash -cne [string]$approval.planHash) {
+        throw 'The orchestration plan hash does not match its immutable execution contract.'
+    }
+    if ([string]$approval.status -ceq 'Approved' -and (Get-AdminPlanApprovalHash -Approval $approval) -cne [string]$approval.approvalHash) {
+        throw 'The orchestration plan approval hash does not match its review metadata.'
+    }
+    return $normalizedPlan
+}
+
+function ConvertTo-AdminOrchestrationPlan {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Request,
+
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$Parameters
+    )
+
+    if ($Request.ActionId -in @('CustomCommand', 'CustomPowerShell')) {
+        throw 'Controlled orchestration plans do not accept unsandboxed custom-code actions.'
+    }
+    $targets = New-Object 'System.Collections.Generic.List[object]'
+    for ($index = 0; $index -lt $Request.Computers.Count; $index++) {
+        $targetName = [string]$Request.Computers[$index]
+        $targets.Add([pscustomobject][ordered]@{
+                index    = [int]$index
+                targetId = Get-AdminStableTargetId -ComputerName $targetName
+                name     = $targetName
+            }) | Out-Null
+    }
+
+    $inputs = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($inputName in @($Script:AutomationActionInputs[$Request.ActionId])) {
+        if (-not $Request.Inputs.Contains($inputName)) {
+            continue
+        }
+        $inputs.Add([pscustomobject][ordered]@{
+                name  = $inputName
+                value = ConvertTo-AdminPlanInputValue -Value $Request.Inputs[$inputName]
+            }) | Out-Null
+    }
+
+    $policy = if ($null -ne $Request.PolicyProfile) {
+        $policyPath = [string]$Request.PolicyProfile.SourcePath
+        [pscustomobject][ordered]@{
+            applied       = $true
+            path          = $policyPath
+            fileSha256    = Get-AdminFileSha256Hex -LiteralPath $policyPath
+            schemaVersion = [string]$Request.PolicyProfile.SchemaVersion
+            profileName   = [string]$Request.PolicyProfile.ProfileName
+            decision      = [string]$Request.PolicyDecision.decision
+            reasonCode    = [string]$Request.PolicyDecision.reasonCode
+        }
+    }
+    else {
+        [pscustomobject][ordered]@{
+            applied       = $false
+            path          = $null
+            fileSha256    = $null
+            schemaVersion = $null
+            profileName   = $null
+            decision      = 'NotApplied'
+            reasonCode    = 'NoPolicy'
+        }
+    }
+
+    $transportName = if ($Request.TargetMode -eq 'Local') { 'Local' } else { [string]$Script:State.Transport }
+    $transport = [pscustomobject][ordered]@{
+        name           = $transportName
+        authentication = if ($transportName -eq 'WinRM') { [string]$Script:State.Authentication } else { $null }
+        useSsl         = $transportName -eq 'WinRM' -and [bool]$Script:State.UseSsl
+        psExecPath     = if ($transportName -eq 'PsExec') { [string]$Script:State.PsExecFullPath } else { $null }
+        psExecSha256   = if ($transportName -eq 'PsExec') { Get-AdminFileSha256Hex -LiteralPath ([string]$Script:State.PsExecFullPath) } else { $null }
+    }
+    $safety = [pscustomobject][ordered]@{
+        preflight                      = [bool]$Request.Preflight
+        whatIf                         = (Test-AdminParameterBound -Parameters $Parameters -Name 'WhatIf') -and [bool]$Parameters['WhatIf']
+        maxConcurrentJobs              = [int]$Request.ExecutionSettings.MaxConcurrentJobs
+        retryCount                     = if ($Request.ReadOnly) { [int]$Request.ExecutionSettings.RetryCount } else { 0 }
+        retryDelaySeconds              = [int]$Request.ExecutionSettings.RetryDelaySeconds
+        operationTimeoutMinutes        = [int]$Request.ExecutionSettings.OperationTimeoutMinutes
+        connectivityTimeoutSeconds     = [int]$Request.ExecutionSettings.ConnectivityTimeoutSeconds
+        skipConnectivityCheck          = [bool]$Script:State.SkipConnectivityCheck
+        requiredConfirmationText       = if ($Request.ReadOnly) { $null } else { [string]$Request.ExpectedConfirmation }
+        targetListConfirmationRequired = $targets.Count -gt 25
+        psExecConfirmationRequired     = $transportName -eq 'PsExec'
+        identityMode                   = 'CurrentWindowsIdentity'
+    }
+    $plan = [pscustomobject][ordered]@{
+        schemaVersion  = $Script:PlanSchemaVersion
+        toolkitVersion = $Script:ToolkitVersion
+        planId         = [guid]::NewGuid().ToString('D')
+        createdAtUtc   = ConvertTo-AdminUtcTimestamp -Value ([datetime]::UtcNow)
+        request        = [pscustomobject][ordered]@{
+            actionId   = [string]$Request.ActionId
+            actionName = [string]$Request.ActionName
+            readOnly   = [bool]$Request.ReadOnly
+            targetMode = [string]$Request.TargetMode
+            targets    = @($targets.ToArray())
+            transport  = $transport
+            inputs     = @($inputs.ToArray())
+            policy     = $policy
+            safety     = $safety
+        }
+        approval       = $null
+        planHash       = $null
+    }
+    $planHash = Get-AdminPlanHash -Plan $plan
+    $plan.approval = [pscustomobject][ordered]@{
+        status        = 'Pending'
+        approvedBy    = $null
+        approvedAtUtc = $null
+        reference     = $null
+        planHash      = $planHash
+        approvalHash  = $null
+    }
+    $plan.planHash = [pscustomobject][ordered]@{
+        algorithm        = 'SHA-256'
+        canonicalization = $Script:PlanCanonicalization
+        value            = $planHash
+    }
+    return $plan
+}
+
+function ConvertTo-AdminInitialLifecycleTarget {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Target
+    )
+
+    return [pscustomobject][ordered]@{
+        index          = [int]$Target.index
+        targetId       = [string]$Target.targetId
+        target         = [string]$Target.name
+        state          = 'Pending'
+        previousState  = $null
+        startedAtUtc   = $null
+        finishedAtUtc  = $null
+        attempts       = 0
+        executionRunId = $null
+        resultStatus   = $null
+        resultOutcome  = $null
+        resultExitCode = $null
+        errorCategory  = $null
+        errorMessage   = $null
+    }
+}
+
+function Test-AdminPlanExternalReference {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Plan
+    )
+
+    if ($Plan.request.policy.applied) {
+        $policyPath = [string]$Plan.request.policy.path
+        if (-not (Test-Path -LiteralPath $policyPath -PathType Leaf) -or (Get-AdminFileSha256Hex -LiteralPath $policyPath) -cne [string]$Plan.request.policy.fileSha256) {
+            throw 'The approved policy file is missing or no longer matches the plan hash.'
+        }
+        $policyProfile = Import-AdminPolicyProfile -LiteralPath $policyPath
+        if ([string]$policyProfile.SchemaVersion -cne [string]$Plan.request.policy.schemaVersion -or [string]$policyProfile.ProfileName -cne [string]$Plan.request.policy.profileName) {
+            throw 'The approved policy metadata no longer matches the plan.'
+        }
+    }
+    if ([string]$Plan.request.transport.name -ceq 'PsExec') {
+        $psExecPath = [string]$Plan.request.transport.psExecPath
+        if (-not (Test-Path -LiteralPath $psExecPath -PathType Leaf) -or (Get-AdminFileSha256Hex -LiteralPath $psExecPath) -cne [string]$Plan.request.transport.psExecSha256) {
+            throw 'The approved PsExec executable is missing or no longer matches the plan hash.'
+        }
+        $resolvedPsExec = Resolve-AdminPsExec -Path $psExecPath
+        if (-not $resolvedPsExec.Equals($psExecPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'The approved PsExec executable resolved to a different path.'
+        }
+    }
+    return $true
+}
+
+function Open-AdminPlanExternalReferenceLock {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Plan
+    )
+
+    $referencePaths = New-Object 'System.Collections.Generic.List[string]'
+    if ($Plan.request.policy.applied) { $referencePaths.Add([string]$Plan.request.policy.path) | Out-Null }
+    if ([string]$Plan.request.transport.name -ceq 'PsExec') { $referencePaths.Add([string]$Plan.request.transport.psExecPath) | Out-Null }
+    $streams = New-Object 'System.Collections.Generic.List[System.IO.FileStream]'
+    try {
+        foreach ($referencePath in $referencePaths) {
+            $streams.Add([System.IO.File]::Open($referencePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)) | Out-Null
+        }
+        return $streams.ToArray()
+    }
+    catch {
+        foreach ($stream in $streams) { $stream.Dispose() }
+        throw
+    }
+}
+
+function Invoke-AdminPlanCreate {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$Parameters,
+
+        [Parameter(Mandatory = $true)]
+        [guid]$RunId,
+
+        [Parameter(Mandatory = $true)]
+        [datetime]$StartedAtUtc,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedOutputPath
+    )
+
+    $planPath = if (Test-AdminParameterBound -Parameters $Parameters -Name 'PlanPath') { ([string]$Parameters['PlanPath']).Trim() } else { '' }
+    if ([string]::IsNullOrWhiteSpace($planPath)) { throw 'PlanOperation Create requires -PlanPath.' }
+    $resolvedPlanPath = Resolve-AdminOrchestrationArtifactPath -LiteralPath $planPath -ArtifactType Plan
+    $collisionPaths = @($ResolvedOutputPath)
+    if (Test-AdminParameterBound -Parameters $Parameters -Name 'LogFile') { $collisionPaths += [string]$Parameters['LogFile'] }
+    if (Test-AdminOrchestrationPathCollision -LiteralPath $resolvedPlanPath -OtherPath $collisionPaths) {
+        throw 'The plan path must be different from every other configured output path.'
+    }
+    foreach ($forbiddenName in @('ApprovedPlanPath', 'CheckpointPath', 'ApprovedBy', 'ApprovalReference', 'PlanApprovalText', 'ListActions', 'AuditPath', 'AuditEventLog', 'AuditEventSource', 'Credential', 'ConfirmationText', 'TargetListConfirmationText', 'PsExecConfirmationText')) {
+        if (Test-AdminParameterBound -Parameters $Parameters -Name $forbiddenName) {
+            throw "Parameter -$forbiddenName cannot be combined with PlanOperation Create."
+        }
+    }
+
+    $validationParameters = @{}
+    $excludedNames = @('Automation', 'PlanOperation', 'PlanPath', 'JsonOutputPath')
+    foreach ($parameterName in @($Parameters.Keys)) {
+        if ([string]$parameterName -notin $excludedNames) {
+            $validationParameters[[string]$parameterName] = $Parameters[$parameterName]
+        }
+    }
+    $validationParameters['_PlanValidation'] = $true
+    $resolution = Resolve-AdminAutomationRequest -Parameters $validationParameters
+    if (-not $resolution.Success) {
+        $finishedAtUtc = [datetime]::UtcNow
+        $outcome = if ($resolution.Category -eq 'Authorization') { 'AuthorizationFailure' } else { 'ValidationFailure' }
+        $status = if ($resolution.Category -eq 'Authorization') { 'AuthorizationFailed' } else { 'ValidationFailed' }
+        $exitCode = if ($resolution.Category -eq 'Authorization') { $Script:AutomationExitCodes.AuthorizationFailure } else { $Script:AutomationExitCodes.ValidationFailure }
+        return ConvertTo-AdminOrchestrationResult -Operation Create -RunId $RunId -StartedAtUtc $StartedAtUtc -FinishedAtUtc $finishedAtUtc -Status $status -Outcome $outcome -ExitCode $exitCode -ErrorRecord @([pscustomobject]@{ category = $resolution.Category; message = $resolution.Message })
+    }
+    $plan = ConvertTo-AdminOrchestrationPlan -Request $resolution.Request -Parameters $validationParameters
+    $planJson = ConvertTo-Json -InputObject $plan -Depth 20
+    [void](Write-AdminUtf8File -LiteralPath $resolvedPlanPath -Content $planJson -EmitBom $false)
+    $lifecycleTargets = @($plan.request.targets | ForEach-Object { ConvertTo-AdminInitialLifecycleTarget -Target $_ })
+    return ConvertTo-AdminOrchestrationResult -Operation Create -RunId $RunId -StartedAtUtc $StartedAtUtc -FinishedAtUtc ([datetime]::UtcNow) -PlanId $plan.planId -PlanHash $plan.planHash.value -Status Planned -Outcome PlanCreated -ExitCode $Script:AutomationExitCodes.CompleteSuccess -Target $lifecycleTargets -ReportPath @($resolvedPlanPath)
+}
+
+function Invoke-AdminPlanApprove {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$Parameters,
+
+        [Parameter(Mandatory = $true)]
+        [guid]$RunId,
+
+        [Parameter(Mandatory = $true)]
+        [datetime]$StartedAtUtc,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedOutputPath
+    )
+
+    $allowedNames = @('Automation', 'PlanOperation', 'PlanPath', 'ApprovedPlanPath', 'ApprovedBy', 'ApprovalReference', 'PlanApprovalText', 'JsonOutputPath', 'LogFile', 'Quiet')
+    foreach ($parameterName in @($Parameters.Keys)) {
+        if ([string]$parameterName -cnotin $allowedNames) {
+            throw "Parameter -$parameterName cannot be combined with PlanOperation Approve."
+        }
+    }
+    foreach ($requiredName in @('PlanPath', 'ApprovedPlanPath', 'ApprovedBy', 'ApprovalReference', 'PlanApprovalText')) {
+        if (-not (Test-AdminParameterBound -Parameters $Parameters -Name $requiredName) -or [string]::IsNullOrWhiteSpace([string]$Parameters[$requiredName])) {
+            throw "PlanOperation Approve requires -$requiredName."
+        }
+    }
+    $resolvedSourcePath = Resolve-AdminOrchestrationArtifactPath -LiteralPath ([string]$Parameters['PlanPath']) -ArtifactType Plan -Existing
+    $resolvedApprovedPath = Resolve-AdminOrchestrationArtifactPath -LiteralPath ([string]$Parameters['ApprovedPlanPath']) -ArtifactType Plan
+    $collisionPaths = @($resolvedSourcePath, $ResolvedOutputPath)
+    if (Test-AdminParameterBound -Parameters $Parameters -Name 'LogFile') { $collisionPaths += [string]$Parameters['LogFile'] }
+    if (Test-AdminOrchestrationPathCollision -LiteralPath $resolvedApprovedPath -OtherPath $collisionPaths) {
+        throw 'The approved plan path must be different from the source plan and every other configured output path.'
+    }
+    $approvedByValue = [string]$Parameters['ApprovedBy']
+    $referenceValue = [string]$Parameters['ApprovalReference']
+    if ($approvedByValue -notmatch '^[^\x00-\x1F\x7F]{1,128}$' -or $approvedByValue.Trim() -cne $approvedByValue) { throw 'ApprovedBy is invalid.' }
+    if ($referenceValue -notmatch '^[^\x00-\x1F\x7F]{1,256}$' -or $referenceValue.Trim() -cne $referenceValue) { throw 'ApprovalReference is invalid.' }
+
+    $plan = Import-AdminOrchestrationPlan -LiteralPath $resolvedSourcePath
+    if ([string]$plan.approval.status -cne 'Pending') { throw 'Only a pending plan can be approved.' }
+    $expectedApprovalText = 'APPROVE PLAN ' + [string]$plan.planHash.value
+    if ([string]$Parameters['PlanApprovalText'] -cne $expectedApprovalText) {
+        $finishedAtUtc = [datetime]::UtcNow
+        return ConvertTo-AdminOrchestrationResult -Operation Approve -RunId $RunId -StartedAtUtc $StartedAtUtc -FinishedAtUtc $finishedAtUtc -PlanId $plan.planId -PlanHash $plan.planHash.value -Status AuthorizationFailed -Outcome AuthorizationFailure -ExitCode $Script:AutomationExitCodes.AuthorizationFailure -ErrorRecord @([pscustomobject]@{ category = 'Authorization'; message = 'PlanApprovalText must exactly identify the complete reviewed plan hash.' })
+    }
+    [void](Test-AdminPlanExternalReference -Plan $plan)
+    $approvedAtUtc = ConvertTo-AdminUtcTimestamp -Value ([datetime]::UtcNow)
+    $plan.approval = [pscustomobject][ordered]@{
+        status        = 'Approved'
+        approvedBy    = $approvedByValue
+        approvedAtUtc = $approvedAtUtc
+        reference     = $referenceValue
+        planHash      = [string]$plan.planHash.value
+        approvalHash  = $null
+    }
+    $plan.approval.approvalHash = Get-AdminPlanApprovalHash -Approval $plan.approval
+    $planJson = ConvertTo-Json -InputObject $plan -Depth 20
+    [void](Write-AdminUtf8File -LiteralPath $resolvedApprovedPath -Content $planJson -EmitBom $false)
+    $lifecycleTargets = @($plan.request.targets | ForEach-Object { ConvertTo-AdminInitialLifecycleTarget -Target $_ })
+    return ConvertTo-AdminOrchestrationResult -Operation Approve -RunId $RunId -StartedAtUtc $StartedAtUtc -FinishedAtUtc ([datetime]::UtcNow) -PlanId $plan.planId -PlanHash $plan.planHash.value -Status Approved -Outcome PlanApproved -ExitCode $Script:AutomationExitCodes.CompleteSuccess -Target $lifecycleTargets -ReportPath @($resolvedApprovedPath)
+}
+
+function ConvertTo-AdminInitialCheckpoint {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Plan,
+
+        [Parameter(Mandatory = $true)]
+        [guid]$RunId
+    )
+
+    $createdAtUtc = ConvertTo-AdminUtcTimestamp -Value ([datetime]::UtcNow)
+    $targets = @($Plan.request.targets | ForEach-Object { ConvertTo-AdminInitialLifecycleTarget -Target $_ })
+    $checkpoint = [pscustomobject][ordered]@{
+        schemaVersion  = $Script:CheckpointSchemaVersion
+        toolkitVersion = $Script:ToolkitVersion
+        checkpointId   = [guid]::NewGuid().ToString('D')
+        planId         = [string]$Plan.planId
+        planHash       = [string]$Plan.planHash.value
+        createdAtUtc   = $createdAtUtc
+        updatedAtUtc   = $createdAtUtc
+        revision       = 0
+        lastRunId      = $RunId.ToString('D')
+        targets        = @($targets)
+        summary        = Get-AdminLifecycleSummary -Target $targets
+        checkpointHash = $null
+    }
+    [void](ConvertTo-AdminHashedCheckpoint -Checkpoint $checkpoint)
+    return $checkpoint
+}
+
+function Import-AdminOrchestrationCheckpoint {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$LiteralPath,
+
+        [Parameter(Mandatory = $true)]
+        [psobject]$Plan
+    )
+
+    $resolvedPath = Resolve-AdminOrchestrationArtifactPath -LiteralPath $LiteralPath -ArtifactType Checkpoint -Existing
+    $checkpointObject = Read-AdminStrictOrchestrationJson -LiteralPath $resolvedPath -MaximumBytes $Script:CheckpointMaximumBytes -ArtifactName 'orchestration checkpoint'
+    $rootError = Get-AdminPolicyPropertyError -InputObject $checkpointObject -AllowedProperties @('schemaVersion', 'toolkitVersion', 'checkpointId', 'planId', 'planHash', 'createdAtUtc', 'updatedAtUtc', 'revision', 'lastRunId', 'targets', 'summary', 'checkpointHash') -RequiredProperties @('schemaVersion', 'toolkitVersion', 'checkpointId', 'planId', 'planHash', 'createdAtUtc', 'updatedAtUtc', 'revision', 'lastRunId', 'targets', 'summary', 'checkpointHash') -Context 'The orchestration checkpoint'
+    if ($rootError) { throw $rootError }
+    if ($checkpointObject.schemaVersion -isnot [string] -or [string]$checkpointObject.schemaVersion -cne $Script:CheckpointSchemaVersion) { throw "The orchestration checkpoint schemaVersion must be $Script:CheckpointSchemaVersion." }
+    if ($checkpointObject.toolkitVersion -isnot [string] -or [string]$checkpointObject.toolkitVersion -cne $Script:ToolkitVersion) { throw "The orchestration checkpoint was not created for toolkit version $Script:ToolkitVersion." }
+    $checkpointGuid = [guid]::Empty
+    if ($checkpointObject.checkpointId -isnot [string] -or -not [guid]::TryParse([string]$checkpointObject.checkpointId, [ref]$checkpointGuid) -or $checkpointGuid -eq [guid]::Empty -or [string]$checkpointObject.checkpointId -cne $checkpointGuid.ToString('D')) { throw 'The orchestration checkpoint checkpointId is invalid.' }
+    if ($checkpointObject.planId -isnot [string] -or [string]$checkpointObject.planId -cne [string]$Plan.planId -or $checkpointObject.planHash -isnot [string] -or [string]$checkpointObject.planHash -cne [string]$Plan.planHash.value) { throw 'The orchestration checkpoint does not belong to the approved plan.' }
+    try {
+        $createdAtUtc = ConvertTo-AdminNormalizedUtcTimestamp -Value $checkpointObject.createdAtUtc
+        $updatedAtUtc = ConvertTo-AdminNormalizedUtcTimestamp -Value $checkpointObject.updatedAtUtc
+    }
+    catch { throw 'The orchestration checkpoint contains an invalid timestamp.' }
+    if ([string]::CompareOrdinal($updatedAtUtc, $createdAtUtc) -lt 0) { throw 'The orchestration checkpoint update timestamp precedes its creation timestamp.' }
+    $revision = ConvertTo-AdminPolicyInteger -Value $checkpointObject.revision -Minimum 1 -Maximum 1000000 -Context 'Checkpoint revision'
+    $lastRunGuid = [guid]::Empty
+    if ($checkpointObject.lastRunId -isnot [string] -or -not [guid]::TryParse([string]$checkpointObject.lastRunId, [ref]$lastRunGuid) -or $lastRunGuid -eq [guid]::Empty -or [string]$checkpointObject.lastRunId -cne $lastRunGuid.ToString('D')) { throw 'The orchestration checkpoint lastRunId is invalid.' }
+
+    if ($checkpointObject.targets -isnot [System.Array]) { throw 'The orchestration checkpoint targets value must be a JSON array.' }
+    $targetValues = @($checkpointObject.targets)
+    if ($targetValues.Count -ne @($Plan.request.targets).Count) { throw 'The orchestration checkpoint target count does not match the approved plan.' }
+    $targets = New-Object 'System.Collections.Generic.List[object]'
+    $stateValues = @('Pending', 'InProgress', 'Completed', 'Failed', 'TimedOut', 'Skipped', 'Unknown')
+    for ($index = 0; $index -lt $targetValues.Count; $index++) {
+        $targetValue = $targetValues[$index]
+        $targetError = Get-AdminPolicyPropertyError -InputObject $targetValue -AllowedProperties @('index', 'targetId', 'target', 'state', 'previousState', 'startedAtUtc', 'finishedAtUtc', 'attempts', 'executionRunId', 'resultStatus', 'resultOutcome', 'resultExitCode', 'errorCategory', 'errorMessage') -RequiredProperties @('index', 'targetId', 'target', 'state', 'previousState', 'startedAtUtc', 'finishedAtUtc', 'attempts', 'executionRunId', 'resultStatus', 'resultOutcome', 'resultExitCode', 'errorCategory', 'errorMessage') -Context 'An orchestration checkpoint target'
+        if ($targetError) { throw $targetError }
+        $planTarget = @($Plan.request.targets)[$index]
+        $targetIndex = ConvertTo-AdminPolicyInteger -Value $targetValue.index -Minimum 0 -Maximum 499 -Context 'Checkpoint target index'
+        if ($targetIndex -ne $index -or $targetValue.targetId -isnot [string] -or [string]$targetValue.targetId -cne [string]$planTarget.targetId -or $targetValue.target -isnot [string] -or [string]$targetValue.target -cne [string]$planTarget.name) { throw 'An orchestration checkpoint target does not match the approved plan.' }
+        if ($targetValue.state -isnot [string] -or [string]$targetValue.state -cnotin $stateValues) { throw 'An orchestration checkpoint target state is invalid.' }
+        $previousState = if ($null -eq $targetValue.previousState) { $null } elseif ($targetValue.previousState -is [string] -and [string]$targetValue.previousState -cin $stateValues) { [string]$targetValue.previousState } else { throw 'An orchestration checkpoint previousState is invalid.' }
+        $attempts = ConvertTo-AdminPolicyInteger -Value $targetValue.attempts -Minimum 0 -Maximum 1 -Context 'Checkpoint target attempts'
+        $startedTargetAtUtc = if ($null -eq $targetValue.startedAtUtc) { $null } else { try { ConvertTo-AdminNormalizedUtcTimestamp -Value $targetValue.startedAtUtc } catch { throw 'A checkpoint target start timestamp is invalid.' } }
+        $finishedTargetAtUtc = if ($null -eq $targetValue.finishedAtUtc) { $null } else { try { ConvertTo-AdminNormalizedUtcTimestamp -Value $targetValue.finishedAtUtc } catch { throw 'A checkpoint target finish timestamp is invalid.' } }
+        $executionRunId = $null
+        if ($null -ne $targetValue.executionRunId) {
+            $targetRunGuid = [guid]::Empty
+            if ($targetValue.executionRunId -isnot [string] -or -not [guid]::TryParse([string]$targetValue.executionRunId, [ref]$targetRunGuid) -or $targetRunGuid -eq [guid]::Empty -or [string]$targetValue.executionRunId -cne $targetRunGuid.ToString('D')) { throw 'A checkpoint target executionRunId is invalid.' }
+            $executionRunId = $targetRunGuid.ToString('D')
+        }
+        $resultStatus = if ($null -eq $targetValue.resultStatus) { $null } elseif ($targetValue.resultStatus -is [string] -and [string]$targetValue.resultStatus -cin @('Success', 'Partial', 'Failed', 'TimedOut', 'WhatIf', 'Skipped', 'Succeeded', 'PartiallySucceeded', 'ValidationFailed', 'AuthorizationFailed', 'InternalFailure')) { [string]$targetValue.resultStatus } else { throw 'A checkpoint target resultStatus is invalid.' }
+        $resultOutcome = if ($null -eq $targetValue.resultOutcome) { $null } elseif ($targetValue.resultOutcome -is [string] -and [string]$targetValue.resultOutcome -cin @('CompleteSuccess', 'PartialSuccess', 'ValidationFailure', 'AuthorizationFailure', 'ExecutionFailure', 'Timeout', 'InternalFailure')) { [string]$targetValue.resultOutcome } else { throw 'A checkpoint target resultOutcome is invalid.' }
+        $resultExitCode = if ($null -eq $targetValue.resultExitCode) { $null } else { ConvertTo-AdminPolicyInteger -Value $targetValue.resultExitCode -Minimum 0 -Maximum 10 -Context 'Checkpoint target resultExitCode' }
+        if ($null -ne $resultExitCode -and $resultExitCode -notin @(0, 1, 2, 3, 4, 5, 10)) { throw 'A checkpoint target resultExitCode is unsupported.' }
+        $errorCategory = if ($null -eq $targetValue.errorCategory) { $null } elseif ($targetValue.errorCategory -is [string] -and [string]$targetValue.errorCategory -match '^[A-Za-z][A-Za-z0-9]{0,63}$') { [string]$targetValue.errorCategory } else { throw 'A checkpoint target errorCategory is invalid.' }
+        $errorMessage = if ($null -eq $targetValue.errorMessage) { $null } elseif ($targetValue.errorMessage -is [string] -and [string]$targetValue.errorMessage -notmatch '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]' -and ([string]$targetValue.errorMessage).Length -le 1036) { [string]$targetValue.errorMessage } else { throw 'A checkpoint target errorMessage is invalid.' }
+        $state = [string]$targetValue.state
+        if ($null -ne $startedTargetAtUtc -and [string]::CompareOrdinal($startedTargetAtUtc, $createdAtUtc) -lt 0) { throw 'A checkpoint target start timestamp precedes checkpoint creation.' }
+        if ($null -ne $finishedTargetAtUtc -and ($null -eq $startedTargetAtUtc -or [string]::CompareOrdinal($finishedTargetAtUtc, $startedTargetAtUtc) -lt 0 -or [string]::CompareOrdinal($finishedTargetAtUtc, $updatedAtUtc) -gt 0)) { throw 'A checkpoint target finish timestamp is inconsistent.' }
+        if ($state -eq 'Pending' -and ($null -ne $previousState -or $attempts -ne 0 -or $null -ne $startedTargetAtUtc -or $null -ne $finishedTargetAtUtc -or $null -ne $executionRunId -or $null -ne $resultStatus -or $null -ne $resultOutcome -or $null -ne $resultExitCode -or $null -ne $errorCategory -or $null -ne $errorMessage)) { throw 'A pending checkpoint target contains execution evidence.' }
+        if ($state -eq 'InProgress' -and ($previousState -cne 'Pending' -or $attempts -ne 1 -or $null -eq $startedTargetAtUtc -or $null -ne $finishedTargetAtUtc -or $null -eq $executionRunId -or $null -ne $resultStatus -or $null -ne $resultOutcome -or $null -ne $resultExitCode -or $null -ne $errorCategory -or $null -ne $errorMessage)) { throw 'An in-progress checkpoint target is inconsistent.' }
+        if ($state -in @('Completed', 'Failed', 'TimedOut', 'Skipped', 'Unknown') -and ($previousState -cne 'InProgress' -or $attempts -ne 1 -or $null -eq $startedTargetAtUtc -or $null -eq $finishedTargetAtUtc -or $null -eq $executionRunId -or $null -eq $resultStatus -or $null -eq $resultOutcome -or $null -eq $resultExitCode)) { throw 'A terminal checkpoint target contains incomplete execution evidence.' }
+        $terminalResultIsConsistent = switch ($state) {
+            'Completed' {
+                ($resultOutcome -ceq 'CompleteSuccess' -and $resultExitCode -eq 0 -and $resultStatus -cin @('Success', 'WhatIf', 'Succeeded')) -or
+                ($resultOutcome -ceq 'PartialSuccess' -and $resultExitCode -eq 1 -and $resultStatus -cin @('Partial', 'PartiallySucceeded'))
+            }
+            'Failed' { $resultOutcome -ceq 'ExecutionFailure' -and $resultExitCode -eq 4 -and $resultStatus -ceq 'Failed' }
+            'TimedOut' { $resultOutcome -ceq 'Timeout' -and $resultExitCode -eq 5 -and $resultStatus -ceq 'TimedOut' }
+            'Skipped' {
+                ($resultOutcome -ceq 'ValidationFailure' -and $resultExitCode -eq 2 -and $resultStatus -cin @('Skipped', 'ValidationFailed')) -or
+                ($resultOutcome -ceq 'AuthorizationFailure' -and $resultExitCode -eq 3 -and $resultStatus -cin @('Skipped', 'AuthorizationFailed'))
+            }
+            'Unknown' { $resultOutcome -ceq 'InternalFailure' -and $resultExitCode -eq 10 -and $resultStatus -ceq 'InternalFailure' }
+            default { $true }
+        }
+        if (-not $terminalResultIsConsistent) { throw 'A checkpoint target state, result status, outcome, and exit code are inconsistent.' }
+        $targets.Add([pscustomobject][ordered]@{
+                index          = $index
+                targetId       = [string]$planTarget.targetId
+                target         = [string]$planTarget.name
+                state          = $state
+                previousState  = $previousState
+                startedAtUtc   = $startedTargetAtUtc
+                finishedAtUtc  = $finishedTargetAtUtc
+                attempts       = $attempts
+                executionRunId = $executionRunId
+                resultStatus   = $resultStatus
+                resultOutcome  = $resultOutcome
+                resultExitCode = $resultExitCode
+                errorCategory  = $errorCategory
+                errorMessage   = $errorMessage
+            }) | Out-Null
+    }
+
+    $summaryError = Get-AdminPolicyPropertyError -InputObject $checkpointObject.summary -AllowedProperties @('targetCount', 'pendingCount', 'inProgressCount', 'completedCount', 'failedCount', 'timedOutCount', 'skippedCount', 'unknownCount') -RequiredProperties @('targetCount', 'pendingCount', 'inProgressCount', 'completedCount', 'failedCount', 'timedOutCount', 'skippedCount', 'unknownCount') -Context 'The orchestration checkpoint summary'
+    if ($summaryError) { throw $summaryError }
+    $computedSummary = Get-AdminLifecycleSummary -Target $targets.ToArray()
+    foreach ($summaryName in @('targetCount', 'pendingCount', 'inProgressCount', 'completedCount', 'failedCount', 'timedOutCount', 'skippedCount', 'unknownCount')) {
+        $summaryValue = ConvertTo-AdminPolicyInteger -Value $checkpointObject.summary.$summaryName -Minimum 0 -Maximum 500 -Context "Checkpoint $summaryName"
+        if ($summaryValue -ne [int]$computedSummary.$summaryName) { throw 'The orchestration checkpoint summary does not match its target states.' }
+    }
+    $hashError = Get-AdminPolicyPropertyError -InputObject $checkpointObject.checkpointHash -AllowedProperties @('algorithm', 'canonicalization', 'value') -RequiredProperties @('algorithm', 'canonicalization', 'value') -Context 'The orchestration checkpoint hash'
+    if ($hashError) { throw $hashError }
+    if ($checkpointObject.checkpointHash.algorithm -isnot [string] -or [string]$checkpointObject.checkpointHash.algorithm -cne 'SHA-256' -or $checkpointObject.checkpointHash.canonicalization -isnot [string] -or [string]$checkpointObject.checkpointHash.canonicalization -cne $Script:CheckpointCanonicalization -or $checkpointObject.checkpointHash.value -isnot [string] -or [string]$checkpointObject.checkpointHash.value -cnotmatch '^[0-9a-f]{64}$') { throw 'The orchestration checkpoint hash metadata is invalid.' }
+    $checkpoint = [pscustomobject][ordered]@{
+        schemaVersion  = $Script:CheckpointSchemaVersion
+        toolkitVersion = $Script:ToolkitVersion
+        checkpointId   = $checkpointGuid.ToString('D')
+        planId         = [string]$Plan.planId
+        planHash       = [string]$Plan.planHash.value
+        createdAtUtc   = $createdAtUtc
+        updatedAtUtc   = $updatedAtUtc
+        revision       = $revision
+        lastRunId      = $lastRunGuid.ToString('D')
+        targets        = @($targets.ToArray())
+        summary        = $computedSummary
+        checkpointHash = [pscustomobject][ordered]@{
+            algorithm        = 'SHA-256'
+            canonicalization = $Script:CheckpointCanonicalization
+            value            = [string]$checkpointObject.checkpointHash.value
+        }
+    }
+    if ((Get-AdminCheckpointHash -Checkpoint $checkpoint) -cne [string]$checkpoint.checkpointHash.value) { throw 'The orchestration checkpoint hash does not match its lifecycle evidence.' }
+    return $checkpoint
+}
+
+function ConvertTo-AdminPlanExecutionParameter {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Plan,
+
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$OperationParameter,
+
+        [Parameter()]
+        [AllowNull()]
+        [string]$SingleTarget
+    )
+
+    $request = $Plan.request
+    $parameters = [ordered]@{ Action = [string]$request.actionId }
+    if ([string]$request.targetMode -ceq 'Local') {
+        $parameters.Local = $true
+    }
+    elseif ([string]::IsNullOrWhiteSpace($SingleTarget)) {
+        $parameters['_PlanComputers'] = [string[]]@($request.targets | ForEach-Object { [string]$_.name })
+    }
+    else {
+        $parameters.ComputerName = [string]$SingleTarget
+    }
+
+    foreach ($planInput in @($request.inputs)) {
+        $parameters[[string]$planInput.name] = $planInput.value
+    }
+    if ($request.policy.applied) { $parameters.PolicyPath = [string]$request.policy.path }
+    if ($request.safety.preflight) { $parameters.Preflight = $true }
+    if ($request.safety.whatIf) { $parameters.WhatIf = $true }
+    if (-not $request.readOnly) { $parameters.ConfirmationText = [string]$OperationParameter['ConfirmationText'] }
+    if ([string]::IsNullOrWhiteSpace($SingleTarget) -and $request.safety.targetListConfirmationRequired) { $parameters.TargetListConfirmationText = [string]$OperationParameter['TargetListConfirmationText'] }
+    if ([string]$request.targetMode -ceq 'Remote') {
+        $parameters.Transport = [string]$request.transport.name
+        $parameters.MaxConcurrentJobs = [int]$request.safety.maxConcurrentJobs
+        $parameters.RetryCount = [int]$request.safety.retryCount
+        $parameters.RetryDelaySeconds = [int]$request.safety.retryDelaySeconds
+        $parameters.OperationTimeoutMinutes = [int]$request.safety.operationTimeoutMinutes
+        $parameters.ConnectivityTimeoutSeconds = [int]$request.safety.connectivityTimeoutSeconds
+        if ($request.safety.skipConnectivityCheck) { $parameters.SkipConnectivityCheck = $true }
+        if ([string]$request.transport.name -ceq 'WinRM') {
+            $parameters.Authentication = [string]$request.transport.authentication
+            if ($request.transport.useSsl) { $parameters.UseSsl = $true }
+        }
+        else {
+            $parameters.PsExecPath = [string]$request.transport.psExecPath
+            $parameters.PsExecConfirmationText = [string]$OperationParameter['PsExecConfirmationText']
+        }
+    }
+    if (Test-AdminParameterBound -Parameters $OperationParameter -Name 'LogFile') { $parameters.LogFile = [string]$OperationParameter['LogFile'] }
+    return $parameters
+}
+
+function Use-AdminPlanRuntimeState {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Plan
+    )
+
+    $Script:State.Credential = $null
+    $Script:State.Transport = if ([string]$Plan.request.targetMode -ceq 'Remote') { [string]$Plan.request.transport.name } else { 'WinRM' }
+    $Script:State.Authentication = if ([string]$Plan.request.transport.name -ceq 'WinRM') { [string]$Plan.request.transport.authentication } else { 'Default' }
+    $Script:State.UseSsl = [bool]$Plan.request.transport.useSsl
+    $Script:State.PsExecPath = if ([string]$Plan.request.transport.name -ceq 'PsExec') { [string]$Plan.request.transport.psExecPath } else { 'PsExec.exe' }
+    $Script:State.PsExecFullPath = $null
+    $Script:State.MaxConcurrentJobs = [int]$Plan.request.safety.maxConcurrentJobs
+    $Script:State.RetryCount = [int]$Plan.request.safety.retryCount
+    $Script:State.RetryDelaySeconds = [int]$Plan.request.safety.retryDelaySeconds
+    $Script:State.OperationTimeoutMinutes = [int]$Plan.request.safety.operationTimeoutMinutes
+    $Script:State.ConnectivityTimeoutSeconds = [int]$Plan.request.safety.connectivityTimeoutSeconds
+    $Script:State.SkipConnectivityCheck = [bool]$Plan.request.safety.skipConnectivityCheck
+}
+
+function Test-AdminPlanExecutionContract {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Plan,
+
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$OperationParameter
+    )
+
+    [void](Test-AdminPlanExternalReference -Plan $Plan)
+    if ([string]$Plan.request.targetMode -ceq 'Local') {
+        $localTarget = [string]@($Plan.request.targets)[0].name
+        if (-not $localTarget.Equals([string]$env:COMPUTERNAME, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'The approved local plan targets a different Windows computer.'
+        }
+    }
+    Use-AdminPlanRuntimeState -Plan $Plan
+    $validationParameters = ConvertTo-AdminPlanExecutionParameter -Plan $Plan -OperationParameter $OperationParameter
+    $resolution = Resolve-AdminAutomationRequest -Parameters $validationParameters
+    if (-not $resolution.Success) {
+        throw "The approved execution contract no longer validates: $($resolution.Message)"
+    }
+    $resolvedPlan = ConvertTo-AdminOrchestrationPlan -Request $resolution.Request -Parameters $validationParameters
+    $approvedRequestJson = ConvertTo-AdminCanonicalJson -Value $Plan.request
+    $resolvedRequestJson = ConvertTo-AdminCanonicalJson -Value $resolvedPlan.request
+    if ($approvedRequestJson -cne $resolvedRequestJson) {
+        throw 'Runtime resolution changed the approved action, inputs, targets, transport, policy, or safety options.'
+    }
+    return $true
+}
+
+function Get-AdminOrchestrationExecutionOutcome {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Summary,
+
+        [Parameter()]
+        [AllowEmptyCollection()]
+        [object[]]$Target = @(),
+
+        [Parameter()]
+        [bool]$InternalFailure = $false
+    )
+
+    if ($InternalFailure -or $Summary.inProgressCount -gt 0) {
+        return [pscustomobject]@{ Status = 'InternalFailure'; Outcome = 'InternalFailure'; ExitCode = $Script:AutomationExitCodes.InternalFailure }
+    }
+    if ($Summary.completedCount -eq $Summary.targetCount -and $Summary.targetCount -gt 0) {
+        if (@($Target | Where-Object { [string]$_.resultOutcome -ceq 'PartialSuccess' }).Count -gt 0) {
+            return [pscustomobject]@{ Status = 'CompletedWithExceptions'; Outcome = 'PartialSuccess'; ExitCode = $Script:AutomationExitCodes.PartialSuccess }
+        }
+        return [pscustomobject]@{ Status = 'Completed'; Outcome = 'CompleteSuccess'; ExitCode = $Script:AutomationExitCodes.CompleteSuccess }
+    }
+    if ($Summary.timedOutCount -eq $Summary.targetCount -and $Summary.targetCount -gt 0) {
+        return [pscustomobject]@{ Status = 'TimedOut'; Outcome = 'Timeout'; ExitCode = $Script:AutomationExitCodes.Timeout }
+    }
+    if ($Summary.failedCount -eq $Summary.targetCount -and $Summary.targetCount -gt 0) {
+        return [pscustomobject]@{ Status = 'Failed'; Outcome = 'ExecutionFailure'; ExitCode = $Script:AutomationExitCodes.ExecutionFailure }
+    }
+    if ($Summary.skippedCount -eq $Summary.targetCount -and $Summary.targetCount -gt 0) {
+        $skippedOutcomes = @($Target | ForEach-Object { [string]$_.resultOutcome } | Sort-Object -Unique)
+        if ($skippedOutcomes.Count -eq 1 -and $skippedOutcomes[0] -ceq 'ValidationFailure') {
+            return [pscustomobject]@{ Status = 'ValidationFailed'; Outcome = 'ValidationFailure'; ExitCode = $Script:AutomationExitCodes.ValidationFailure }
+        }
+        if ($skippedOutcomes.Count -eq 1 -and $skippedOutcomes[0] -ceq 'AuthorizationFailure') {
+            return [pscustomobject]@{ Status = 'AuthorizationFailed'; Outcome = 'AuthorizationFailure'; ExitCode = $Script:AutomationExitCodes.AuthorizationFailure }
+        }
+        return [pscustomobject]@{ Status = 'CompletedWithExceptions'; Outcome = 'PartialSuccess'; ExitCode = $Script:AutomationExitCodes.PartialSuccess }
+    }
+    return [pscustomobject]@{ Status = 'CompletedWithExceptions'; Outcome = 'PartialSuccess'; ExitCode = $Script:AutomationExitCodes.PartialSuccess }
+}
+
+function ConvertTo-AdminCheckpointTargetTerminalState {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Target,
+
+        [Parameter(Mandatory = $true)]
+        [psobject]$Envelope
+    )
+
+    $targetResult = if (@($Envelope.targets).Count -gt 0) { @($Envelope.targets)[0] } else { $null }
+    $state = switch ([string]$Envelope.outcome) {
+        'CompleteSuccess' { 'Completed' }
+        'PartialSuccess' { 'Completed' }
+        'ExecutionFailure' { 'Failed' }
+        'Timeout' { 'TimedOut' }
+        'ValidationFailure' { 'Skipped' }
+        'AuthorizationFailure' { 'Skipped' }
+        default { 'Unknown' }
+    }
+    $errorItem = if (@($Envelope.errors).Count -gt 0) { @($Envelope.errors)[0] } else { $null }
+    $Target.previousState = 'InProgress'
+    $Target.state = $state
+    $Target.finishedAtUtc = ConvertTo-AdminUtcTimestamp -Value ([datetime]::UtcNow)
+    $Target.resultStatus = if ($targetResult) { [string]$targetResult.status } else { [string]$Envelope.status }
+    $Target.resultOutcome = [string]$Envelope.outcome
+    $Target.resultExitCode = [int]$Envelope.exitCode
+    $Target.errorCategory = if ($targetResult -and $targetResult.errorCategory) { [string]$targetResult.errorCategory } elseif ($errorItem) { [string]$errorItem.category } else { $null }
+    $Target.errorMessage = if ($targetResult -and $targetResult.errorMessage) { ConvertTo-AdminSafeErrorMessage -Message ([string]$targetResult.errorMessage) } elseif ($errorItem) { ConvertTo-AdminSafeErrorMessage -Message ([string]$errorItem.message) } else { $null }
+    return $Target
+}
+
+function Invoke-AdminPlanExecution {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Execute', 'Resume')]
+        [string]$Operation,
+
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$Parameters,
+
+        [Parameter(Mandatory = $true)]
+        [guid]$RunId,
+
+        [Parameter(Mandatory = $true)]
+        [datetime]$StartedAtUtc,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedOutputPath
+    )
+
+    foreach ($requiredName in @('PlanPath', 'CheckpointPath', 'PlanApprovalText')) {
+        if (-not (Test-AdminParameterBound -Parameters $Parameters -Name $requiredName) -or [string]::IsNullOrWhiteSpace([string]$Parameters[$requiredName])) {
+            throw "PlanOperation $Operation requires -$requiredName."
+        }
+    }
+    $allowedNames = @('Automation', 'PlanOperation', 'PlanPath', 'CheckpointPath', 'PlanApprovalText', 'ConfirmationText', 'TargetListConfirmationText', 'PsExecConfirmationText', 'JsonOutputPath', 'LogFile', 'Quiet')
+    foreach ($parameterName in @($Parameters.Keys)) {
+        if ([string]$parameterName -cnotin $allowedNames) {
+            throw "Parameter -$parameterName cannot override an approved plan during $Operation."
+        }
+    }
+    $resolvedPlanPath = Resolve-AdminOrchestrationArtifactPath -LiteralPath ([string]$Parameters['PlanPath']) -ArtifactType Plan -Existing
+    $resolvedCheckpointPath = if ($Operation -eq 'Execute') {
+        Resolve-AdminOrchestrationArtifactPath -LiteralPath ([string]$Parameters['CheckpointPath']) -ArtifactType Checkpoint
+    }
+    else {
+        Resolve-AdminOrchestrationArtifactPath -LiteralPath ([string]$Parameters['CheckpointPath']) -ArtifactType Checkpoint -Existing
+    }
+    $collisionPaths = @($resolvedPlanPath, $ResolvedOutputPath)
+    if (Test-AdminParameterBound -Parameters $Parameters -Name 'LogFile') { $collisionPaths += [string]$Parameters['LogFile'] }
+    if (Test-AdminOrchestrationPathCollision -LiteralPath $resolvedCheckpointPath -OtherPath $collisionPaths) {
+        throw 'The checkpoint path must be different from the plan and every other configured output path.'
+    }
+    $plan = Import-AdminOrchestrationPlan -LiteralPath $resolvedPlanPath
+    if ([string]$plan.approval.status -cne 'Approved') {
+        return ConvertTo-AdminOrchestrationResult -Operation $Operation -RunId $RunId -StartedAtUtc $StartedAtUtc -FinishedAtUtc ([datetime]::UtcNow) -PlanId $plan.planId -PlanHash $plan.planHash.value -Status AuthorizationFailed -Outcome AuthorizationFailure -ExitCode $Script:AutomationExitCodes.AuthorizationFailure -ErrorRecord @([pscustomobject]@{ category = 'Authorization'; message = 'Only a reviewed plan with Approved status can execute.' })
+    }
+    $expectedOperationText = $Operation.ToUpperInvariant() + ' PLAN ' + [string]$plan.planHash.value
+    if ([string]$Parameters['PlanApprovalText'] -cne $expectedOperationText) {
+        return ConvertTo-AdminOrchestrationResult -Operation $Operation -RunId $RunId -StartedAtUtc $StartedAtUtc -FinishedAtUtc ([datetime]::UtcNow) -PlanId $plan.planId -PlanHash $plan.planHash.value -Status AuthorizationFailed -Outcome AuthorizationFailure -ExitCode $Script:AutomationExitCodes.AuthorizationFailure -ErrorRecord @([pscustomobject]@{ category = 'Authorization'; message = "PlanApprovalText must exactly match $expectedOperationText." })
+    }
+    if ($plan.request.readOnly) {
+        if (Test-AdminParameterBound -Parameters $Parameters -Name 'ConfirmationText') { throw 'ConfirmationText cannot be supplied for an approved read-only plan.' }
+    }
+    elseif (-not (Test-AdminParameterBound -Parameters $Parameters -Name 'ConfirmationText') -or [string]$Parameters['ConfirmationText'] -cne [string]$plan.request.safety.requiredConfirmationText) {
+        return ConvertTo-AdminOrchestrationResult -Operation $Operation -RunId $RunId -StartedAtUtc $StartedAtUtc -FinishedAtUtc ([datetime]::UtcNow) -PlanId $plan.planId -PlanHash $plan.planHash.value -Status AuthorizationFailed -Outcome AuthorizationFailure -ExitCode $Script:AutomationExitCodes.AuthorizationFailure -ErrorRecord @([pscustomobject]@{ category = 'Authorization'; message = 'The action-specific ConfirmationText does not match the approved plan.' })
+    }
+    if ($plan.request.safety.targetListConfirmationRequired -and (-not (Test-AdminParameterBound -Parameters $Parameters -Name 'TargetListConfirmationText') -or [string]$Parameters['TargetListConfirmationText'] -cne 'USE TARGET LIST')) {
+        return ConvertTo-AdminOrchestrationResult -Operation $Operation -RunId $RunId -StartedAtUtc $StartedAtUtc -FinishedAtUtc ([datetime]::UtcNow) -PlanId $plan.planId -PlanHash $plan.planHash.value -Status AuthorizationFailed -Outcome AuthorizationFailure -ExitCode $Script:AutomationExitCodes.AuthorizationFailure -ErrorRecord @([pscustomobject]@{ category = 'Authorization'; message = 'The large-target authorization does not match the approved plan.' })
+    }
+    if (-not $plan.request.safety.targetListConfirmationRequired -and (Test-AdminParameterBound -Parameters $Parameters -Name 'TargetListConfirmationText')) { throw 'TargetListConfirmationText is not valid for this approved plan.' }
+    if ($plan.request.safety.psExecConfirmationRequired -and (-not (Test-AdminParameterBound -Parameters $Parameters -Name 'PsExecConfirmationText') -or [string]$Parameters['PsExecConfirmationText'] -cne 'USE PSEXEC')) {
+        return ConvertTo-AdminOrchestrationResult -Operation $Operation -RunId $RunId -StartedAtUtc $StartedAtUtc -FinishedAtUtc ([datetime]::UtcNow) -PlanId $plan.planId -PlanHash $plan.planHash.value -Status AuthorizationFailed -Outcome AuthorizationFailure -ExitCode $Script:AutomationExitCodes.AuthorizationFailure -ErrorRecord @([pscustomobject]@{ category = 'Authorization'; message = 'The PsExec authorization does not match the approved plan.' })
+    }
+    if (-not $plan.request.safety.psExecConfirmationRequired -and (Test-AdminParameterBound -Parameters $Parameters -Name 'PsExecConfirmationText')) { throw 'PsExecConfirmationText is not valid for this approved plan.' }
+
+    $planExternalReferenceStreams = @(Open-AdminPlanExternalReferenceLock -Plan $plan)
+    try {
+    [void](Test-AdminPlanExecutionContract -Plan $plan -OperationParameter $Parameters)
+    $checkpoint = if ($Operation -eq 'Execute') {
+        $newCheckpoint = ConvertTo-AdminInitialCheckpoint -Plan $plan -RunId $RunId
+        Write-AdminCheckpoint -LiteralPath $resolvedCheckpointPath -Checkpoint $newCheckpoint -Create
+    }
+    else {
+        Import-AdminOrchestrationCheckpoint -LiteralPath $resolvedCheckpointPath -Plan $plan
+    }
+    $checkpoint.lastRunId = $RunId.ToString('D')
+    $interruptedTargets = @($checkpoint.targets | Where-Object { [string]$_.state -ceq 'InProgress' })
+    if ($Operation -eq 'Resume') {
+        if ($interruptedTargets.Count -gt 0) {
+            foreach ($target in $interruptedTargets) {
+                $target.previousState = 'InProgress'
+                $target.state = 'Unknown'
+                $target.finishedAtUtc = ConvertTo-AdminUtcTimestamp -Value ([datetime]::UtcNow)
+                $target.resultStatus = 'InternalFailure'
+                $target.resultOutcome = 'InternalFailure'
+                $target.resultExitCode = [int]$Script:AutomationExitCodes.InternalFailure
+                $target.errorCategory = 'Interruption'
+                $target.errorMessage = 'The previous run ended while this target was in progress. It was not repeated automatically.'
+            }
+        }
+        [void](Write-AdminCheckpoint -LiteralPath $resolvedCheckpointPath -Checkpoint $checkpoint)
+    }
+
+    $internalFailure = $false
+    foreach ($target in @($checkpoint.targets | Where-Object { [string]$_.state -ceq 'Pending' } | Sort-Object -Property index)) {
+        $attemptStarted = $false
+        try {
+            $target.previousState = 'Pending'
+            $target.state = 'InProgress'
+            $target.startedAtUtc = ConvertTo-AdminUtcTimestamp -Value ([datetime]::UtcNow)
+            $target.finishedAtUtc = $null
+            $target.attempts = 1
+            $target.executionRunId = $RunId.ToString('D')
+            $attemptStarted = $true
+            [void](Write-AdminCheckpoint -LiteralPath $resolvedCheckpointPath -Checkpoint $checkpoint)
+            Use-AdminPlanRuntimeState -Plan $plan
+            $targetParameters = ConvertTo-AdminPlanExecutionParameter -Plan $plan -OperationParameter $Parameters -SingleTarget ([string]$target.target)
+            $invokeParameters = @{
+                Parameters         = $targetParameters
+                ResolvedOutputPath = '-'
+                Confirm            = $false
+            }
+            if ($plan.request.safety.whatIf) { $invokeParameters.WhatIf = $true }
+            $targetEnvelope = Invoke-AdminAutomation @invokeParameters
+            [void](ConvertTo-AdminCheckpointTargetTerminalState -Target $target -Envelope $targetEnvelope)
+            [void](Write-AdminCheckpoint -LiteralPath $resolvedCheckpointPath -Checkpoint $checkpoint)
+            if ([string]$target.state -ceq 'Unknown') {
+                $internalFailure = $true
+                break
+            }
+        }
+        catch {
+            if (-not $attemptStarted) { throw }
+            $target.previousState = 'InProgress'
+            $target.state = 'Unknown'
+            $target.finishedAtUtc = ConvertTo-AdminUtcTimestamp -Value ([datetime]::UtcNow)
+            $target.resultStatus = 'InternalFailure'
+            $target.resultOutcome = 'InternalFailure'
+            $target.resultExitCode = [int]$Script:AutomationExitCodes.InternalFailure
+            $target.errorCategory = 'Internal'
+            $target.errorMessage = ConvertTo-AdminSafeErrorMessage -Message $_.Exception.Message
+            try {
+                [void](Write-AdminCheckpoint -LiteralPath $resolvedCheckpointPath -Checkpoint $checkpoint)
+            }
+            catch {
+                $target.errorMessage = ConvertTo-AdminSafeErrorMessage -Message ("{0} The checkpoint could not record the terminal Unknown state: {1}" -f $target.errorMessage, $_.Exception.Message)
+            }
+            $internalFailure = $true
+            break
+        }
+    }
+    $summary = Get-AdminLifecycleSummary -Target @($checkpoint.targets)
+    $executionOutcome = Get-AdminOrchestrationExecutionOutcome -Summary $summary -Target @($checkpoint.targets) -InternalFailure $internalFailure
+    $warning = New-Object 'System.Collections.Generic.List[string]'
+    if ($summary.unknownCount -gt 0) { $warning.Add('Unknown targets were not repeated. Verify their actual state before creating a new plan.') | Out-Null }
+    if ($summary.pendingCount -gt 0) { $warning.Add('Pending targets remain checkpointed and may be processed only by an explicit Resume operation.') | Out-Null }
+    if ($summary.failedCount -gt 0 -or $summary.timedOutCount -gt 0 -or $summary.skippedCount -gt 0) { $warning.Add('Terminal non-success targets are preserved and are never automatically retried by Resume.') | Out-Null }
+    return ConvertTo-AdminOrchestrationResult -Operation $Operation -RunId $RunId -StartedAtUtc $StartedAtUtc -FinishedAtUtc ([datetime]::UtcNow) -PlanId $plan.planId -PlanHash $plan.planHash.value -CheckpointPath $resolvedCheckpointPath -CheckpointHash $checkpoint.checkpointHash.value -Status $executionOutcome.Status -Outcome $executionOutcome.Outcome -ExitCode $executionOutcome.ExitCode -Target @($checkpoint.targets) -Warning $warning.ToArray() -ReportPath @($resolvedCheckpointPath)
+    }
+    finally {
+        foreach ($planExternalReferenceStream in $planExternalReferenceStreams) { $planExternalReferenceStream.Dispose() }
+    }
+}
+
+function ConvertTo-AdminOrchestrationOutputFailureResult {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$OriginalResult,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Message
+    )
+
+    $finishedAtUtc = [datetime]::UtcNow
+    $startedAtUtc = [datetime]::Parse([string]$OriginalResult.startedAtUtc, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+    $OriginalResult.finishedAtUtc = ConvertTo-AdminUtcTimestamp -Value $finishedAtUtc
+    $OriginalResult.durationMs = [int64][math]::Max(0, [math]::Round(($finishedAtUtc - $startedAtUtc).TotalMilliseconds))
+    $OriginalResult.status = 'InternalFailure'
+    $OriginalResult.outcome = 'InternalFailure'
+    $OriginalResult.exitCode = [int]$Script:AutomationExitCodes.InternalFailure
+    $OriginalResult.warnings = @($OriginalResult.warnings) + @('The orchestration operation finished before its requested JSON result could be delivered. Review every reported artifact and checkpoint before retrying.')
+    $OriginalResult.errors = @($OriginalResult.errors) + @([pscustomobject][ordered]@{ category = 'Output'; message = ConvertTo-AdminSafeErrorMessage -Message $Message })
+    return $OriginalResult
+}
+
+function Invoke-AdminPlanOperation {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$Parameters,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$ResolvedOutputPath
+    )
+
+    $startedAtUtc = [datetime]::UtcNow
+    $runId = [guid]::NewGuid()
+    $requestedOperation = if (Test-AdminParameterBound -Parameters $Parameters -Name 'PlanOperation') { ([string]$Parameters['PlanOperation']).Trim() } else { '' }
+    $operationMap = @{ create = 'Create'; approve = 'Approve'; execute = 'Execute'; resume = 'Resume' }
+    $operationKey = $requestedOperation.ToLowerInvariant()
+    if (-not $operationMap.ContainsKey($operationKey)) {
+        return ConvertTo-AdminOrchestrationResult -Operation Unknown -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc ([datetime]::UtcNow) -Status ValidationFailed -Outcome ValidationFailure -ExitCode $Script:AutomationExitCodes.ValidationFailure -ErrorRecord @([pscustomobject]@{ category = 'Validation'; message = 'PlanOperation must be Create, Approve, Execute, or Resume.' })
+    }
+    $operation = [string]$operationMap[$operationKey]
+    try {
+        switch ($operation) {
+            'Create' { return Invoke-AdminPlanCreate -Parameters $Parameters -RunId $runId -StartedAtUtc $startedAtUtc -ResolvedOutputPath $ResolvedOutputPath }
+            'Approve' { return Invoke-AdminPlanApprove -Parameters $Parameters -RunId $runId -StartedAtUtc $startedAtUtc -ResolvedOutputPath $ResolvedOutputPath }
+            'Execute' { return Invoke-AdminPlanExecution -Operation Execute -Parameters $Parameters -RunId $runId -StartedAtUtc $startedAtUtc -ResolvedOutputPath $ResolvedOutputPath }
+            'Resume' { return Invoke-AdminPlanExecution -Operation Resume -Parameters $Parameters -RunId $runId -StartedAtUtc $startedAtUtc -ResolvedOutputPath $ResolvedOutputPath }
+        }
+    }
+    catch {
+        return ConvertTo-AdminOrchestrationResult -Operation $operation -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc ([datetime]::UtcNow) -Status ValidationFailed -Outcome ValidationFailure -ExitCode $Script:AutomationExitCodes.ValidationFailure -ErrorRecord @([pscustomobject]@{ category = 'Validation'; message = $_.Exception.Message })
+    }
+}
+
 function Show-AdminResult {
     [CmdletBinding()]
     param(
@@ -7172,11 +8881,22 @@ if (-not $Script:WasDotSourced) {
         $InformationPreference = 'SilentlyContinue'
         $WarningPreference = 'SilentlyContinue'
 
+        $planParameterNames = @('PlanOperation', 'PlanPath', 'ApprovedPlanPath', 'CheckpointPath', 'ApprovedBy', 'ApprovalReference', 'PlanApprovalText')
+        $isPlanRequest = @($planParameterNames | Where-Object { Test-AdminParameterBound -Parameters $Script:InvocationParameters -Name $_ }).Count -gt 0
+
         try {
             $resolvedOutputPath = Resolve-AdminAutomationOutputPath -LiteralPath $JsonOutputPath
         }
         catch {
             $failureStartedAtUtc = [datetime]::UtcNow
+            if ($isPlanRequest) {
+                $failureOperationMap = @{ create = 'Create'; approve = 'Approve'; execute = 'Execute'; resume = 'Resume' }
+                $failureOperationKey = ([string]$PlanOperation).Trim().ToLowerInvariant()
+                $failureOperation = if ($failureOperationMap.ContainsKey($failureOperationKey)) { [string]$failureOperationMap[$failureOperationKey] } else { 'Unknown' }
+                $failureResult = ConvertTo-AdminOrchestrationResult -Operation $failureOperation -RunId ([guid]::NewGuid()) -StartedAtUtc $failureStartedAtUtc -FinishedAtUtc ([datetime]::UtcNow) -Status ValidationFailed -Outcome ValidationFailure -ExitCode $Script:AutomationExitCodes.ValidationFailure -ErrorRecord @([pscustomobject]@{ category = 'Validation'; message = $_.Exception.Message })
+                [Console]::Error.WriteLine((ConvertTo-Json -InputObject $failureResult -Compress -Depth 20))
+                exit $Script:AutomationExitCodes.ValidationFailure
+            }
             $failureRequestedActionId = Get-AdminSafeActionId -ActionId $Action
             $failureCatalogItem = if ($failureRequestedActionId) { Get-AdminActionCatalogItem -ActionId $failureRequestedActionId } else { $null }
             $failureActionId = if ($failureCatalogItem) { $failureCatalogItem.Id } else { $null }
@@ -7192,15 +8912,20 @@ if (-not $Script:WasDotSourced) {
 
         $automationEnvelope = $null
         try {
-            $automationInvokeParameters = @{
-                Parameters         = $Script:InvocationParameters
-                ResolvedOutputPath = $resolvedOutputPath
-                Confirm            = $false
+            if ($isPlanRequest) {
+                $automationEnvelope = Invoke-AdminPlanOperation -Parameters $Script:InvocationParameters -ResolvedOutputPath $resolvedOutputPath
             }
-            if ($WhatIfPreference) {
-                $automationInvokeParameters.WhatIf = $true
+            else {
+                $automationInvokeParameters = @{
+                    Parameters         = $Script:InvocationParameters
+                    ResolvedOutputPath = $resolvedOutputPath
+                    Confirm            = $false
+                }
+                if ($WhatIfPreference) {
+                    $automationInvokeParameters.WhatIf = $true
+                }
+                $automationEnvelope = Invoke-AdminAutomation @automationInvokeParameters
             }
-            $automationEnvelope = Invoke-AdminAutomation @automationInvokeParameters
             $automationJson = ConvertTo-AdminAutomationJson -Envelope $automationEnvelope
             if ($resolvedOutputPath -ceq '-') {
                 [Console]::Out.WriteLine($automationJson)
@@ -7215,21 +8940,31 @@ if (-not $Script:WasDotSourced) {
             try {
                 $failureEnvelope = if ($null -ne $automationEnvelope) {
                     $outputFailureMessage = "The requested JSON output sink failed: {0}" -f $_.Exception.Message
-                    $outputFailureEnvelope = ConvertTo-AdminOutputSinkFailureEnvelope -OriginalEnvelope $automationEnvelope -Message $outputFailureMessage
-                    if ($Script:State.AuditContext -and $Script:State.AuditContext.Enabled) {
-                        try {
-                            $outputFailureEnvelope = Write-AdminAuditFailureRevision -Envelope $outputFailureEnvelope -Context $Script:State.AuditContext -Message $outputFailureMessage
-                        }
-                        catch {
-                            $outputFailureEnvelope = ConvertTo-AdminAuditSinkFailureEnvelope -OriginalEnvelope $outputFailureEnvelope -Context $Script:State.AuditContext -Message ("The audit sink also failed while recording the JSON output failure: {0}" -f $_.Exception.Message)
-                        }
+                    if ($isPlanRequest) {
+                        ConvertTo-AdminOrchestrationOutputFailureResult -OriginalResult $automationEnvelope -Message $outputFailureMessage
                     }
-                    $outputFailureEnvelope
+                    else {
+                        $outputFailureEnvelope = ConvertTo-AdminOutputSinkFailureEnvelope -OriginalEnvelope $automationEnvelope -Message $outputFailureMessage
+                        if ($Script:State.AuditContext -and $Script:State.AuditContext.Enabled) {
+                            try {
+                                $outputFailureEnvelope = Write-AdminAuditFailureRevision -Envelope $outputFailureEnvelope -Context $Script:State.AuditContext -Message $outputFailureMessage
+                            }
+                            catch {
+                                $outputFailureEnvelope = ConvertTo-AdminAuditSinkFailureEnvelope -OriginalEnvelope $outputFailureEnvelope -Context $Script:State.AuditContext -Message ("The audit sink also failed while recording the JSON output failure: {0}" -f $_.Exception.Message)
+                            }
+                        }
+                        $outputFailureEnvelope
+                    }
                 }
                 else {
-                    $failurePolicyDecision = if (Test-AdminParameterBound -Parameters $Script:InvocationParameters -Name 'PolicyPath') { ConvertTo-AdminPolicyDecision -Applied $true -Decision NotEvaluated -ReasonCode NotEvaluated -Reason 'The run failed before the policy profile could be evaluated.' } else { ConvertTo-AdminPolicyDecision -Decision NotApplied -ReasonCode NoPolicy -Reason 'No policy profile was supplied.' }
-                    $failurePreflight = (Test-AdminParameterBound -Parameters $Script:InvocationParameters -Name 'Preflight') -and [bool]$Script:InvocationParameters['Preflight']
-                    ConvertTo-AdminAutomationEnvelope -RunId ([guid]::NewGuid()) -StartedAtUtc $failureStartedAtUtc -FinishedAtUtc ([datetime]::UtcNow) -ActionId (Get-AdminSafeActionId -ActionId $Action) -Preflight $failurePreflight -PolicyDecision $failurePolicyDecision -Status InternalFailure -Outcome InternalFailure -ExitCode $Script:AutomationExitCodes.InternalFailure -Errors @([pscustomobject]@{ Category = 'Internal'; Message = $_.Exception.Message })
+                    if ($isPlanRequest) {
+                        ConvertTo-AdminOrchestrationResult -Operation Unknown -RunId ([guid]::NewGuid()) -StartedAtUtc $failureStartedAtUtc -FinishedAtUtc ([datetime]::UtcNow) -Status InternalFailure -Outcome InternalFailure -ExitCode $Script:AutomationExitCodes.InternalFailure -ErrorRecord @([pscustomobject]@{ category = 'Internal'; message = $_.Exception.Message })
+                    }
+                    else {
+                        $failurePolicyDecision = if (Test-AdminParameterBound -Parameters $Script:InvocationParameters -Name 'PolicyPath') { ConvertTo-AdminPolicyDecision -Applied $true -Decision NotEvaluated -ReasonCode NotEvaluated -Reason 'The run failed before the policy profile could be evaluated.' } else { ConvertTo-AdminPolicyDecision -Decision NotApplied -ReasonCode NoPolicy -Reason 'No policy profile was supplied.' }
+                        $failurePreflight = (Test-AdminParameterBound -Parameters $Script:InvocationParameters -Name 'Preflight') -and [bool]$Script:InvocationParameters['Preflight']
+                        ConvertTo-AdminAutomationEnvelope -RunId ([guid]::NewGuid()) -StartedAtUtc $failureStartedAtUtc -FinishedAtUtc ([datetime]::UtcNow) -ActionId (Get-AdminSafeActionId -ActionId $Action) -Preflight $failurePreflight -PolicyDecision $failurePolicyDecision -Status InternalFailure -Outcome InternalFailure -ExitCode $Script:AutomationExitCodes.InternalFailure -Errors @([pscustomobject]@{ Category = 'Internal'; Message = $_.Exception.Message })
+                    }
                 }
                 [Console]::Error.WriteLine((ConvertTo-AdminAutomationJson -Envelope $failureEnvelope))
             }
@@ -7247,6 +8982,13 @@ if (-not $Script:WasDotSourced) {
         'AuditPath',
         'AuditEventLog',
         'AuditEventSource',
+        'PlanOperation',
+        'PlanPath',
+        'ApprovedPlanPath',
+        'CheckpointPath',
+        'ApprovedBy',
+        'ApprovalReference',
+        'PlanApprovalText',
         'Local',
         'ComputerName',
         'ComputerListPath',
