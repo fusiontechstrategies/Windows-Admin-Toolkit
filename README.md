@@ -19,6 +19,7 @@ Windows Admin Toolkit turns common Windows administration work into a focused in
 - Stable named actions, JSON envelopes, and exit codes for RMM, scheduled-task, and CI use
 - Optional least-privilege policy profiles with explicit machine-readable decisions
 - Capability preflight that checks action readiness without executing the requested action
+- Opt-in JSON Lines and Windows Event Log auditing with stable target IDs and tamper-evident summaries
 - CSV, JSON, and self-contained HTML reporting
 - No automatic firewall, WinRM, TrustedHosts, or execution-policy changes
 
@@ -46,6 +47,7 @@ Windows Admin Toolkit treats remote administration as a privileged security boun
 - CSV exports neutralize spreadsheet formulas. HTML exports encode values. File exports are atomic and never overwrite an existing report.
 - Logs record action summaries, not credentials, custom code, or custom-command output.
 - Optional policies can only narrow actions, transports, target modes, targets, runtime limits, and supported action inputs.
+- Audit records exclude credentials, custom source text, and raw action output; configured sink failures are explicit.
 
 Read [SECURITY.md](SECURITY.md) and [RESPONSIBLE_USE.md](RESPONSIBLE_USE.md) before operating the toolkit in a production environment.
 
@@ -98,6 +100,9 @@ The toolkit does not require or recommend an execution-policy bypass.
 
 # Validate policy and capability readiness without running the requested action
 .\WindowsAdminToolkit.ps1 -Automation -Action SystemInfo -Local -PolicyPath .\examples\policies\read-only-local.json -Preflight -JsonOutputPath -
+
+# Create a new per-run JSON Lines audit alongside the JSON result
+.\WindowsAdminToolkit.ps1 -Automation -Action SystemInfo -Local -AuditPath C:\Audit\wat-system-info.jsonl -JsonOutputPath C:\Results\wat-system-info.json
 ```
 
 | Parameter | Default | Purpose |
@@ -117,12 +122,15 @@ The toolkit does not require or recommend an execution-policy bypass.
 | `SkipConnectivityCheck` | Off | Skips only the preflight port check |
 | `PolicyPath` | None | Applies a strict versioned least-privilege profile in automation or interactive mode |
 | `Preflight` | Off | In automation mode, checks requested-action capability without executing it |
+| `AuditPath` | None | In automation mode, creates one new bounded JSON Lines audit file for the run |
+| `AuditEventLog` | Off | Forwards bounded audit records through an already-registered Windows Event Log source |
+| `AuditEventSource` | `WindowsAdminToolkit` | Selects the pre-registered source; valid only with `AuditEventLog` |
 
 Automation mode accepts `WinRmIdentity` (or its backward-compatible `Credential` alias) only as an in-memory `PSCredential` object from a calling PowerShell session. It rejects username strings instead of allowing native parameter binding to open credential UI. Scheduled tasks and RMM jobs should run under their authorized Windows identity or invoke the toolkit from a wrapper that already holds an approved `PSCredential`; never place passwords in command text.
 
-## Automation, policy, and preflight
+## Automation, policy, preflight, and audit
 
-Version 2.2.0 builds on the fail-closed 2.1.0 automation interface with optional least-privilege policy profiles and capability preflight. Automation runs one stable named action without menus or prompts and uses the same action implementations as the interactive menu.
+Version 2.3.0 builds on the fail-closed automation and least-privilege policy interfaces with enterprise auditability. Automation runs one stable named action without menus or prompts and uses the same action implementations as the interactive menu.
 
 ```powershell
 # Enumerate all stable action IDs and input requirements
@@ -161,11 +169,21 @@ Version 2.2.0 builds on the fail-closed 2.1.0 automation interface with optional
   -PolicyPath .\examples\policies\helpdesk-winrm.json `
   -Preflight `
   -JsonOutputPath -
+
+# Create a per-run JSON Lines audit for SIEM, RMM, or ticket ingestion
+.\WindowsAdminToolkit.ps1 `
+  -Automation `
+  -Action SystemInfo `
+  -Local `
+  -AuditPath C:\Audit\wat-system-info-20260822.jsonl `
+  -JsonOutputPath C:\Results\wat-system-info-20260822.json
 ```
 
-Automation requires exactly one target source and rejects missing, conflicting, or action-incompatible inputs before target work. Actual state changes require the action's exact `-ConfirmationText`; `-WhatIf` returns a successful preview. Result schema version 1.1 and exit codes 0, 1, 2, 3, 4, 5, and 10 are documented in [AUTOMATION.md](AUTOMATION.md).
+Automation requires exactly one target source and rejects missing, conflicting, or action-incompatible inputs before target work. Actual state changes require the action's exact `-ConfirmationText`; `-WhatIf` returns a successful preview. Result schema version 1.2 and exit codes 0, 1, 2, 3, 4, 5, and 10 are documented in [AUTOMATION.md](AUTOMATION.md).
 
-Policy schema version 1.0 uses explicit action, transport, target-mode, and target allow lists. Optional deny lists, runtime caps, and action-input constraints can only make built-in behavior narrower. Malformed profiles return validation exit code 2; valid policy denials return authorization exit code 3. The full precedence, target-pattern, decision, capability, and JEA contract is in [POLICY.md](POLICY.md). Copy-pasteable RMM, scheduled-task, WinRM, target-list, policy, preflight, and CI examples are in [examples/automation/README.md](examples/automation/README.md).
+Policy schema version 1.0 uses explicit action, transport, target-mode, and target allow lists. Optional deny lists, runtime caps, and action-input constraints can only make built-in behavior narrower. Malformed profiles return validation exit code 2; valid policy denials return authorization exit code 3. The full precedence, target-pattern, decision, capability, and JEA contract is in [POLICY.md](POLICY.md).
+
+Audit schema version 1.0 records run, request, policy, target, failure, and summary lifecycle events without raw action data. Each run has a UUID; each validated target has a deterministic cross-run ID; and the authoritative summary contains a documented SHA-256 canonical hash. Auditing is opt-in, never creates Event Log configuration, never overwrites a file, and converts a configured sink failure into a visible non-success result. See [AUDITING.md](AUDITING.md). Copy-pasteable RMM, scheduled-task, WinRM, target-list, policy, preflight, audit, and CI examples are in [examples/automation/README.md](examples/automation/README.md).
 
 ## Remote target lists
 
@@ -195,9 +213,11 @@ Default logs are stored under:
 
 Existing report files are never overwritten.
 
+Opt-in enterprise audit files are separate per-run `.jsonl` artifacts. They are never appended to, overwritten, rotated, or deleted by the toolkit. See [AUDITING.md](AUDITING.md) for retention and failure behavior.
+
 ## Testing and validation
 
-Release 2.0.0 completed 496 automated checks across four Windows and PowerShell environments on August 12, 2026. The 2.2.0 policy milestone currently contains 504 deterministic checks and has passed natively under both Windows PowerShell 5.1 and PowerShell 7.6.4, for 1,008 completed native checks.
+Release 2.0.0 completed 496 automated checks across four Windows and PowerShell environments on August 12, 2026. The 2.3.0 auditability milestone contains 570 deterministic checks and has passed natively under both Windows PowerShell 5.1 and PowerShell 7.6.4, for 1,140 completed native checks.
 
 | Environment | PowerShell | Result |
 | --- | --- | --- |
@@ -206,13 +226,13 @@ Release 2.0.0 completed 496 automated checks across four Windows and PowerShell 
 | Microsoft Windows Server Core 2025, Hyper-V-isolated container | Windows PowerShell 5.1.26100.33296 | 124 passed |
 | Microsoft PowerShell Server Core 2022, Hyper-V-isolated container | PowerShell 7.5.0 | 124 passed |
 
-The displayed container matrix is the historical 2.0.0 release record. Its tests mounted the repository read-only. The current native suite adds strict policy parsing, precedence and denial behavior, runtime and action-input caps, policy-aware catalogs, capability preflight, native exit behavior, and proof that preflight does not execute or log custom code. PSScriptAnalyzer 1.25.0 reports zero findings under the committed settings. The automated suite makes no destructive system changes.
+The displayed container matrix is the historical 2.0.0 release record. Its tests mounted the repository read-only. The current native suite adds strict policy parsing, capability preflight, JSON Lines audit lifecycles, cross-run target IDs, canonical SHA-256 summary verification, sink-mutation detection, post-execution output-failure evidence, and data-minimization checks. PSScriptAnalyzer 1.25.0 reports zero findings under the committed settings. The automated suite makes no destructive system changes.
 
 The prior release's container tags, digests, commands, and the exact current native validation record are in [TESTING.md](TESTING.md). Continuous integration repeats the dependency-free suite on Windows Server 2022 and Windows Server 2025 with both Windows PowerShell and PowerShell 7.
 
 ## Enterprise roadmap
 
-The 2.1.0 automation interface and 2.2.0 policy and least-privilege implementation are complete for release review. The next milestone is 2.3.0 enterprise auditability, followed by controlled change plans, resumable target batches, and signed release artifacts. See [ROADMAP.md](ROADMAP.md).
+The 2.1.0 automation interface, 2.2.0 policy boundary, and 2.3.0 enterprise auditability implementation are complete for release review. The next milestone is 3.0.0 controlled orchestration with approved plans, safe resume, and signed release artifacts. See [ROADMAP.md](ROADMAP.md).
 
 ## Contributing
 

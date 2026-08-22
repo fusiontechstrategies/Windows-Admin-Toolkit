@@ -3,7 +3,7 @@
     Provides interactive and noninteractive tools for authorized Windows administration.
 
 .DESCRIPTION
-    Windows Admin Toolkit 2.2.0 supports local administration and
+    Windows Admin Toolkit 2.3.0 supports local administration and
     bounded remote execution through PowerShell Remoting or PsExec. PowerShell
     Remoting is the default because it does not place passwords on process
     command lines. The optional PsExec transport uses only the current Windows
@@ -67,6 +67,18 @@
 .PARAMETER PolicyPath
     Optional literal path to a versioned JSON policy profile. A supplied policy
     can only narrow the toolkit's built-in permissions and safety limits.
+
+.PARAMETER AuditPath
+    Optional literal path for a new per-run JSON Lines audit file. Existing
+    files are never appended to or overwritten.
+
+.PARAMETER AuditEventLog
+    Also writes bounded audit records to the Windows Event Log. This integration
+    is off by default and requires an already-registered event source.
+
+.PARAMETER AuditEventSource
+    Existing Windows Event Log source used with AuditEventLog. The toolkit never
+    creates or modifies event-source registration.
 
 .PARAMETER Action
     Stable action identifier used by automation mode.
@@ -174,8 +186,11 @@
 .EXAMPLE
     .\WindowsAdminToolkit.ps1 -Automation -Action SystemInfo -Local -PolicyPath .\read-only-local.json -Preflight -JsonOutputPath -
 
+.EXAMPLE
+    .\WindowsAdminToolkit.ps1 -Automation -Action SystemInfo -Local -AuditPath C:\Audit\system-info.jsonl -JsonOutputPath C:\Results\system-info.json
+
 .NOTES
-    Version: 2.2.0
+    Version: 2.3.0
     License: MIT
     Use only on systems you own or are explicitly authorized to administer.
 #>
@@ -231,6 +246,17 @@ param(
     [Parameter()]
     [AllowEmptyString()]
     [string]$PolicyPath = '',
+
+    [Parameter()]
+    [AllowEmptyString()]
+    [string]$AuditPath = '',
+
+    [Parameter()]
+    [switch]$AuditEventLog,
+
+    [Parameter()]
+    [AllowEmptyString()]
+    [string]$AuditEventSource = 'WindowsAdminToolkit',
 
     [Parameter()]
     [AllowEmptyString()]
@@ -333,7 +359,7 @@ param(
     [string]$PowerShellFile = ''
 )
 
-$Script:ToolkitVersion = '2.2.0'
+$Script:ToolkitVersion = '2.3.0'
 $Script:WasDotSourced = $MyInvocation.InvocationName -eq '.'
 $Script:ToolkitPath = $PSCommandPath
 $Script:InvocationParameters = @{}
@@ -359,6 +385,7 @@ $Script:State = [ordered]@{
     Authentication             = $normalizedAuthentication
     SkipConnectivityCheck      = [bool]$SkipConnectivityCheck
     PolicyProfile              = $null
+    AuditContext               = $null
 }
 
 function Test-WindowsPlatform {
@@ -1908,8 +1935,11 @@ $Script:ActionCatalog = [ordered]@{
     20 = [pscustomobject]@{ Name = 'Custom PowerShell'; Script = 'CustomPowerShell'; ReadOnly = $false }
 }
 
-$Script:AutomationSchemaVersion = '1.1'
+$Script:AutomationSchemaVersion = '1.2'
 $Script:PolicySchemaVersion = '1.0'
+$Script:AuditSchemaVersion = '1.0'
+$Script:AuditCanonicalization = 'WAT-AUDIT-SUMMARY-1'
+$Script:AuditMaximumBytes = 16777216
 $Script:AutomationExitCodes = [ordered]@{
     CompleteSuccess      = 0
     PartialSuccess       = 1
@@ -3940,6 +3970,450 @@ function ConvertTo-AdminUtcTimestamp {
     return $Value.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ', [System.Globalization.CultureInfo]::InvariantCulture)
 }
 
+function ConvertTo-AdminNormalizedUtcTimestamp {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Value
+    )
+
+    if ($Value -is [datetime]) {
+        return ConvertTo-AdminUtcTimestamp -Value ([datetime]$Value)
+    }
+    if ($Value -is [datetimeoffset]) {
+        return $Value.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ', [System.Globalization.CultureInfo]::InvariantCulture)
+    }
+    $parsedValue = [datetime]::Parse(
+        [string]$Value,
+        [System.Globalization.CultureInfo]::InvariantCulture,
+        [System.Globalization.DateTimeStyles]::RoundtripKind
+    )
+    return ConvertTo-AdminUtcTimestamp -Value $parsedValue
+}
+
+function ConvertTo-AdminCanonicalJsonString {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Value
+    )
+
+    $builder = New-Object System.Text.StringBuilder
+    [void]$builder.Append('"')
+    foreach ($character in $Value.ToCharArray()) {
+        $characterCode = [int]$character
+        switch ($characterCode) {
+            8 { [void]$builder.Append('\b'); continue }
+            9 { [void]$builder.Append('\t'); continue }
+            10 { [void]$builder.Append('\n'); continue }
+            12 { [void]$builder.Append('\f'); continue }
+            13 { [void]$builder.Append('\r'); continue }
+            34 { [void]$builder.Append('\"'); continue }
+            92 { [void]$builder.Append('\\'); continue }
+        }
+        if ($characterCode -lt 0x20 -or $characterCode -gt 0x7E) {
+            [void]$builder.Append(('\u{0:x4}' -f $characterCode))
+        }
+        else {
+            [void]$builder.Append($character)
+        }
+    }
+    [void]$builder.Append('"')
+    return $builder.ToString()
+}
+
+function ConvertTo-AdminCanonicalJson {
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [AllowNull()]
+        $Value,
+
+        [Parameter()]
+        [ValidateRange(0, 30)]
+        [int]$Depth = 0
+    )
+
+    if ($Depth -gt 20) {
+        throw 'Canonical JSON exceeds the supported nesting depth.'
+    }
+    if ($null -eq $Value) {
+        return 'null'
+    }
+    if ($Value -is [string] -or $Value -is [char] -or $Value -is [guid] -or
+        $Value -is [version] -or $Value -is [uri] -or $Value.GetType().IsEnum) {
+        return ConvertTo-AdminCanonicalJsonString -Value ([string]$Value)
+    }
+    if ($Value -is [datetime]) {
+        return ConvertTo-AdminCanonicalJsonString -Value (ConvertTo-AdminUtcTimestamp -Value $Value)
+    }
+    if ($Value -is [datetimeoffset]) {
+        return ConvertTo-AdminCanonicalJsonString -Value $Value.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ', [System.Globalization.CultureInfo]::InvariantCulture)
+    }
+    if ($Value -is [bool]) {
+        return $(if ($Value) { 'true' } else { 'false' })
+    }
+    if ($Value -is [byte] -or $Value -is [sbyte] -or $Value -is [int16] -or
+        $Value -is [uint16] -or $Value -is [int32] -or $Value -is [uint32] -or
+        $Value -is [int64] -or $Value -is [uint64]) {
+        return ([System.Convert]::ToString($Value, [System.Globalization.CultureInfo]::InvariantCulture))
+    }
+    if ($Value -is [decimal]) {
+        return $Value.ToString([System.Globalization.CultureInfo]::InvariantCulture)
+    }
+    if ($Value -is [single] -or $Value -is [double]) {
+        $floatingPointValue = [double]$Value
+        if ([double]::IsNaN($floatingPointValue) -or [double]::IsInfinity($floatingPointValue)) {
+            throw 'Canonical JSON does not permit non-finite numbers.'
+        }
+        return $floatingPointValue.ToString('R', [System.Globalization.CultureInfo]::InvariantCulture)
+    }
+
+    if ($Value -is [System.Collections.IDictionary]) {
+        $propertyNames = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($key in $Value.Keys) {
+            if ($null -eq $key) {
+                throw 'Canonical JSON object keys cannot be null.'
+            }
+            $propertyNames.Add([string]$key) | Out-Null
+        }
+        $sortedPropertyNames = [string[]]$propertyNames.ToArray()
+        [System.Array]::Sort($sortedPropertyNames, [System.StringComparer]::Ordinal)
+        $members = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($propertyName in $sortedPropertyNames) {
+            $members.Add(('{0}:{1}' -f (ConvertTo-AdminCanonicalJsonString -Value $propertyName), (ConvertTo-AdminCanonicalJson -Value $Value[$propertyName] -Depth ($Depth + 1)))) | Out-Null
+        }
+        return '{' + ($members.ToArray() -join ',') + '}'
+    }
+
+    if ($Value -is [System.Collections.IEnumerable]) {
+        $items = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($item in $Value) {
+            $items.Add((ConvertTo-AdminCanonicalJson -Value $item -Depth ($Depth + 1))) | Out-Null
+        }
+        return '[' + ($items.ToArray() -join ',') + ']'
+    }
+
+    $objectPropertyNames = [string[]]@($Value.PSObject.Properties.Name)
+    [System.Array]::Sort($objectPropertyNames, [System.StringComparer]::Ordinal)
+    $objectMembers = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($propertyName in $objectPropertyNames) {
+        $objectMembers.Add(('{0}:{1}' -f (ConvertTo-AdminCanonicalJsonString -Value $propertyName), (ConvertTo-AdminCanonicalJson -Value $Value.$propertyName -Depth ($Depth + 1)))) | Out-Null
+    }
+    return '{' + ($objectMembers.ToArray() -join ',') + '}'
+}
+
+function Get-AdminSha256Hex {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Text
+    )
+
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $encoding = New-Object System.Text.UTF8Encoding($false, $true)
+        $hashBytes = $sha256.ComputeHash($encoding.GetBytes($Text))
+        return ([System.BitConverter]::ToString($hashBytes)).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha256.Dispose()
+    }
+}
+
+function Get-AdminStableTargetId {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$ComputerName
+    )
+
+    $identityText = 'WAT-TARGET-1|' + $ComputerName.ToUpperInvariant()
+    return 't-' + (Get-AdminSha256Hex -Text $identityText).Substring(0, 24)
+}
+
+function Resolve-AdminAuditPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$LiteralPath,
+
+        [Parameter()]
+        [AllowEmptyCollection()]
+        [string[]]$CollisionPaths = @()
+    )
+
+    $requestedPath = $LiteralPath.Trim()
+    if ([string]::IsNullOrWhiteSpace($requestedPath)) {
+        throw 'AuditPath cannot be empty when supplied.'
+    }
+    if ($requestedPath -ceq '-' -or $requestedPath -ieq 'STDOUT') {
+        throw 'AuditPath must be a new .jsonl file and cannot use stdout.'
+    }
+    if (-not (Test-AdminLiteralFilePathText -LiteralPath $requestedPath)) {
+        throw 'The audit path contains an unsafe or unsupported component.'
+    }
+
+    $fullPath = [System.IO.Path]::GetFullPath($requestedPath)
+    if (-not $fullPath.EndsWith('.jsonl', [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'AuditPath must use the .jsonl extension.'
+    }
+    foreach ($collisionPath in @($CollisionPaths)) {
+        if ([string]::IsNullOrWhiteSpace($collisionPath) -or $collisionPath -ceq '-') {
+            continue
+        }
+        $fullCollisionPath = [System.IO.Path]::GetFullPath($collisionPath)
+        if ($fullPath.Equals($fullCollisionPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'AuditPath must be different from every other configured output path.'
+        }
+    }
+    if (Test-Path -LiteralPath $fullPath) {
+        throw "Refusing to append to or overwrite an existing audit file: $fullPath"
+    }
+    $parent = Split-Path -Parent $fullPath
+    if ([string]::IsNullOrWhiteSpace($parent)) {
+        throw 'AuditPath must include a valid parent directory.'
+    }
+    if ((Test-Path -LiteralPath $parent) -and -not (Test-Path -LiteralPath $parent -PathType Container)) {
+        throw 'The audit parent path is not a directory.'
+    }
+    return $fullPath
+}
+
+function Initialize-AdminAuditContext {
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [AllowNull()]
+        [string]$ResolvedAuditPath,
+
+        [Parameter()]
+        [bool]$EventLogEnabled = $false,
+
+        [Parameter()]
+        [ValidateNotNullOrEmpty()]
+        [string]$EventSource = 'WindowsAdminToolkit'
+    )
+
+    $eventSourceName = $EventSource.Trim()
+    if ($EventLogEnabled) {
+        if ($eventSourceName -notmatch '^[A-Za-z0-9][A-Za-z0-9 ._-]{0,127}$') {
+            throw 'AuditEventSource contains unsupported characters or exceeds 128 characters.'
+        }
+        try {
+            if (-not [System.Diagnostics.EventLog]::SourceExists($eventSourceName)) {
+                throw "Windows Event Log source '$eventSourceName' is not registered. The toolkit will not create it automatically."
+            }
+        }
+        catch {
+            if ($_.Exception.Message -match 'not registered') {
+                throw
+            }
+            throw "Unable to validate Windows Event Log source '$eventSourceName': $($_.Exception.Message)"
+        }
+    }
+
+    $context = [pscustomobject][ordered]@{
+        Enabled         = -not [string]::IsNullOrWhiteSpace([string]$ResolvedAuditPath) -or $EventLogEnabled
+        Path            = if ([string]::IsNullOrWhiteSpace([string]$ResolvedAuditPath)) { $null } else { [string]$ResolvedAuditPath }
+        EventLogEnabled = [bool]$EventLogEnabled
+        EventSource     = if ($EventLogEnabled) { $eventSourceName } else { $null }
+        RecordCount     = 0
+        BytesWritten    = [int64]0
+        SinkFailed      = $false
+        Complete        = $false
+        SummaryHash     = $null
+        RequestRecorded = $false
+        PolicyRecorded  = $false
+        StartedTargetIds = (New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal))
+    }
+
+    if ($context.Path) {
+        $parent = Split-Path -Parent $context.Path
+        if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
+            [void][System.IO.Directory]::CreateDirectory($parent)
+        }
+        $stream = $null
+        try {
+            $stream = New-Object System.IO.FileStream($context.Path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)
+        }
+        finally {
+            if ($stream) {
+                $stream.Dispose()
+            }
+        }
+    }
+
+    return $context
+}
+
+function ConvertTo-AdminAuditEvent {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [guid]$RunId,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(1, 1000000)]
+        [int]$Sequence,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('run.started', 'request.resolved', 'policy.decision', 'target.started', 'target.completed', 'run.summary', 'audit.failure')]
+        [string]$EventType,
+
+        [Parameter(Mandatory = $true)]
+        [datetime]$TimestampUtc,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Initialization', 'Request', 'Authorization', 'Connectivity', 'Execution', 'Summary', 'Audit')]
+        [string]$Stage,
+
+        [Parameter()]
+        [AllowNull()]
+        $ActionId,
+
+        [Parameter()]
+        [AllowNull()]
+        $Target,
+
+        [Parameter()]
+        [AllowNull()]
+        $Outcome,
+
+        [Parameter()]
+        [AllowNull()]
+        $DurationMs,
+
+        [Parameter()]
+        [AllowNull()]
+        $Policy,
+
+        [Parameter()]
+        [AllowNull()]
+        $ErrorRecord,
+
+        [Parameter()]
+        [AllowNull()]
+        $Summary
+    )
+
+    return [pscustomobject][ordered]@{
+        schemaVersion  = $Script:AuditSchemaVersion
+        eventId        = '{0}:{1:D6}' -f $RunId.ToString('D'), $Sequence
+        sequence       = [int]$Sequence
+        eventType      = $EventType
+        timestampUtc   = ConvertTo-AdminUtcTimestamp -Value $TimestampUtc
+        runId          = $RunId.ToString('D')
+        toolkitVersion = $Script:ToolkitVersion
+        stage          = $Stage
+        actionId       = if ([string]::IsNullOrWhiteSpace([string]$ActionId)) { $null } else { [string]$ActionId }
+        target         = $Target
+        outcome        = if ([string]::IsNullOrWhiteSpace([string]$Outcome)) { $null } else { [string]$Outcome }
+        durationMs     = if ($null -eq $DurationMs) { $null } else { [int64]$DurationMs }
+        policy         = $Policy
+        error          = $ErrorRecord
+        summary        = $Summary
+    }
+}
+
+function Write-AdminAuditRecord {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Context,
+
+        [Parameter(Mandatory = $true)]
+        [psobject]$Event
+    )
+
+    if ([bool]$Context.SinkFailed) {
+        throw 'The configured audit sink previously failed during this run and cannot be reused.'
+    }
+
+    try {
+        $json = ConvertTo-Json -InputObject $Event -Compress -Depth 20
+        $encoding = New-Object System.Text.UTF8Encoding($false, $true)
+        $recordBytes = $encoding.GetBytes($json + "`n")
+        if (($Context.BytesWritten + $recordBytes.Length) -gt $Script:AuditMaximumBytes) {
+            throw "The per-run audit file exceeded the $Script:AuditMaximumBytes byte safety limit."
+        }
+
+        if ($Context.Path) {
+            $stream = $null
+            try {
+                $stream = New-Object System.IO.FileStream($Context.Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
+                if ($stream.Length -ne $Context.BytesWritten) {
+                    throw 'The audit file changed unexpectedly during the run.'
+                }
+                [void]$stream.Seek(0, [System.IO.SeekOrigin]::End)
+                $stream.Write($recordBytes, 0, $recordBytes.Length)
+                $stream.Flush()
+                $Context.BytesWritten = [int64]($Context.BytesWritten + $recordBytes.Length)
+            }
+            finally {
+                if ($stream) {
+                    $stream.Dispose()
+                }
+            }
+        }
+
+        if ($Context.EventLogEnabled) {
+            if ($json.Length -gt 30000) {
+                throw 'The audit record exceeds the safe Windows Event Log message limit.'
+            }
+            $eventIdMap = @{
+                'run.started'      = 1000
+                'request.resolved' = 1001
+                'policy.decision'  = 1002
+                'target.started'   = 1100
+                'target.completed' = 1101
+                'run.summary'      = 1200
+                'audit.failure'    = 1900
+            }
+            try {
+                [System.Diagnostics.EventLog]::WriteEntry($Context.EventSource, $json, [System.Diagnostics.EventLogEntryType]::Information, [int]$eventIdMap[$Event.eventType])
+            }
+            catch {
+                throw "Unable to write the configured Windows Event Log audit sink: $($_.Exception.Message)"
+            }
+        }
+
+        $Context.RecordCount = [int]$Context.RecordCount + 1
+        return $Event
+    }
+    catch {
+        $Context.SinkFailed = $true
+        throw
+    }
+}
+
+function Get-AdminAuditStatus {
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [AllowNull()]
+        [psobject]$Context
+    )
+
+    $enabled = $null -ne $Context -and [bool]$Context.Enabled
+    return [pscustomobject][ordered]@{
+        enabled          = $enabled
+        schemaVersion    = if ($enabled) { $Script:AuditSchemaVersion } else { $null }
+        path             = if ($enabled -and $Context.Path) { [string]$Context.Path } else { $null }
+        eventLog         = $enabled -and [bool]$Context.EventLogEnabled
+        eventSource      = if ($enabled -and $Context.EventLogEnabled) { [string]$Context.EventSource } else { $null }
+        recordCount      = if ($enabled) { [int]$Context.RecordCount } else { 0 }
+        complete         = $enabled -and -not [bool]$Context.SinkFailed -and [bool]$Context.Complete
+        hashAlgorithm    = if ($enabled -and $Context.SummaryHash) { 'SHA-256' } else { $null }
+        canonicalization = if ($enabled -and $Context.SummaryHash) { $Script:AuditCanonicalization } else { $null }
+        summaryHash      = if ($enabled -and $Context.SummaryHash) { [string]$Context.SummaryHash } else { $null }
+    }
+}
+
 function ConvertTo-AdminJsonSafeValue {
     [CmdletBinding()]
     param(
@@ -4096,6 +4570,7 @@ function ConvertTo-AdminAutomationTargetEnvelope {
     }
 
     return [pscustomobject][ordered]@{
+        targetId       = Get-AdminStableTargetId -ComputerName ([string]$TargetResult.ComputerName)
         target         = [string]$TargetResult.ComputerName
         status         = [string]$TargetResult.Status
         startedAtUtc   = ConvertTo-AdminUtcTimestamp -Value $TargetResult.StartedAtUtc
@@ -4185,7 +4660,11 @@ function ConvertTo-AdminAutomationEnvelope {
 
         [Parameter()]
         [AllowEmptyCollection()]
-        [object[]]$Actions = @()
+        [object[]]$Actions = @(),
+
+        [Parameter()]
+        [AllowNull()]
+        [psobject]$Audit
     )
 
     $targets = New-Object 'System.Collections.Generic.List[object]'
@@ -4217,6 +4696,9 @@ function ConvertTo-AdminAutomationEnvelope {
     if ($null -eq $PolicyDecision) {
         $PolicyDecision = ConvertTo-AdminPolicyDecision -Decision NotApplied -ReasonCode NoPolicy -Reason 'No policy profile was supplied.'
     }
+    if ($null -eq $Audit) {
+        $Audit = Get-AdminAuditStatus
+    }
     $safePolicyDecision = [pscustomobject][ordered]@{
         applied       = [bool]$PolicyDecision.applied
         schemaVersion = if ([string]::IsNullOrWhiteSpace([string]$PolicyDecision.schemaVersion)) { $null } else { [string]$PolicyDecision.schemaVersion }
@@ -4245,6 +4727,7 @@ function ConvertTo-AdminAutomationEnvelope {
             useSsl         = [bool]$UseSsl
         }
         policy         = $safePolicyDecision
+        audit          = $Audit
         status         = $Status
         outcome        = $Outcome
         exitCode       = [int]$ExitCode
@@ -4266,6 +4749,308 @@ function ConvertTo-AdminAutomationJson {
     )
 
     return ConvertTo-Json -InputObject $Envelope -Compress -Depth 20
+}
+
+function Get-AdminAuditRunSummary {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Envelope,
+
+        [Parameter(Mandatory = $true)]
+        [psobject]$Context
+    )
+
+    $targetSummaries = New-Object 'System.Collections.Generic.List[object]'
+    $succeededCount = 0
+    $partialCount = 0
+    $failedCount = 0
+    $timedOutCount = 0
+    $skippedCount = 0
+    $whatIfCount = 0
+    $targetIndex = 0
+    foreach ($target in @($Envelope.targets)) {
+        switch ([string]$target.status) {
+            'Success' { $succeededCount++ }
+            'Partial' { $partialCount++ }
+            'Failed' { $failedCount++ }
+            'TimedOut' { $timedOutCount++ }
+            'Skipped' { $skippedCount++ }
+            'WhatIf' { $whatIfCount++ }
+        }
+        $targetSummaries.Add([pscustomobject][ordered]@{
+                targetId      = [string]$target.targetId
+                index         = [int]$targetIndex
+                target        = [string]$target.target
+                status        = [string]$target.status
+                startedAtUtc  = ConvertTo-AdminNormalizedUtcTimestamp -Value $target.startedAtUtc
+                finishedAtUtc = ConvertTo-AdminNormalizedUtcTimestamp -Value $target.finishedAtUtc
+                durationMs    = [int64]$target.durationMs
+                attempts      = [int]$target.attempts
+                errorCategory = if ($target.errorCategory) { [string]$target.errorCategory } else { $null }
+            }) | Out-Null
+        $targetIndex++
+    }
+
+    $canonicalPayload = [pscustomobject][ordered]@{
+        canonicalization = $Script:AuditCanonicalization
+        auditSchemaVersion = $Script:AuditSchemaVersion
+        toolkitVersion   = [string]$Envelope.toolkitVersion
+        runId            = [string]$Envelope.runId
+        startedAtUtc     = ConvertTo-AdminNormalizedUtcTimestamp -Value $Envelope.startedAtUtc
+        finishedAtUtc    = ConvertTo-AdminNormalizedUtcTimestamp -Value $Envelope.finishedAtUtc
+        durationMs       = [int64]$Envelope.durationMs
+        actionId         = if ($Envelope.actionId) { [string]$Envelope.actionId } else { $null }
+        targetMode       = if ($Envelope.targetMode) { [string]$Envelope.targetMode } else { $null }
+        transport        = [pscustomobject][ordered]@{
+            name           = if ($Envelope.transport.name) { [string]$Envelope.transport.name } else { $null }
+            authentication = if ($Envelope.transport.authentication) { [string]$Envelope.transport.authentication } else { $null }
+            useSsl         = [bool]$Envelope.transport.useSsl
+        }
+        policy           = [pscustomobject][ordered]@{
+            applied       = [bool]$Envelope.policy.applied
+            schemaVersion = if ($Envelope.policy.schemaVersion) { [string]$Envelope.policy.schemaVersion } else { $null }
+            profileName   = if ($Envelope.policy.profileName) { [string]$Envelope.policy.profileName } else { $null }
+            decision      = [string]$Envelope.policy.decision
+            reasonCode    = [string]$Envelope.policy.reasonCode
+        }
+        status           = [string]$Envelope.status
+        outcome          = [string]$Envelope.outcome
+        exitCode         = [int]$Envelope.exitCode
+        targetCount      = [int]$Envelope.targetCount
+        recordCount      = [int]$Envelope.recordCount
+        auditRecordCount = [int]$Context.RecordCount + 1
+        targets          = @($targetSummaries.ToArray())
+    }
+    $canonicalJson = ConvertTo-AdminCanonicalJson -Value $canonicalPayload
+    $summaryHash = Get-AdminSha256Hex -Text $canonicalJson
+    $summary = [pscustomobject][ordered]@{
+        status           = [string]$Envelope.status
+        outcome          = [string]$Envelope.outcome
+        exitCode         = [int]$Envelope.exitCode
+        targetCount      = [int]$Envelope.targetCount
+        recordCount      = [int]$Envelope.recordCount
+        succeededCount   = [int]$succeededCount
+        partialCount     = [int]$partialCount
+        failedCount      = [int]$failedCount
+        timedOutCount    = [int]$timedOutCount
+        skippedCount     = [int]$skippedCount
+        whatIfCount      = [int]$whatIfCount
+        auditRecordCount = [int]$Context.RecordCount + 1
+        hashAlgorithm    = 'SHA-256'
+        canonicalization = $Script:AuditCanonicalization
+        summaryHash      = $summaryHash
+    }
+    return [pscustomobject][ordered]@{
+        CanonicalPayload = $canonicalPayload
+        CanonicalJson    = $canonicalJson
+        Summary          = $summary
+        SummaryHash      = $summaryHash
+    }
+}
+
+function Write-AdminAuditExecutionStarted {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [guid]$RunId,
+
+        [Parameter(Mandatory = $true)]
+        [psobject]$Request,
+
+        [Parameter(Mandatory = $true)]
+        [psobject]$Context
+    )
+
+    $timestampUtc = [datetime]::UtcNow
+    if (-not $Context.RequestRecorded) {
+        $requestEvent = ConvertTo-AdminAuditEvent -RunId $RunId -Sequence ([int]$Context.RecordCount + 1) -EventType request.resolved -TimestampUtc $timestampUtc -Stage Request -ActionId $Request.ActionId -Outcome Resolved -DurationMs ([int64]0)
+        [void](Write-AdminAuditRecord -Context $Context -Event $requestEvent)
+        $Context.RequestRecorded = $true
+    }
+    if (-not $Context.PolicyRecorded) {
+        $policy = [pscustomobject][ordered]@{
+            applied       = [bool]$Request.PolicyDecision.applied
+            schemaVersion = if ($Request.PolicyDecision.schemaVersion) { [string]$Request.PolicyDecision.schemaVersion } else { $null }
+            profileName   = if ($Request.PolicyDecision.profileName) { [string]$Request.PolicyDecision.profileName } else { $null }
+            decision      = [string]$Request.PolicyDecision.decision
+            reasonCode    = [string]$Request.PolicyDecision.reasonCode
+            reason        = ConvertTo-AdminSafeErrorMessage -Message ([string]$Request.PolicyDecision.reason)
+        }
+        $policyEvent = ConvertTo-AdminAuditEvent -RunId $RunId -Sequence ([int]$Context.RecordCount + 1) -EventType policy.decision -TimestampUtc $timestampUtc -Stage Authorization -ActionId $Request.ActionId -Outcome ([string]$Request.PolicyDecision.decision) -Policy $policy
+        [void](Write-AdminAuditRecord -Context $Context -Event $policyEvent)
+        $Context.PolicyRecorded = $true
+    }
+
+    $targetStage = if ($Request.TargetMode -eq 'Remote' -and -not $Script:State.SkipConnectivityCheck) { 'Connectivity' } else { 'Execution' }
+    for ($targetIndex = 0; $targetIndex -lt $Request.Computers.Count; $targetIndex++) {
+        $computerName = [string]$Request.Computers[$targetIndex]
+        $targetId = Get-AdminStableTargetId -ComputerName $computerName
+        if ($Context.StartedTargetIds.Contains($targetId)) {
+            continue
+        }
+        $target = [pscustomobject][ordered]@{
+            targetId = $targetId
+            index    = [int]$targetIndex
+            name     = $computerName
+        }
+        $startedEvent = ConvertTo-AdminAuditEvent -RunId $RunId -Sequence ([int]$Context.RecordCount + 1) -EventType target.started -TimestampUtc $timestampUtc -Stage $targetStage -ActionId $Request.ActionId -Target $target
+        [void](Write-AdminAuditRecord -Context $Context -Event $startedEvent)
+        [void]$Context.StartedTargetIds.Add($targetId)
+    }
+}
+
+function Write-AdminAutomationAudit {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Envelope,
+
+        [Parameter(Mandatory = $true)]
+        [psobject]$Context
+    )
+
+    $runId = [guid]::Parse([string]$Envelope.runId)
+    $startedAtUtc = [datetime]::Parse([string]$Envelope.startedAtUtc, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+    $finishedAtUtc = [datetime]::Parse([string]$Envelope.finishedAtUtc, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+    $actionId = if ($Envelope.actionId) { [string]$Envelope.actionId } else { $null }
+    $requestError = $null
+    if (@($Envelope.errors).Count -gt 0) {
+        $requestError = [pscustomobject][ordered]@{
+            category = [string]$Envelope.errors[0].category
+            message  = ConvertTo-AdminSafeErrorMessage -Message ([string]$Envelope.errors[0].message)
+        }
+    }
+
+    if (-not $Context.RequestRecorded) {
+        $requestEvent = ConvertTo-AdminAuditEvent -RunId $runId -Sequence ([int]$Context.RecordCount + 1) -EventType request.resolved -TimestampUtc $startedAtUtc -Stage Request -ActionId $actionId -Outcome ([string]$Envelope.status) -DurationMs ([int64]0) -ErrorRecord $requestError
+        [void](Write-AdminAuditRecord -Context $Context -Event $requestEvent)
+        $Context.RequestRecorded = $true
+    }
+
+    $policy = [pscustomobject][ordered]@{
+        applied       = [bool]$Envelope.policy.applied
+        schemaVersion = if ($Envelope.policy.schemaVersion) { [string]$Envelope.policy.schemaVersion } else { $null }
+        profileName   = if ($Envelope.policy.profileName) { [string]$Envelope.policy.profileName } else { $null }
+        decision      = [string]$Envelope.policy.decision
+        reasonCode    = [string]$Envelope.policy.reasonCode
+        reason        = ConvertTo-AdminSafeErrorMessage -Message ([string]$Envelope.policy.reason)
+    }
+    if (-not $Context.PolicyRecorded) {
+        $policyEvent = ConvertTo-AdminAuditEvent -RunId $runId -Sequence ([int]$Context.RecordCount + 1) -EventType policy.decision -TimestampUtc $startedAtUtc -Stage Authorization -ActionId $actionId -Outcome ([string]$Envelope.policy.decision) -Policy $policy
+        [void](Write-AdminAuditRecord -Context $Context -Event $policyEvent)
+        $Context.PolicyRecorded = $true
+    }
+
+    $targetIndex = 0
+    foreach ($targetResult in @($Envelope.targets)) {
+        $target = [pscustomobject][ordered]@{
+            targetId = [string]$targetResult.targetId
+            index    = [int]$targetIndex
+            name     = [string]$targetResult.target
+        }
+        $targetStartedAtUtc = [datetime]::Parse([string]$targetResult.startedAtUtc, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+        $targetFinishedAtUtc = [datetime]::Parse([string]$targetResult.finishedAtUtc, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+        $targetStage = if ([string]$targetResult.errorCategory -eq 'Connectivity') { 'Connectivity' } else { 'Execution' }
+        if (-not $Context.StartedTargetIds.Contains([string]$targetResult.targetId)) {
+            $startedEvent = ConvertTo-AdminAuditEvent -RunId $runId -Sequence ([int]$Context.RecordCount + 1) -EventType target.started -TimestampUtc $targetStartedAtUtc -Stage $targetStage -ActionId $actionId -Target $target
+            [void](Write-AdminAuditRecord -Context $Context -Event $startedEvent)
+            [void]$Context.StartedTargetIds.Add([string]$targetResult.targetId)
+        }
+
+        $targetError = $null
+        if ($targetResult.errorCategory -or $targetResult.errorMessage) {
+            $targetError = [pscustomobject][ordered]@{
+                category = if ($targetResult.errorCategory) { [string]$targetResult.errorCategory } else { 'Execution' }
+                message  = if ($targetResult.errorMessage) { ConvertTo-AdminSafeErrorMessage -Message ([string]$targetResult.errorMessage) } else { 'The target did not complete successfully.' }
+            }
+        }
+        $completedEvent = ConvertTo-AdminAuditEvent -RunId $runId -Sequence ([int]$Context.RecordCount + 1) -EventType target.completed -TimestampUtc $targetFinishedAtUtc -Stage $targetStage -ActionId $actionId -Target $target -Outcome ([string]$targetResult.status) -DurationMs ([int64]$targetResult.durationMs) -ErrorRecord $targetError
+        [void](Write-AdminAuditRecord -Context $Context -Event $completedEvent)
+        $targetIndex++
+    }
+
+    $runSummary = Get-AdminAuditRunSummary -Envelope $Envelope -Context $Context
+    $summaryEvent = ConvertTo-AdminAuditEvent -RunId $runId -Sequence ([int]$Context.RecordCount + 1) -EventType run.summary -TimestampUtc $finishedAtUtc -Stage Summary -ActionId $actionId -Outcome ([string]$Envelope.outcome) -DurationMs ([int64]$Envelope.durationMs) -Policy $policy -Summary $runSummary.Summary
+    [void](Write-AdminAuditRecord -Context $Context -Event $summaryEvent)
+    $Context.SummaryHash = [string]$runSummary.SummaryHash
+    $Context.Complete = $true
+    $Envelope.audit = Get-AdminAuditStatus -Context $Context
+    return $Envelope
+}
+
+function ConvertTo-AdminAuditSinkFailureEnvelope {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$OriginalEnvelope,
+
+        [Parameter(Mandatory = $true)]
+        [psobject]$Context,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Message
+    )
+
+    $originalOutcome = [string]$OriginalEnvelope.outcome
+    $finishedAtUtc = [datetime]::UtcNow
+    $startedAtUtc = [datetime]::Parse([string]$OriginalEnvelope.startedAtUtc, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+    $OriginalEnvelope.finishedAtUtc = ConvertTo-AdminUtcTimestamp -Value $finishedAtUtc
+    $OriginalEnvelope.durationMs = [int64][math]::Max(0, [math]::Round(($finishedAtUtc - $startedAtUtc).TotalMilliseconds))
+    $OriginalEnvelope.status = 'InternalFailure'
+    $OriginalEnvelope.outcome = 'InternalFailure'
+    $OriginalEnvelope.exitCode = [int]$Script:AutomationExitCodes.InternalFailure
+    $OriginalEnvelope.warnings = @($OriginalEnvelope.warnings) + @("The run outcome before the audit sink failure was $originalOutcome. Review preserved target evidence before retrying any state-changing action.")
+    $OriginalEnvelope.errors = @($OriginalEnvelope.errors) + @([pscustomobject][ordered]@{
+            category = 'Audit'
+            message  = ConvertTo-AdminSafeErrorMessage -Message $Message
+        })
+    $Context.Complete = $false
+    $Context.SummaryHash = $null
+    $OriginalEnvelope.audit = Get-AdminAuditStatus -Context $Context
+    return $OriginalEnvelope
+}
+
+function Write-AdminAuditFailureRevision {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Envelope,
+
+        [Parameter(Mandatory = $true)]
+        [psobject]$Context,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Message
+    )
+
+    $Context.Complete = $false
+    $Context.SummaryHash = $null
+    $runId = [guid]::Parse([string]$Envelope.runId)
+    $finishedAtUtc = [datetime]::Parse([string]$Envelope.finishedAtUtc, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+    $actionId = if ($Envelope.actionId) { [string]$Envelope.actionId } else { $null }
+    $auditError = [pscustomobject][ordered]@{
+        category = 'Output'
+        message  = ConvertTo-AdminSafeErrorMessage -Message $Message
+    }
+    $failureEvent = ConvertTo-AdminAuditEvent -RunId $runId -Sequence ([int]$Context.RecordCount + 1) -EventType audit.failure -TimestampUtc $finishedAtUtc -Stage Audit -ActionId $actionId -Outcome OutputSinkFailure -ErrorRecord $auditError
+    [void](Write-AdminAuditRecord -Context $Context -Event $failureEvent)
+
+    $policy = [pscustomobject][ordered]@{
+        applied       = [bool]$Envelope.policy.applied
+        schemaVersion = if ($Envelope.policy.schemaVersion) { [string]$Envelope.policy.schemaVersion } else { $null }
+        profileName   = if ($Envelope.policy.profileName) { [string]$Envelope.policy.profileName } else { $null }
+        decision      = [string]$Envelope.policy.decision
+        reasonCode    = [string]$Envelope.policy.reasonCode
+        reason        = ConvertTo-AdminSafeErrorMessage -Message ([string]$Envelope.policy.reason)
+    }
+    $runSummary = Get-AdminAuditRunSummary -Envelope $Envelope -Context $Context
+    $summaryEvent = ConvertTo-AdminAuditEvent -RunId $runId -Sequence ([int]$Context.RecordCount + 1) -EventType run.summary -TimestampUtc $finishedAtUtc -Stage Summary -ActionId $actionId -Outcome ([string]$Envelope.outcome) -DurationMs ([int64]$Envelope.durationMs) -Policy $policy -Summary $runSummary.Summary
+    [void](Write-AdminAuditRecord -Context $Context -Event $summaryEvent)
+    $Context.SummaryHash = [string]$runSummary.SummaryHash
+    $Context.Complete = $true
+    $Envelope.audit = Get-AdminAuditStatus -Context $Context
+    return $Envelope
 }
 
 function ConvertTo-AdminOutputSinkFailureEnvelope {
@@ -5816,7 +6601,7 @@ function Get-AdminAutomationOutcome {
     }
 }
 
-function Invoke-AdminAutomation {
+function Invoke-AdminAutomationCore {
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
     param(
         [Parameter(Mandatory = $true)]
@@ -5824,11 +6609,15 @@ function Invoke-AdminAutomation {
 
         [Parameter(Mandatory = $true)]
         [ValidateNotNullOrEmpty()]
-        [string]$ResolvedOutputPath
+        [string]$ResolvedOutputPath,
+
+        [Parameter(Mandatory = $true)]
+        [guid]$RunId,
+
+        [Parameter(Mandatory = $true)]
+        [datetime]$StartedAtUtc
     )
 
-    $startedAtUtc = [datetime]::UtcNow
-    $runId = [guid]::NewGuid()
     $requestedActionId = if (Test-AdminParameterBound -Parameters $Parameters -Name 'Action') { Get-AdminSafeActionId -ActionId ([string]$Parameters['Action']) } else { $null }
     $reportPaths = if ($ResolvedOutputPath -ceq '-') { @() } else { @($ResolvedOutputPath) }
     $requestedTargetSummary = Get-AdminRequestedTargetSummary -Parameters $Parameters
@@ -5966,6 +6755,10 @@ function Invoke-AdminAutomation {
         }
     }
 
+    if ($Script:State.AuditContext -and $Script:State.AuditContext.Enabled) {
+        Write-AdminAuditExecutionStarted -RunId $runId -Request $request -Context $Script:State.AuditContext
+    }
+
     $preflightFailures = @{}
     $executionComputers = @($request.Computers)
     $warnings = New-Object 'System.Collections.Generic.List[string]'
@@ -6061,6 +6854,121 @@ function Invoke-AdminAutomation {
     $finishedAtUtc = [datetime]::UtcNow
     Write-AdminLog -Message ("Automation run {0} finished with outcome {1}." -f $runId, $aggregate.Outcome) -NoConsole
     return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -ActionId $request.ActionId -ActionName $request.ActionName -ReadOnly $request.ReadOnly -Preflight $request.Preflight -PolicyDecision $request.PolicyDecision -TargetMode $request.TargetMode -Transport $transportName -Authentication $transportAuthentication -UseSsl $transportUseSsl -Status $aggregate.Status -Outcome $aggregate.Outcome -ExitCode $aggregate.ExitCode -RequestedTargetCount $request.Computers.Count -TargetResults $orderedResults.ToArray() -Warnings $warnings.ToArray() -ReportPaths $reportPaths
+}
+
+function Invoke-AdminAutomation {
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$Parameters,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$ResolvedOutputPath
+    )
+
+    $startedAtUtc = [datetime]::UtcNow
+    $runId = [guid]::NewGuid()
+    $Script:State.AuditContext = $null
+    $auditPathRequested = Test-AdminParameterBound -Parameters $Parameters -Name 'AuditPath'
+    $eventLogRequested = (Test-AdminParameterBound -Parameters $Parameters -Name 'AuditEventLog') -and [bool]$Parameters['AuditEventLog']
+    $eventSourceBound = Test-AdminParameterBound -Parameters $Parameters -Name 'AuditEventSource'
+    $auditRequested = $auditPathRequested -or $eventLogRequested -or $eventSourceBound
+    $auditContext = $null
+    $requestedActionId = if (Test-AdminParameterBound -Parameters $Parameters -Name 'Action') { Get-AdminSafeActionId -ActionId ([string]$Parameters['Action']) } else { $null }
+    $requestedCatalogItem = if ($requestedActionId) { Get-AdminActionCatalogItem -ActionId $requestedActionId } else { $null }
+    $requestedTargetSummary = Get-AdminRequestedTargetSummary -Parameters $Parameters
+    $requestedPolicyDecision = if (Test-AdminParameterBound -Parameters $Parameters -Name 'PolicyPath') {
+        ConvertTo-AdminPolicyDecision -Applied $true -Decision NotEvaluated -ReasonCode NotEvaluated -Reason 'The policy profile has not been evaluated.'
+    }
+    else {
+        ConvertTo-AdminPolicyDecision -Decision NotApplied -ReasonCode NoPolicy -Reason 'No policy profile was supplied.'
+    }
+    $reportPaths = if ($ResolvedOutputPath -ceq '-') { @() } else { @($ResolvedOutputPath) }
+
+    if ($eventSourceBound -and -not $eventLogRequested) {
+        $finishedAtUtc = [datetime]::UtcNow
+        return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -ActionId $requestedActionId -ActionName $(if ($requestedCatalogItem) { $requestedCatalogItem.Name } else { $null }) -ReadOnly $(if ($requestedCatalogItem -and $requestedCatalogItem.Classification -ne 'Conditional') { [bool]$requestedCatalogItem.ReadOnly } else { $null }) -PolicyDecision $requestedPolicyDecision -TargetMode $requestedTargetSummary.TargetMode -Transport $requestedTargetSummary.Transport -Authentication $requestedTargetSummary.Authentication -UseSsl $requestedTargetSummary.UseSsl -Status ValidationFailed -Outcome ValidationFailure -ExitCode $Script:AutomationExitCodes.ValidationFailure -RequestedTargetCount $requestedTargetSummary.RequestedTargetCount -Errors @([pscustomobject]@{ Category = 'Validation'; Message = 'AuditEventSource requires -AuditEventLog.' }) -ReportPaths $reportPaths
+    }
+
+    if ($auditRequested) {
+        try {
+            $collisionPaths = New-Object 'System.Collections.Generic.List[string]'
+            if ($ResolvedOutputPath -cne '-') {
+                $collisionPaths.Add($ResolvedOutputPath) | Out-Null
+            }
+            if ((Test-AdminParameterBound -Parameters $Parameters -Name 'LogFile') -and -not [string]::IsNullOrWhiteSpace([string]$Parameters['LogFile'])) {
+                $collisionPaths.Add([string]$Parameters['LogFile']) | Out-Null
+            }
+            $resolvedAuditPath = $null
+            if ($auditPathRequested) {
+                $resolvedAuditPath = Resolve-AdminAuditPath -LiteralPath ([string]$Parameters['AuditPath']) -CollisionPaths $collisionPaths.ToArray()
+            }
+            $requestedEventSource = if ($eventSourceBound) { [string]$Parameters['AuditEventSource'] } else { 'WindowsAdminToolkit' }
+            $auditContext = Initialize-AdminAuditContext -ResolvedAuditPath $resolvedAuditPath -EventLogEnabled $eventLogRequested -EventSource $requestedEventSource
+            $Script:State.AuditContext = $auditContext
+        }
+        catch {
+            $finishedAtUtc = [datetime]::UtcNow
+            $failedAuditContext = if ($auditContext) {
+                $auditContext
+            }
+            else {
+                [pscustomobject][ordered]@{
+                    Enabled         = $true
+                    Path            = $null
+                    EventLogEnabled = [bool]$eventLogRequested
+                    EventSource     = if ($eventLogRequested) { if ($eventSourceBound) { [string]$Parameters['AuditEventSource'] } else { 'WindowsAdminToolkit' } } else { $null }
+                    RecordCount     = 0
+                    BytesWritten    = [int64]0
+                    SinkFailed      = $false
+                    Complete        = $false
+                    SummaryHash     = $null
+                }
+            }
+            return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -ActionId $requestedActionId -ActionName $(if ($requestedCatalogItem) { $requestedCatalogItem.Name } else { $null }) -ReadOnly $(if ($requestedCatalogItem -and $requestedCatalogItem.Classification -ne 'Conditional') { [bool]$requestedCatalogItem.ReadOnly } else { $null }) -PolicyDecision $requestedPolicyDecision -TargetMode $requestedTargetSummary.TargetMode -Transport $requestedTargetSummary.Transport -Authentication $requestedTargetSummary.Authentication -UseSsl $requestedTargetSummary.UseSsl -Status ValidationFailed -Outcome ValidationFailure -ExitCode $Script:AutomationExitCodes.ValidationFailure -RequestedTargetCount $requestedTargetSummary.RequestedTargetCount -Errors @([pscustomobject]@{ Category = 'Audit'; Message = $_.Exception.Message }) -ReportPaths $reportPaths -Audit (Get-AdminAuditStatus -Context $failedAuditContext)
+        }
+
+        try {
+            $runStartedEvent = ConvertTo-AdminAuditEvent -RunId $runId -Sequence 1 -EventType run.started -TimestampUtc $startedAtUtc -Stage Initialization -ActionId $requestedActionId -Outcome Started
+            [void](Write-AdminAuditRecord -Context $auditContext -Event $runStartedEvent)
+        }
+        catch {
+            $finishedAtUtc = [datetime]::UtcNow
+            $initialEnvelope = ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -ActionId $requestedActionId -ActionName $(if ($requestedCatalogItem) { $requestedCatalogItem.Name } else { $null }) -ReadOnly $(if ($requestedCatalogItem -and $requestedCatalogItem.Classification -ne 'Conditional') { [bool]$requestedCatalogItem.ReadOnly } else { $null }) -PolicyDecision $requestedPolicyDecision -TargetMode $requestedTargetSummary.TargetMode -Transport $requestedTargetSummary.Transport -Authentication $requestedTargetSummary.Authentication -UseSsl $requestedTargetSummary.UseSsl -Status InternalFailure -Outcome InternalFailure -ExitCode $Script:AutomationExitCodes.InternalFailure -RequestedTargetCount $requestedTargetSummary.RequestedTargetCount -Errors @([pscustomobject]@{ Category = 'Audit'; Message = 'The configured audit sink failed before target execution.' }) -ReportPaths $reportPaths -Audit (Get-AdminAuditStatus -Context $auditContext)
+            return ConvertTo-AdminAuditSinkFailureEnvelope -OriginalEnvelope $initialEnvelope -Context $auditContext -Message $_.Exception.Message
+        }
+    }
+
+    $coreInvokeParameters = @{
+        Parameters         = $Parameters
+        ResolvedOutputPath = $ResolvedOutputPath
+        RunId              = $runId
+        StartedAtUtc       = $startedAtUtc
+        Confirm            = $false
+    }
+    if ($WhatIfPreference) {
+        $coreInvokeParameters.WhatIf = $true
+    }
+
+    try {
+        $envelope = Invoke-AdminAutomationCore @coreInvokeParameters
+    }
+    catch {
+        $finishedAtUtc = [datetime]::UtcNow
+        $internalMessage = if ($requestedActionId -in @('CustomCommand', 'CustomPowerShell')) { 'The custom action failed internally. Operator-supplied error text was omitted.' } else { ConvertTo-AdminSafeErrorMessage -Message $_.Exception.Message }
+        $envelope = ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -ActionId $requestedActionId -ActionName $(if ($requestedCatalogItem) { $requestedCatalogItem.Name } else { $null }) -ReadOnly $(if ($requestedCatalogItem -and $requestedCatalogItem.Classification -ne 'Conditional') { [bool]$requestedCatalogItem.ReadOnly } else { $null }) -PolicyDecision $requestedPolicyDecision -TargetMode $requestedTargetSummary.TargetMode -Transport $requestedTargetSummary.Transport -Authentication $requestedTargetSummary.Authentication -UseSsl $requestedTargetSummary.UseSsl -Status InternalFailure -Outcome InternalFailure -ExitCode $Script:AutomationExitCodes.InternalFailure -RequestedTargetCount $requestedTargetSummary.RequestedTargetCount -Errors @([pscustomobject]@{ Category = 'Internal'; Message = $internalMessage }) -ReportPaths $reportPaths
+    }
+
+    if ($auditContext -and $auditContext.Enabled) {
+        try {
+            $envelope = Write-AdminAutomationAudit -Envelope $envelope -Context $auditContext
+        }
+        catch {
+            $envelope = ConvertTo-AdminAuditSinkFailureEnvelope -OriginalEnvelope $envelope -Context $auditContext -Message ("The configured audit sink failed: {0}" -f $_.Exception.Message)
+        }
+    }
+    return $envelope
 }
 
 function Show-AdminResult {
@@ -6306,7 +7214,17 @@ if (-not $Script:WasDotSourced) {
             $failureStartedAtUtc = [datetime]::UtcNow
             try {
                 $failureEnvelope = if ($null -ne $automationEnvelope) {
-                    ConvertTo-AdminOutputSinkFailureEnvelope -OriginalEnvelope $automationEnvelope -Message ("The requested JSON output sink failed: {0}" -f $_.Exception.Message)
+                    $outputFailureMessage = "The requested JSON output sink failed: {0}" -f $_.Exception.Message
+                    $outputFailureEnvelope = ConvertTo-AdminOutputSinkFailureEnvelope -OriginalEnvelope $automationEnvelope -Message $outputFailureMessage
+                    if ($Script:State.AuditContext -and $Script:State.AuditContext.Enabled) {
+                        try {
+                            $outputFailureEnvelope = Write-AdminAuditFailureRevision -Envelope $outputFailureEnvelope -Context $Script:State.AuditContext -Message $outputFailureMessage
+                        }
+                        catch {
+                            $outputFailureEnvelope = ConvertTo-AdminAuditSinkFailureEnvelope -OriginalEnvelope $outputFailureEnvelope -Context $Script:State.AuditContext -Message ("The audit sink also failed while recording the JSON output failure: {0}" -f $_.Exception.Message)
+                        }
+                    }
+                    $outputFailureEnvelope
                 }
                 else {
                     $failurePolicyDecision = if (Test-AdminParameterBound -Parameters $Script:InvocationParameters -Name 'PolicyPath') { ConvertTo-AdminPolicyDecision -Applied $true -Decision NotEvaluated -ReasonCode NotEvaluated -Reason 'The run failed before the policy profile could be evaluated.' } else { ConvertTo-AdminPolicyDecision -Decision NotApplied -ReasonCode NoPolicy -Reason 'No policy profile was supplied.' }
@@ -6326,6 +7244,9 @@ if (-not $Script:WasDotSourced) {
         'Action',
         'ListActions',
         'Preflight',
+        'AuditPath',
+        'AuditEventLog',
+        'AuditEventSource',
         'Local',
         'ComputerName',
         'ComputerListPath',

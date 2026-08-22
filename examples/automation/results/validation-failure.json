@@ -1,6 +1,6 @@
 {
-  "schemaVersion": "1.1",
-  "toolkitVersion": "2.2.0",
+  "schemaVersion": "1.2",
+  "toolkitVersion": "2.3.0",
   "runId": "33333333-3333-4333-8333-333333333333",
   "startedAtUtc": "2026-08-22T14:02:00.000Z",
   "finishedAtUtc": "2026-08-22T14:02:00.010Z",
@@ -13,6 +13,7 @@
   "targetMode": null,
   "transport": { "name": null, "authentication": null, "useSsl": false },
   "policy": { "applied": false, "schemaVersion": null, "profileName": null, "decision": "NotApplied", "reasonCode": "NoPolicy", "reason": "No policy profile was supplied." },
+  "audit": { "enabled": false, "schemaVersion": null, "path": null, "eventLog": false, "eventSource": null, "recordCount": 0, "complete": false, "hashAlgorithm": null, "canonicalization": null, "summaryHash": null },
   "status": "ValidationFailed",
   "outcome": "ValidationFailure",
   "exitCode": 2,

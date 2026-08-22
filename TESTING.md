@@ -2,18 +2,18 @@
 
 Windows Admin Toolkit uses a dependency-free test harness so the same checks run under Windows PowerShell 5.1 and PowerShell 7.x without a test-framework bootstrap.
 
-## Current 2.2.0 native validation
+## Current 2.3.0 native validation
 
-The 2.2.0 policy and least-privilege milestone was validated natively on August 22, 2026.
+The 2.3.0 enterprise auditability milestone was validated natively on August 22, 2026.
 
 | Environment | PowerShell | Checks | Result |
 | --- | --- | ---: | --- |
-| Windows 11 Pro 25H2, build 26200.9168 native host | Windows PowerShell 5.1.26100.9168 | 504 | Passed |
-| Windows 11 Pro 25H2, build 26200.9168 native host | PowerShell 7.6.4 | 504 | Passed |
+| Windows 11 Pro 25H2, build 26200.9168 native host | Windows PowerShell 5.1.26100.9168 | 570 | Passed |
+| Windows 11 Pro 25H2, build 26200.9168 native host | PowerShell 7.6.4 | 570 | Passed |
 
-Total completed 2.2.0 native checks: 1,008.
+Total completed 2.3.0 native checks: 1,140.
 
-PSScriptAnalyzer 1.25.0 completed with zero findings under the committed settings. The 2.2.0 working tree was not rerun in Windows containers because Docker Desktop 4.87.0 was running its Linux engine rather than a Windows container runtime. The container results below remain the exact historical record for release 2.0.0 and are not presented as 2.2.0 validation.
+PSScriptAnalyzer 1.25.0 completed with zero findings under the committed settings. The 2.3.0 working tree was not rerun in Windows containers because Docker Desktop 4.87.0 was running its Linux engine rather than a Windows container runtime. The container results below remain the exact historical record for release 2.0.0 and are not presented as 2.3.0 validation.
 
 ## Historical 2.0.0 release matrix
 
@@ -94,8 +94,15 @@ The test suite verifies:
 - Read-only retry behavior and zero retries for state-changing actions
 - `ShouldProcess` and clean no-connection `WhatIf` previews
 - Stable JSON schema, fields, ordering, arrays, UTC dates, normalized casing, and safe serialization depth
-- Result schema version 1.1 policy and preflight fields, plus eight committed result examples
+- Result schema version 1.2 policy, audit, preflight, and stable target-ID fields, plus nine committed result examples
 - Policy schema version 1.0, two committed profiles, stable action IDs, and absolute built-in ceilings
+- Audit schema version 1.0 with complete event structure, lifecycle types, target identities, policy decisions, normalized errors, and terminal summaries
+- Deterministic canonical JSON and cross-edition SHA-256 hash vectors
+- Stable case-insensitive target IDs across runs and distinct IDs for different targets
+- New-file-only JSON Lines output, UTF-8 without a byte-order mark, path collision rejection, 16 MiB bounds, and unexpected-mutation detection
+- Native successful audit lifecycles, sequence continuity, result correlation, and summary-hash verification
+- Visible audit-sink mutation failure with preserved target evidence and exit code 10
+- Post-execution JSON result-sink failure events and authoritative replacement audit summaries
 - Strict policy UTF-8 and size bounds, duplicate and case-conflicting JSON keys, unknown fields, unsupported values, and inconsistent rules
 - Policy action, transport, target-mode, exact-target, suffix-target, target-count, runtime, and action-input decisions
 - Policy precedence, explicit-value denial, omitted-value clamping, and deny-before-connect behavior

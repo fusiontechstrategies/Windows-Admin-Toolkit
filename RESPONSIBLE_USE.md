@@ -36,6 +36,7 @@ Custom CMD commands and PowerShell code run as supplied with the privileges of t
 - Capture the process exit code as well as the JSON result. Exit code 1 is partial success and must not be treated as complete success.
 - Treat a timeout as an unknown final target state. Verify the target before manually retrying any state-changing action.
 - Give every run a new JSON destination or use a separately reviewed retention process. The toolkit refuses to overwrite earlier evidence.
+- When audit evidence is required, give every run a new `.jsonl` `AuditPath` and verify `audit.complete`, the final record count, and the final summary hash before ingestion.
 - Keep explicit working directories and absolute output paths in scheduled tasks so execution does not depend on an account's profile directory.
 - Protect target lists and PowerShell files from unapproved modification. Both are security-sensitive inputs.
 - Apply a reviewed least-privilege `PolicyPath` where practical. Restrict who can edit the profile, and treat policy denial as an authorization result that should not be bypassed by rerunning without the profile.
@@ -52,5 +53,9 @@ Capability preflight reports observable readiness, not a guarantee that every la
 ## Reports and logs
 
 Reports may contain system inventory, user names, software lists, event details, or configuration data. Store, transmit, retain, and dispose of those reports according to your organization's requirements.
+
+Audit files deliberately omit raw action output and custom source, but they still contain target names, action IDs, policy decisions, timings, outcomes, and normalized errors. Restrict access, retain them under the applicable audit policy, and move completed files and hashes to an external protected system when immutability matters. The toolkit does not rotate or delete them.
+
+Treat `audit.complete: false`, a missing terminal summary, a sequence gap, a summary-hash mismatch, or exit code 10 as an incident requiring operator review. Never blindly retry a state-changing action solely because an audit or result sink failed after execution.
 
 The software is provided under the MIT License without warranty. Operational responsibility remains with the administrator using it.

@@ -140,11 +140,12 @@ exit `$LASTEXITCODE
     }
 }
 
-Test-ToolkitAssertion -Condition ($Script:ToolkitVersion -eq '2.2.0') -Name 'Version is 2.2.0'
+Test-ToolkitAssertion -Condition ($Script:ToolkitVersion -eq '2.3.0') -Name 'Version is 2.3.0'
 Test-ToolkitAssertion -Condition ($Script:ActionCatalog.Count -eq 20) -Name 'Action catalog contains 20 actions'
 Test-ToolkitAssertion -Condition ($Script:ActionScripts.Count -eq 20) -Name 'Action script registry contains 20 scripts'
-Test-ToolkitAssertion -Condition ($Script:AutomationSchemaVersion -eq '1.1') -Name 'Automation schema version is 1.1'
+Test-ToolkitAssertion -Condition ($Script:AutomationSchemaVersion -eq '1.2') -Name 'Automation schema version is 1.2'
 Test-ToolkitAssertion -Condition ($Script:PolicySchemaVersion -eq '1.0') -Name 'Policy schema version is 1.0'
+Test-ToolkitAssertion -Condition ($Script:AuditSchemaVersion -eq '1.0') -Name 'Audit schema version is 1.0'
 
 $expectedActionIds = @(
     'SystemInfo',
@@ -445,16 +446,28 @@ $dictionaryValue.Add([string]'1', 'string key')
 $dictionaryValue.Add([int]2, 'second integer key')
 $dictionaryJsonText = ConvertTo-Json -InputObject (ConvertTo-AdminJsonSafeValue -Value $dictionaryValue) -Compress
 Test-ToolkitAssertion -Condition ($dictionaryJsonText -ceq '{"1":"integer key","1#2":"string key","2":"second integer key"}') -Name 'JSON normalization preserves values for non-string and colliding dictionary keys'
+$canonicalJsonText = ConvertTo-AdminCanonicalJson -Value ([pscustomobject][ordered]@{ z = [string][char]0x00E9; a = @(2, $true, $null) })
+Test-ToolkitAssertion -Condition ($canonicalJsonText -ceq '{"a":[2,true,null],"z":"\u00e9"}') -Name 'Canonical JSON sorts object keys and ASCII-escapes Unicode deterministically'
+Test-ToolkitAssertion -Condition ((Get-AdminSha256Hex -Text $canonicalJsonText) -ceq '35ee15051460b0eb3e3160c5fa85d6ae111359af9c6d633345cfc5979ad285dc') -Name 'Canonical JSON SHA-256 is stable across supported editions'
+Test-ToolkitThrow -Action { ConvertTo-AdminCanonicalJson -Value ([double]::NaN) | Out-Null } -Name 'Canonical JSON rejects non-finite numbers'
+$stableTargetId = Get-AdminStableTargetId -ComputerName 'SERVER01'
+Test-ToolkitAssertion -Condition ($stableTargetId -ceq (Get-AdminStableTargetId -ComputerName 'server01') -and $stableTargetId -match '^t-[0-9a-f]{24}$') -Name 'Stable target identifiers are deterministic and case-insensitive across runs'
+Test-ToolkitAssertion -Condition ($stableTargetId -cne (Get-AdminStableTargetId -ComputerName 'SERVER02')) -Name 'Stable target identifiers distinguish canonical target names'
 
 $automationSourceText = Get-Content -LiteralPath $toolkitPath -Raw
 $automationTokens = $null
 $automationParseErrors = $null
 $automationSourceAst = [System.Management.Automation.Language.Parser]::ParseInput($automationSourceText, [ref]$automationTokens, [ref]$automationParseErrors)
 $automationFunctionAsts = @(
-    $automationSourceAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -in @('Invoke-AdminAutomation', 'Resolve-AdminAutomationRequest') }, $true)
+    $automationSourceAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -in @('Invoke-AdminAutomation', 'Invoke-AdminAutomationCore', 'Resolve-AdminAutomationRequest', 'Write-AdminAutomationAudit') }, $true)
 )
 $automationFunctionText = ($automationFunctionAsts | ForEach-Object { $_.Extent.Text }) -join [Environment]::NewLine
 Test-ToolkitAssertion -Condition ($automationFunctionText -notmatch '\bRead-Host\b|\bGet-Credential\b|\bShow-AdminMenu\b|\bSelect-AdminTargetContext\b|\bExport-AdminResult\b') -Name 'Automation implementation does not call interactive input or export paths'
+$auditFunctionAsts = @(
+    $automationSourceAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -in @('Write-AdminAuditExecutionStarted', 'Write-AdminAutomationAudit', 'Get-AdminAuditRunSummary', 'ConvertTo-AdminAuditEvent') }, $true)
+)
+$auditFunctionText = ($auditFunctionAsts | ForEach-Object { $_.Extent.Text }) -join [Environment]::NewLine
+Test-ToolkitAssertion -Condition ($auditFunctionText -notmatch '(?i)\.data\b|CommandText|PowerShellText|Credential|SecureString|ScriptBlock') -Name 'Audit implementation cannot serialize raw action data, custom source, or credentials'
 
 Test-ToolkitAssertion -Condition (Test-AdminHostname -ComputerName 'SERVER01') -Name 'Accepts a NetBIOS-style computer name'
 Test-ToolkitAssertion -Condition (Test-AdminHostname -ComputerName 'server-01.example.com') -Name 'Accepts a valid FQDN'
@@ -512,6 +525,7 @@ Test-ToolkitAssertion -Condition ($sourceText -notmatch 'GetNetworkCredential\(\
 Test-ToolkitAssertion -Condition ($sourceText -notmatch '(?i)ExecutionPolicy\s+Bypass') -Name 'Does not bypass execution policy'
 Test-ToolkitAssertion -Condition ($sourceText -notmatch '[''"]-p[''"]') -Name 'Does not pass a PsExec password switch'
 Test-ToolkitAssertion -Condition ($sourceText -notmatch '(?i)\bEnable-PSRemoting\b|\bSet-WSManQuickConfig\b|\bSet-ExecutionPolicy\b|\bNew-NetFirewallRule\b|\bSet-NetFirewallProfile\b|winrm\s+quickconfig|netsh\s+advfirewall|WSMan:\\localhost\\Client\\TrustedHosts') -Name 'Does not automatically alter remoting, firewall, TrustedHosts, or execution policy settings'
+Test-ToolkitAssertion -Condition ($sourceText -notmatch '(?i)\bNew-EventLog\b|\bCreateEventSource\b') -Name 'Does not automatically create or modify a Windows Event Log source'
 Test-ToolkitAssertion -Condition ($sourceText.IndexOf([char]0x2014) -lt 0) -Name 'Contains no em dashes'
 Test-ToolkitAssertion -Condition ($sourceText -notmatch '[^\x00-\x7F]') -Name 'Application script is ASCII-compatible'
 
@@ -616,6 +630,27 @@ try {
     $leftoverOutputProbes = @(Get-ChildItem -LiteralPath $resolvedTemporaryRoot -Filter '.admin-json-probe-*.tmp' -File -ErrorAction Stop)
     Test-ToolkitAssertion -Condition ($resolvedOutputProbePath -eq $outputProbePath -and -not (Test-Path -LiteralPath $outputProbePath) -and $leftoverOutputProbes.Count -eq 0) -Name 'Automation output preflight verifies write access without leaving a file'
     Test-ToolkitThrow -Action { Resolve-AdminAutomationOutputPath -LiteralPath (Join-Path $resolvedTemporaryRoot 'CON.report.json') | Out-Null } -Name 'Automation output preflight rejects a Windows reserved file name'
+
+    $auditProbePath = Join-Path $resolvedTemporaryRoot 'audit-probe.jsonl'
+    $resolvedAuditProbePath = Resolve-AdminAuditPath -LiteralPath $auditProbePath -CollisionPaths @($outputProbePath)
+    $auditProbeContext = Initialize-AdminAuditContext -ResolvedAuditPath $resolvedAuditProbePath
+    $auditProbeRunId = [guid]'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+    $auditProbeEvent = ConvertTo-AdminAuditEvent -RunId $auditProbeRunId -Sequence 1 -EventType run.started -TimestampUtc ([datetime]'2026-08-22T12:00:00Z') -Stage Initialization -Outcome Started
+    [void](Write-AdminAuditRecord -Context $auditProbeContext -Event $auditProbeEvent)
+    $auditProbeBytes = [System.IO.File]::ReadAllBytes($auditProbePath)
+    $auditProbeRecord = [System.IO.File]::ReadAllText($auditProbePath) | ConvertFrom-Json -ErrorAction Stop
+    Test-ToolkitAssertion -Condition ($auditProbeContext.RecordCount -eq 1 -and $auditProbeRecord.eventId -ceq 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb:000001') -Name 'JSON Lines audit writer emits a sequenced versioned record'
+    Test-ToolkitAssertion -Condition ($auditProbeBytes.Length -gt 0 -and $auditProbeBytes[0] -eq [byte][char]'{' -and -not ($auditProbeBytes.Length -ge 3 -and $auditProbeBytes[0] -eq 0xEF -and $auditProbeBytes[1] -eq 0xBB -and $auditProbeBytes[2] -eq 0xBF)) -Name 'Audit records use UTF-8 without a byte-order mark'
+    Test-ToolkitThrow -Action { Resolve-AdminAuditPath -LiteralPath $auditProbePath | Out-Null } -Name 'Audit path resolution refuses an existing file'
+    Test-ToolkitThrow -Action { Resolve-AdminAuditPath -LiteralPath '-' | Out-Null } -Name 'Audit path resolution refuses stdout'
+    Test-ToolkitThrow -Action { Resolve-AdminAuditPath -LiteralPath (Join-Path $resolvedTemporaryRoot 'audit.txt') | Out-Null } -Name 'Audit path resolution requires the JSON Lines extension'
+    Test-ToolkitThrow -Action { Resolve-AdminAuditPath -LiteralPath (Join-Path $resolvedTemporaryRoot 'collision.jsonl') -CollisionPaths @((Join-Path $resolvedTemporaryRoot 'collision.jsonl')) | Out-Null } -Name 'Audit path resolution rejects output-sink collisions'
+    [System.IO.File]::AppendAllText($auditProbePath, "external`n", (New-Object System.Text.UTF8Encoding($false)))
+    $secondAuditProbeEvent = ConvertTo-AdminAuditEvent -RunId $auditProbeRunId -Sequence 2 -EventType request.resolved -TimestampUtc ([datetime]'2026-08-22T12:00:00Z') -Stage Request
+    Test-ToolkitThrow -Action { Write-AdminAuditRecord -Context $auditProbeContext -Event $secondAuditProbeEvent | Out-Null } -Name 'Audit writer detects unexpected file mutation during a run'
+    $auditProbeStream = [System.IO.File]::OpenWrite($auditProbePath)
+    try { $auditProbeStream.SetLength([int64]$auditProbeContext.BytesWritten) } finally { $auditProbeStream.Dispose() }
+    Test-ToolkitThrow -Action { Write-AdminAuditRecord -Context $auditProbeContext -Event $secondAuditProbeEvent | Out-Null } -Name 'Audit writer permanently latches a per-run sink failure'
 
     $computerFile = Join-Path $resolvedTemporaryRoot 'computers.txt'
     $encoding = New-Object System.Text.UTF8Encoding($false)
@@ -913,13 +948,15 @@ try {
 
     $schemaPath = Join-Path $projectRoot 'schemas\automation-result-v1.schema.json'
     $schema = Get-Content -LiteralPath $schemaPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-    Test-ToolkitAssertion -Condition ($schema.properties.schemaVersion.const -eq '1.1') -Name 'Committed JSON schema describes schema version 1.1'
-    Test-ToolkitAssertion -Condition (@($schema.required).Count -eq 24) -Name 'Committed JSON schema requires every stable root field'
+    Test-ToolkitAssertion -Condition ($schema.properties.schemaVersion.const -eq '1.2') -Name 'Committed JSON schema describes schema version 1.2'
+    Test-ToolkitAssertion -Condition (@($schema.required).Count -eq 25) -Name 'Committed JSON schema requires every stable root field'
     Test-ToolkitAssertion -Condition (@($schema.properties.exitCode.enum).Count -eq 7) -Name 'Committed JSON schema contains every stable exit code'
     Test-ToolkitAssertion -Condition (@($schema.allOf).Count -eq 7) -Name 'Committed JSON schema locks every outcome to its stable status and exit code'
     Test-ToolkitAssertion -Condition (@($schema.'$defs'.stableActionId.enum).Count -eq 20) -Name 'Committed JSON schema contains every stable action identifier'
     Test-ToolkitAssertion -Condition (@($schema.'$defs'.policyDecision.required).Count -eq 6) -Name 'Committed JSON schema requires a complete policy decision'
     Test-ToolkitAssertion -Condition (@($schema.'$defs'.actionDescriptor.required | Where-Object { $_ -in @('policyDecision', 'policyReasonCode') }).Count -eq 2) -Name 'Action catalog schema includes policy annotations'
+    Test-ToolkitAssertion -Condition (@($schema.'$defs'.auditMetadata.required).Count -eq 10) -Name 'Automation schema requires complete audit metadata'
+    Test-ToolkitAssertion -Condition (@($schema.'$defs'.targetResult.required | Where-Object { $_ -eq 'targetId' }).Count -eq 1) -Name 'Automation schema requires a stable per-target identifier'
 
     $policySchemaPath = Join-Path $projectRoot 'schemas\policy-profile-v1.schema.json'
     $policySchema = Get-Content -LiteralPath $policySchemaPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
@@ -928,11 +965,18 @@ try {
     Test-ToolkitAssertion -Condition (@($policySchema.'$defs'.actionId.enum).Count -eq 20) -Name 'Committed policy schema contains every stable action identifier'
     Test-ToolkitAssertion -Condition ($policySchema.'$defs'.limits.properties.maxTargets.maximum -eq 500 -and $policySchema.'$defs'.limits.properties.maxConcurrentJobs.maximum -eq 32 -and $policySchema.'$defs'.limits.properties.maxRetryCount.maximum -eq 3) -Name 'Policy schema cannot relax built-in execution ceilings'
 
+    $auditSchemaPath = Join-Path $projectRoot 'schemas\audit-event-v1.schema.json'
+    $auditSchema = Get-Content -LiteralPath $auditSchemaPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    Test-ToolkitAssertion -Condition ($auditSchema.properties.schemaVersion.const -eq '1.0') -Name 'Committed audit schema describes schema version 1.0'
+    Test-ToolkitAssertion -Condition (@($auditSchema.properties.eventType.enum).Count -eq 7) -Name 'Committed audit schema enumerates every lifecycle event type'
+    Test-ToolkitAssertion -Condition ($auditSchema.'$defs'.summary.properties.summaryHash.pattern -ceq '^[0-9a-f]{64}$') -Name 'Committed audit schema requires a lowercase SHA-256 summary hash'
+
     $exampleDirectory = Join-Path $projectRoot 'examples\automation\results'
     $exampleFiles = @(Get-ChildItem -LiteralPath $exampleDirectory -Filter '*.json' -File | Sort-Object -Property Name)
-    Test-ToolkitAssertion -Condition ($exampleFiles.Count -eq 8) -Name 'Repository includes eight documented automation and policy outcome examples'
-    $requiredRootFields = @('schemaVersion', 'toolkitVersion', 'runId', 'startedAtUtc', 'finishedAtUtc', 'durationMs', 'actionId', 'actionName', 'readOnly', 'stateChanging', 'preflight', 'targetMode', 'transport', 'policy', 'status', 'outcome', 'exitCode', 'targetCount', 'recordCount', 'targets', 'warnings', 'errors', 'reportPaths', 'actions')
+    Test-ToolkitAssertion -Condition ($exampleFiles.Count -eq 9) -Name 'Repository includes nine documented automation, policy, and audit outcome examples'
+    $requiredRootFields = @('schemaVersion', 'toolkitVersion', 'runId', 'startedAtUtc', 'finishedAtUtc', 'durationMs', 'actionId', 'actionName', 'readOnly', 'stateChanging', 'preflight', 'targetMode', 'transport', 'policy', 'audit', 'status', 'outcome', 'exitCode', 'targetCount', 'recordCount', 'targets', 'warnings', 'errors', 'reportPaths', 'actions')
     $expectedExampleOutcomes = @{
+        'audited-success'      = 'CompleteSuccess'
         'execution-failure'  = 'ExecutionFailure'
         'partial'            = 'PartialSuccess'
         'policy-denied'      = 'AuthorizationFailure'
@@ -948,11 +992,25 @@ try {
         Test-ToolkitAssertion -Condition (@($requiredRootFields | Where-Object { $_ -notin $presentFields }).Count -eq 0) -Name "Example $($exampleFile.Name) contains all stable root fields"
         Test-ToolkitAssertion -Condition ($example.outcome -eq $expectedExampleOutcomes[$exampleFile.BaseName]) -Name "Example $($exampleFile.Name) uses its documented outcome"
         Test-ToolkitAssertion -Condition (@($example.targets).Count -le [int]$example.targetCount) -Name "Example $($exampleFile.Name) preserves bounded target arrays"
-        Test-ToolkitAssertion -Condition ($example.schemaVersion -ceq '1.1' -and $example.toolkitVersion -ceq '2.2.0') -Name "Example $($exampleFile.Name) uses the current public versions"
+        Test-ToolkitAssertion -Condition ($example.schemaVersion -ceq '1.2' -and $example.toolkitVersion -ceq '2.3.0') -Name "Example $($exampleFile.Name) uses the current public versions"
         Test-ToolkitAssertion -Condition (@($example.policy.PSObject.Properties.Name | Where-Object { $_ -in @('applied', 'schemaVersion', 'profileName', 'decision', 'reasonCode', 'reason') }).Count -eq 6) -Name "Example $($exampleFile.Name) contains a complete policy decision"
+        Test-ToolkitAssertion -Condition (@($example.audit.PSObject.Properties.Name).Count -eq 10) -Name "Example $($exampleFile.Name) contains complete audit metadata"
+        Test-ToolkitAssertion -Condition (@($example.targets | Where-Object { $_.targetId -notmatch '^t-[0-9a-f]{24}$' }).Count -eq 0) -Name "Example $($exampleFile.Name) uses valid stable target identifiers"
     }
     $preflightExample = Get-Content -LiteralPath (Join-Path $exampleDirectory 'preflight.json') -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
     Test-ToolkitAssertion -Condition ([bool]$preflightExample.preflight -and $preflightExample.targets[0].data[0].RequestedActionId -ceq 'SystemInfo') -Name 'Preflight example identifies the assessed action without executing it'
+    $auditedExample = Get-Content -LiteralPath (Join-Path $exampleDirectory 'audited-success.json') -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    $auditExamplePath = Join-Path $projectRoot 'examples\audit\audited-success.jsonl'
+    $auditExampleLines = @([System.IO.File]::ReadAllLines($auditExamplePath, (New-Object System.Text.UTF8Encoding($false, $true))))
+    $auditExampleRecords = @($auditExampleLines | ForEach-Object { ConvertFrom-Json -InputObject $_ -ErrorAction Stop })
+    Test-ToolkitAssertion -Condition ($auditExampleRecords.Count -eq 6 -and (($auditExampleRecords.sequence -join '|') -ceq '1|2|3|4|5|6')) -Name 'Audit example contains a contiguous deterministic event sequence'
+    Test-ToolkitAssertion -Condition (($auditExampleRecords.eventType -join '|') -ceq 'run.started|request.resolved|policy.decision|target.started|target.completed|run.summary') -Name 'Audit example covers the complete successful lifecycle'
+    Test-ToolkitAssertion -Condition (@($auditExampleRecords | Where-Object { $_.runId -cne $auditedExample.runId }).Count -eq 0 -and $auditExampleRecords[-1].summary.summaryHash -ceq $auditedExample.audit.summaryHash) -Name 'Audit example correlates every event and summary hash with its result envelope'
+    $auditHashContext = [pscustomobject]@{ RecordCount = 5 }
+    $recomputedAuditSummary = Get-AdminAuditRunSummary -Envelope $auditedExample -Context $auditHashContext
+    Test-ToolkitAssertion -Condition ($recomputedAuditSummary.SummaryHash -ceq $auditedExample.audit.summaryHash) -Name 'Documented audit summary hash recomputes from the canonical result summary'
+    $auditExampleText = [System.IO.File]::ReadAllText($auditExamplePath)
+    Test-ToolkitAssertion -Condition ($auditExampleText -notmatch 'Credential|SecureString|ScriptBlock|CommandText|PowerShellText|rawOutput') -Name 'Audit example excludes credentials, custom code, and raw output fields'
 
     $currentEnginePath = (Get-Process -Id $PID -ErrorAction Stop).Path
     $automationLogPath = Join-Path $resolvedTemporaryRoot 'automation-tests.log'
@@ -966,12 +1024,49 @@ try {
     try { $successEnvelope = ConvertFrom-Json -InputObject $successJsonText -ErrorAction Stop } catch { Write-Verbose $_.Exception.Message }
     Test-ToolkitAssertion -Condition ($successProcess.ExitCode -eq 0) -Name 'Automation child process returns exit code 0 for complete success'
     Test-ToolkitAssertion -Condition ($null -ne $successEnvelope -and $successJsonText.StartsWith('{') -and $successJsonText.EndsWith('}')) -Name 'Automation stdout contains exactly one parseable JSON document'
-    Test-ToolkitAssertion -Condition ($successJsonText -match '^\{"schemaVersion":"1\.1","toolkitVersion":"2\.2\.0"') -Name 'Automation JSON root field ordering is deterministic'
+    Test-ToolkitAssertion -Condition ($successJsonText -match '^\{"schemaVersion":"1\.2","toolkitVersion":"2\.3\.0"') -Name 'Automation JSON root field ordering is deterministic'
     Test-ToolkitAssertion -Condition ($successEnvelope.outcome -eq 'CompleteSuccess' -and $successEnvelope.exitCode -eq 0) -Name 'Automation success envelope agrees with the process exit code'
     Test-ToolkitAssertion -Condition (@($successEnvelope.targets).Count -eq 1 -and @($successEnvelope.targets[0].data).Count -eq 1) -Name 'Automation success preserves target and data arrays for one item'
     Test-ToolkitAssertion -Condition (-not [bool]$successEnvelope.preflight -and $successEnvelope.policy.decision -ceq 'NotApplied' -and $successEnvelope.policy.reasonCode -ceq 'NoPolicy') -Name 'Automation success reports preflight and no-policy state explicitly'
+    Test-ToolkitAssertion -Condition (-not $successEnvelope.audit.enabled -and -not $successEnvelope.audit.complete -and $successEnvelope.audit.recordCount -eq 0) -Name 'Automation leaves enterprise audit sinks disabled unless explicitly requested'
+    Test-ToolkitAssertion -Condition ($successEnvelope.targets[0].targetId -match '^t-[0-9a-f]{24}$') -Name 'Automation success emits a stable per-target identifier'
     Test-ToolkitAssertion -Condition ($successJsonText -match '"startedAtUtc":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z"') -Name 'Automation success uses a normalized UTC start timestamp'
     Test-ToolkitAssertion -Condition ($successJsonText -notmatch 'PSComputerName|RunspaceId|PSShowComputerName|Credential|SecureString|ScriptBlock') -Name 'Automation success excludes sensitive and remoting metadata'
+
+    $nativeAuditPath = Join-Path $resolvedTemporaryRoot 'native-success-audit.jsonl'
+    $escapedNativeAuditPath = $nativeAuditPath.Replace("'", "''")
+    $nativeAuditProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -Action SystemInfo -Local -AuditPath '$escapedNativeAuditPath' -LogFile '$escapedAutomationLogPath'"
+    $nativeAuditEnvelope = ConvertFrom-Json -InputObject $nativeAuditProcess.StdOut.Trim() -ErrorAction Stop
+    $nativeAuditLines = @([System.IO.File]::ReadAllLines($nativeAuditPath, (New-Object System.Text.UTF8Encoding($false, $true))))
+    $nativeAuditRecords = @($nativeAuditLines | ForEach-Object { ConvertFrom-Json -InputObject $_ -ErrorAction Stop })
+    Test-ToolkitAssertion -Condition ($nativeAuditProcess.ExitCode -eq 0 -and $nativeAuditEnvelope.audit.enabled -and $nativeAuditEnvelope.audit.complete -and $nativeAuditEnvelope.audit.recordCount -eq 6) -Name 'Native automation completes an explicitly requested per-run audit sink'
+    Test-ToolkitAssertion -Condition ($nativeAuditRecords.Count -eq 6 -and $nativeAuditRecords[0].eventType -ceq 'run.started' -and $nativeAuditRecords[-1].eventType -ceq 'run.summary') -Name 'Native audit file records the complete run lifecycle as JSON Lines'
+    Test-ToolkitAssertion -Condition ($nativeAuditRecords[3].target.targetId -ceq $nativeAuditEnvelope.targets[0].targetId -and $nativeAuditRecords[4].target.targetId -ceq $nativeAuditEnvelope.targets[0].targetId) -Name 'Native audit lifecycle uses the result envelope target identifier consistently'
+    $nativeHashContext = [pscustomobject]@{ RecordCount = $nativeAuditEnvelope.audit.recordCount - 1 }
+    $nativeAuditSummary = Get-AdminAuditRunSummary -Envelope $nativeAuditEnvelope -Context $nativeHashContext
+    Test-ToolkitAssertion -Condition ($nativeAuditSummary.SummaryHash -ceq $nativeAuditEnvelope.audit.summaryHash -and $nativeAuditRecords[-1].summary.summaryHash -ceq $nativeAuditEnvelope.audit.summaryHash) -Name 'Native audit summary hash verifies against canonical result data'
+    $nativeAuditBytes = [System.IO.File]::ReadAllBytes($nativeAuditPath)
+    Test-ToolkitAssertion -Condition ($nativeAuditBytes[0] -eq [byte][char]'{' -and -not ($nativeAuditBytes.Length -ge 3 -and $nativeAuditBytes[0] -eq 0xEF -and $nativeAuditBytes[1] -eq 0xBB -and $nativeAuditBytes[2] -eq 0xBF)) -Name 'Native audit file uses interoperable UTF-8 without a byte-order mark'
+
+    $auditSourceWithoutSinkProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText '-Automation -Action SystemInfo -Local -AuditEventSource WindowsAdminToolkit'
+    $auditSourceWithoutSinkEnvelope = ConvertFrom-Json -InputObject $auditSourceWithoutSinkProcess.StdOut.Trim() -ErrorAction Stop
+    Test-ToolkitAssertion -Condition ($auditSourceWithoutSinkProcess.ExitCode -eq 2 -and $auditSourceWithoutSinkEnvelope.errors[0].message -match 'requires -AuditEventLog') -Name 'Automation rejects an event source unless Event Log auditing is explicitly enabled'
+
+    $auditHashBeforeReuse = (Get-FileHash -LiteralPath $nativeAuditPath -Algorithm SHA256).Hash
+    $auditReuseProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -Action SystemInfo -Local -AuditPath '$escapedNativeAuditPath' -LogFile '$escapedAutomationLogPath'"
+    $auditReuseEnvelope = ConvertFrom-Json -InputObject $auditReuseProcess.StdOut.Trim() -ErrorAction Stop
+    $auditHashAfterReuse = (Get-FileHash -LiteralPath $nativeAuditPath -Algorithm SHA256).Hash
+    Test-ToolkitAssertion -Condition ($auditReuseProcess.ExitCode -eq 2 -and $auditReuseEnvelope.outcome -ceq 'ValidationFailure' -and $auditHashBeforeReuse -eq $auditHashAfterReuse) -Name 'Automation refuses to append to or overwrite an existing audit file'
+
+    $mutatedAuditPath = Join-Path $resolvedTemporaryRoot 'mutated-during-run.jsonl'
+    $escapedMutatedAuditPath = $mutatedAuditPath.Replace("'", "''")
+    $mutateAuditCode = "[System.IO.File]::AppendAllText('$escapedMutatedAuditPath','external mutation')"
+    $escapedMutateAuditCode = $mutateAuditCode.Replace("'", "''")
+    $mutatedAuditProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -Action CustomPowerShell -Local -PowerShellText '$escapedMutateAuditCode' -ConfirmationText 'RUN SCRIPT' -AuditPath '$escapedMutatedAuditPath' -LogFile '$escapedAutomationLogPath'"
+    $mutatedAuditEnvelope = ConvertFrom-Json -InputObject $mutatedAuditProcess.StdOut.Trim() -ErrorAction Stop
+    Test-ToolkitAssertion -Condition ($mutatedAuditProcess.ExitCode -eq 10 -and $mutatedAuditEnvelope.outcome -ceq 'InternalFailure' -and -not $mutatedAuditEnvelope.audit.complete) -Name 'Audit sink mutation is visible as stable internal failure exit code 10'
+    Test-ToolkitAssertion -Condition (@($mutatedAuditEnvelope.targets).Count -eq 1 -and $mutatedAuditEnvelope.targets[0].status -ceq 'Success' -and $mutatedAuditEnvelope.warnings[-1] -match 'Review preserved target evidence') -Name 'Audit failure preserves completed target evidence and warns against blind retry'
+    Test-ToolkitAssertion -Condition (($mutatedAuditEnvelope | ConvertTo-Json -Compress -Depth 20) -notmatch [regex]::Escape($mutateAuditCode)) -Name 'Audit failure result excludes operator-supplied custom source text'
 
     $fileModeStdoutProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -Action SystemInfo -Local -JsonOutputPath STDOUT -LogFile `"$automationLogPath`"" -FileMode
     $fileModeStdoutEnvelope = ConvertFrom-Json -InputObject $fileModeStdoutProcess.StdOut.Trim() -ErrorAction Stop
@@ -997,6 +1092,14 @@ try {
     Test-ToolkitAssertion -Condition ($policyDeniedProcess.ExitCode -eq 3 -and $policyDeniedEnvelope.outcome -ceq 'AuthorizationFailure' -and $policyDeniedEnvelope.policy.decision -ceq 'Denied' -and $policyDeniedEnvelope.policy.reasonCode -ceq 'ActionDenied') -Name 'Native policy denial returns stable authorization exit code 3'
     Test-ToolkitAssertion -Condition ($policyDeniedEnvelope.targetCount -eq 1 -and @($policyDeniedEnvelope.targets).Count -eq 0) -Name 'Policy denial occurs before any target result is created'
     Test-ToolkitAssertion -Condition ((Get-Content -LiteralPath $automationLogPath -Raw -ErrorAction Stop) -match 'policy decision: Denied \(ActionDenied\)') -Name 'Policy denial writes its decision and reason code to the safe log'
+
+    $policyDeniedAuditPath = Join-Path $resolvedTemporaryRoot 'policy-denied-audit.jsonl'
+    $escapedPolicyDeniedAuditPath = $policyDeniedAuditPath.Replace("'", "''")
+    $policyDeniedAuditProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -Action WindowsUpdate -Local -WhatIf -PolicyPath '$escapedReadOnlyPolicyPath' -AuditPath '$escapedPolicyDeniedAuditPath' -LogFile '$escapedAutomationLogPath'"
+    $policyDeniedAuditEnvelope = ConvertFrom-Json -InputObject $policyDeniedAuditProcess.StdOut.Trim() -ErrorAction Stop
+    $policyDeniedAuditRecords = @([System.IO.File]::ReadAllLines($policyDeniedAuditPath, (New-Object System.Text.UTF8Encoding($false, $true))) | ForEach-Object { ConvertFrom-Json -InputObject $_ -ErrorAction Stop })
+    Test-ToolkitAssertion -Condition ($policyDeniedAuditProcess.ExitCode -eq 3 -and $policyDeniedAuditEnvelope.audit.complete -and $policyDeniedAuditRecords.Count -eq 4 -and $policyDeniedAuditRecords[2].eventType -ceq 'policy.decision' -and $policyDeniedAuditRecords[2].policy.decision -ceq 'Denied' -and $policyDeniedAuditRecords[2].policy.reasonCode -ceq 'ActionDenied') -Name 'Audit preserves an explicit denied policy decision'
+    Test-ToolkitAssertion -Condition (@($policyDeniedAuditRecords | Where-Object { $_.eventType -like 'target.*' }).Count -eq 0 -and $policyDeniedAuditRecords[-1].summary.outcome -ceq 'AuthorizationFailure') -Name 'Audited policy denial completes before any target lifecycle begins'
 
     $escapedInvalidPolicyResolutionPath = (Join-Path $resolvedTemporaryRoot 'invalid-policy-resolution.json').Replace("'", "''")
     $invalidPolicyProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -Action SystemInfo -Local -PolicyPath '$escapedInvalidPolicyResolutionPath' -LogFile '$escapedAutomationLogPath'"
@@ -1139,6 +1242,20 @@ try {
     $internalEnvelope = ConvertFrom-Json -InputObject $internalProcess.StdErr.Trim() -ErrorAction Stop
     Test-ToolkitAssertion -Condition ($internalProcess.ExitCode -eq 10 -and $internalEnvelope.outcome -eq 'InternalFailure' -and [string]::IsNullOrWhiteSpace($internalProcess.StdOut)) -Name 'Post-execution output sink failure returns stable process exit code 10 on stderr'
     Test-ToolkitAssertion -Condition ($internalEnvelope.actionId -eq 'CustomPowerShell' -and $internalEnvelope.targetCount -eq 1 -and @($internalEnvelope.targets).Count -eq 1 -and $internalEnvelope.targets[0].status -eq 'Success' -and @($internalEnvelope.reportPaths).Count -eq 0) -Name 'Output sink failure preserves completed target evidence without claiming a report path'
+
+    $auditedCollisionPath = Join-Path $resolvedTemporaryRoot 'audited-internal-collision.json'
+    $auditedOutputFailurePath = Join-Path $resolvedTemporaryRoot 'audited-output-failure.jsonl'
+    $escapedAuditedCollisionPath = $auditedCollisionPath.Replace("'", "''")
+    $escapedAuditedOutputFailurePath = $auditedOutputFailurePath.Replace("'", "''")
+    $auditedInternalInvocation = "-Automation -Action CustomPowerShell -Local -PowerShellText `"[void][System.IO.Directory]::CreateDirectory('$escapedAuditedCollisionPath')`" -ConfirmationText 'RUN SCRIPT' -JsonOutputPath '$escapedAuditedCollisionPath' -AuditPath '$escapedAuditedOutputFailurePath' -LogFile '$escapedAutomationLogPath'"
+    $auditedInternalProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText $auditedInternalInvocation
+    $auditedInternalEnvelope = ConvertFrom-Json -InputObject $auditedInternalProcess.StdErr.Trim() -ErrorAction Stop
+    $auditedOutputFailureRecords = @([System.IO.File]::ReadAllLines($auditedOutputFailurePath, (New-Object System.Text.UTF8Encoding($false, $true))) | ForEach-Object { ConvertFrom-Json -InputObject $_ -ErrorAction Stop })
+    Test-ToolkitAssertion -Condition ($auditedInternalProcess.ExitCode -eq 10 -and $auditedInternalEnvelope.audit.complete -and $auditedInternalEnvelope.audit.recordCount -eq 8) -Name 'Configured audit records a post-execution JSON output failure before returning exit code 10'
+    Test-ToolkitAssertion -Condition ($auditedOutputFailureRecords[-2].eventType -ceq 'audit.failure' -and $auditedOutputFailureRecords[-1].eventType -ceq 'run.summary' -and $auditedOutputFailureRecords[-1].summary.outcome -ceq 'InternalFailure') -Name 'Output failure appends an explicit audit failure and authoritative replacement summary'
+    $auditedOutputHashContext = [pscustomobject]@{ RecordCount = 7 }
+    $auditedOutputSummary = Get-AdminAuditRunSummary -Envelope $auditedInternalEnvelope -Context $auditedOutputHashContext
+    Test-ToolkitAssertion -Condition ($auditedOutputSummary.SummaryHash -ceq $auditedInternalEnvelope.audit.summaryHash -and $auditedOutputFailureRecords[-1].summary.summaryHash -ceq $auditedInternalEnvelope.audit.summaryHash) -Name 'Replacement audit summary hash verifies the final output-failure envelope'
 
     Test-ToolkitThrow -Action { Resolve-AdminPsExec -Path $toolkitPath | Out-Null } -Name 'PsExec validation rejects a non-PsExec executable'
     $localPsExec = Join-Path $projectRoot 'PsExec64.exe'

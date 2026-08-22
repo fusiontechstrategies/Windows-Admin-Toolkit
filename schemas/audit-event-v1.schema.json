@@ -1,0 +1,206 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/fusiontechstrategies/Windows-Admin-Toolkit/schemas/audit-event-v1.schema.json",
+  "title": "Windows Admin Toolkit audit event",
+  "description": "Version 1.0 JSON Lines audit event for Windows Admin Toolkit 2.3.0.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "eventId",
+    "sequence",
+    "eventType",
+    "timestampUtc",
+    "runId",
+    "toolkitVersion",
+    "stage",
+    "actionId",
+    "target",
+    "outcome",
+    "durationMs",
+    "policy",
+    "error",
+    "summary"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "1.0" },
+    "eventId": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}:[0-9]{6}$"
+    },
+    "sequence": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+    "eventType": {
+      "type": "string",
+      "enum": [
+        "run.started",
+        "request.resolved",
+        "policy.decision",
+        "target.started",
+        "target.completed",
+        "run.summary",
+        "audit.failure"
+      ]
+    },
+    "timestampUtc": { "$ref": "#/$defs/utcTimestamp" },
+    "runId": { "type": "string", "format": "uuid" },
+    "toolkitVersion": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "stage": {
+      "type": "string",
+      "enum": ["Initialization", "Request", "Authorization", "Connectivity", "Execution", "Summary", "Audit"]
+    },
+    "actionId": {
+      "anyOf": [
+        { "$ref": "#/$defs/stableActionId" },
+        { "type": "null" }
+      ]
+    },
+    "target": {
+      "anyOf": [
+        { "$ref": "#/$defs/targetIdentity" },
+        { "type": "null" }
+      ]
+    },
+    "outcome": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "durationMs": { "type": ["integer", "null"], "minimum": 0 },
+    "policy": {
+      "anyOf": [
+        { "$ref": "#/$defs/policyDecision" },
+        { "type": "null" }
+      ]
+    },
+    "error": {
+      "anyOf": [
+        { "$ref": "#/$defs/error" },
+        { "type": "null" }
+      ]
+    },
+    "summary": {
+      "anyOf": [
+        { "$ref": "#/$defs/summary" },
+        { "type": "null" }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "eventType": { "enum": ["target.started", "target.completed"] } }, "required": ["eventType"] },
+      "then": { "properties": { "target": { "$ref": "#/$defs/targetIdentity" } } }
+    },
+    {
+      "if": { "properties": { "eventType": { "const": "policy.decision" } }, "required": ["eventType"] },
+      "then": { "properties": { "policy": { "$ref": "#/$defs/policyDecision" } } }
+    },
+    {
+      "if": { "properties": { "eventType": { "const": "run.summary" } }, "required": ["eventType"] },
+      "then": { "properties": { "summary": { "$ref": "#/$defs/summary" } } }
+    }
+  ],
+  "$defs": {
+    "utcTimestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    },
+    "stableActionId": {
+      "type": "string",
+      "enum": [
+        "SystemInfo",
+        "DiskSpace",
+        "HardwareInfo",
+        "NetworkConfig",
+        "LoggedOnUsers",
+        "RunningProcesses",
+        "SoftwareInventory",
+        "LicenseStatus",
+        "WindowsUpdate",
+        "ScheduleReboot",
+        "PendingReboot",
+        "ServiceManagement",
+        "TerminateProcess",
+        "ClearTempFiles",
+        "ScheduledTasks",
+        "FirewallStatus",
+        "EventLogQuery",
+        "RegistryRead",
+        "CustomCommand",
+        "CustomPowerShell"
+      ]
+    },
+    "targetIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["targetId", "index", "name"],
+      "properties": {
+        "targetId": { "type": "string", "pattern": "^t-[0-9a-f]{24}$" },
+        "index": { "type": "integer", "minimum": 0, "maximum": 499 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 255 }
+      }
+    },
+    "policyDecision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["applied", "schemaVersion", "profileName", "decision", "reasonCode", "reason"],
+      "properties": {
+        "applied": { "type": "boolean" },
+        "schemaVersion": { "type": ["string", "null"], "enum": ["1.0", null] },
+        "profileName": { "type": ["string", "null"], "maxLength": 64 },
+        "decision": { "type": "string", "enum": ["NotApplied", "NotEvaluated", "Allowed", "Denied", "Invalid"] },
+        "reasonCode": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9]{0,63}$" },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 1036 }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["category", "message"],
+      "properties": {
+        "category": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "message": { "type": "string", "minLength": 1, "maxLength": 1036 }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "outcome",
+        "exitCode",
+        "targetCount",
+        "recordCount",
+        "succeededCount",
+        "partialCount",
+        "failedCount",
+        "timedOutCount",
+        "skippedCount",
+        "whatIfCount",
+        "auditRecordCount",
+        "hashAlgorithm",
+        "canonicalization",
+        "summaryHash"
+      ],
+      "properties": {
+        "status": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "outcome": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "exitCode": { "type": "integer", "enum": [0, 1, 2, 3, 4, 5, 10] },
+        "targetCount": { "type": "integer", "minimum": 0, "maximum": 500 },
+        "recordCount": { "type": "integer", "minimum": 0 },
+        "succeededCount": { "type": "integer", "minimum": 0, "maximum": 500 },
+        "partialCount": { "type": "integer", "minimum": 0, "maximum": 500 },
+        "failedCount": { "type": "integer", "minimum": 0, "maximum": 500 },
+        "timedOutCount": { "type": "integer", "minimum": 0, "maximum": 500 },
+        "skippedCount": { "type": "integer", "minimum": 0, "maximum": 500 },
+        "whatIfCount": { "type": "integer", "minimum": 0, "maximum": 500 },
+        "auditRecordCount": { "type": "integer", "minimum": 4, "maximum": 1006 },
+        "hashAlgorithm": { "const": "SHA-256" },
+        "canonicalization": { "const": "WAT-AUDIT-SUMMARY-1" },
+        "summaryHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    }
+  }
+}

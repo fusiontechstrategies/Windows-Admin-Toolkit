@@ -1,6 +1,6 @@
 # Policy profiles and least privilege
 
-Windows Admin Toolkit 2.2.0 supports optional JSON policy profiles for both automation and interactive runs. A profile narrows what the toolkit may do. It never grants Windows permissions, relaxes a built-in safety ceiling, replaces `ShouldProcess`, or replaces an exact confirmation phrase.
+Windows Admin Toolkit 2.3.0 supports optional JSON policy profiles for both automation and interactive runs. A profile narrows what the toolkit may do. It never grants Windows permissions, relaxes a built-in safety ceiling, replaces `ShouldProcess`, or replaces an exact confirmation phrase.
 
 The public policy contract is JSON Schema Draft 2020-12 in [`schemas/policy-profile-v1.schema.json`](schemas/policy-profile-v1.schema.json). The current `schemaVersion` is `1.0`.
 
@@ -96,7 +96,7 @@ Custom CMD and custom PowerShell policy constraints can limit source length or d
 
 ## Decisions and exit behavior
 
-Result schema version `1.1` includes a required `policy` object:
+Result schema version `1.2` includes a required `policy` object:
 
 | Field | Meaning |
 | --- | --- |
