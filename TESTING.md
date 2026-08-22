@@ -2,7 +2,20 @@
 
 Windows Admin Toolkit uses a dependency-free test harness so the same checks run under Windows PowerShell 5.1 and PowerShell 7.x without a test-framework bootstrap.
 
-## Verified release matrix
+## Current 2.1.0 native validation
+
+The 2.1.0 automation milestone was validated natively on August 22, 2026.
+
+| Environment | PowerShell | Checks | Result |
+| --- | --- | ---: | --- |
+| Windows native host | Windows PowerShell 5.1.26100.9168 | 379 | Passed |
+| Windows native host | PowerShell 7.6.4 | 379 | Passed |
+
+Total completed 2.1.0 native checks: 758.
+
+PSScriptAnalyzer 1.25.0 completed with zero findings under the committed settings. The 2.1.0 working tree was not rerun in Windows containers in this development environment because an available Windows container runtime was not established. The container results below remain the exact historical record for release 2.0.0 and are not presented as 2.1.0 validation.
+
+## Historical 2.0.0 release matrix
 
 Release 2.0.0 was validated on August 12, 2026.
 
@@ -73,19 +86,33 @@ if ($findings) {
 The test suite verifies:
 
 - Application version, 20-action catalog, and action-script registration
+- Stable action identifiers, order, classification, confirmation text, and action input metadata
 - Parser compatibility and noninteractive action blocks
+- Automation request resolution for every action without interactive input paths
+- Local, remote, target-list, and incompatible-selector validation
+- Exact state-change, large-target-list, and PsExec authorization values
+- Read-only retry behavior and zero retries for state-changing actions
+- `ShouldProcess` and clean no-connection `WhatIf` previews
+- Stable JSON schema, fields, ordering, arrays, UTC dates, normalized casing, and safe serialization depth
+- Clean stdout JSON, deterministic exit codes, and stderr separation for unusable output destinations
+- Complete-success, partial-success, execution-failure, timeout, validation, and authorization aggregation
+- Atomic automation JSON output and overwrite refusal
 - Hostname, IPv4, service, process, registry, event-log, task-path, and KB validation
 - Rejection of metacharacters, malformed paths, traversal notation, and ambiguous addresses
+- Strict, bounded UTF-8 decoding for target lists and custom PowerShell files
 - CSV formula neutralization and HTML encoding
 - Atomic UTF-8 exports with explicit BOM and no overwrites
 - `ShouldProcess` support and absence of execution-policy bypasses
-- Absence of `Invoke-Expression` and plaintext credential conversion
+- Absence of `Invoke-Expression`, plaintext credential conversion, and automatic security-setting changes
+- Native automation rejection of username strings without opening credential UI
 - Encoded payload integrity with adversarial argument text
+- Typed nested-array preservation across background-job and encoded remote payload boundaries
 - Local system, process, and service-query execution
 - Normalized failure handling
 - Remote target rejection before jobs or transports start
 - Protected core-process enforcement
 - PsExec product, version, Microsoft signer, and Authenticode verification
+- Interactive menu-number regression coverage for all 20 actions
 - Application ASCII compatibility and the repository rule prohibiting em dashes
 
 The automated suite makes no destructive system changes.

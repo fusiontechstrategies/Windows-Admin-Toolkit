@@ -6,12 +6,15 @@ Roadmap items describe direction, not guaranteed delivery dates. Security, Windo
 
 ## 2.1.0: Automation interface
 
+Implementation status: complete for release review.
+
 - Noninteractive named-action mode alongside the existing menu
 - Validated command parameters for targets, inputs, transport, and output
 - Stable process exit codes for orchestration systems
-- Machine-readable JSON result envelopes
+- Versioned machine-readable JSON result envelopes and committed schema
 - Safe report-path and overwrite behavior for unattended runs
-- Documentation and examples for RMM tools, scheduled tasks, and CI systems
+- Exact noninteractive authorization and `WhatIf` for state changes
+- Documentation and examples for WinRM, target lists, RMM tools, scheduled tasks, and CI systems
 
 ## 2.2.0: Policy and least privilege
 
