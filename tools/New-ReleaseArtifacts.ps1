@@ -100,6 +100,26 @@ function Get-ReleaseHash {
     return (Get-FileHash -LiteralPath $LiteralPath -Algorithm $Algorithm).Hash.ToLowerInvariant()
 }
 
+function Test-ReleaseCertificateCodeSigningEku {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [Security.Cryptography.X509Certificates.X509Certificate2]$Certificate
+    )
+
+    foreach ($extension in $Certificate.Extensions) {
+        if ($extension.Oid.Value -cne '2.5.29.37' -or $extension -isnot [Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]) {
+            continue
+        }
+        foreach ($usage in $extension.EnhancedKeyUsages) {
+            if ($usage.Value -ceq '1.3.6.1.5.5.7.3.3') {
+                return $true
+            }
+        }
+    }
+    return $false
+}
+
 function Get-ReleaseDirectoryFile {
     [CmdletBinding()]
     param(
@@ -241,8 +261,7 @@ if (-not [string]::IsNullOrWhiteSpace($CertificateThumbprint)) {
     if (-not $certificate.HasPrivateKey) {
         throw 'The selected code-signing certificate does not have an accessible private key.'
     }
-    $codeSigningEku = @($certificate.Extensions | Where-Object { $_.Oid.Value -eq '2.5.29.37' } | ForEach-Object { $_.EnhancedKeyUsages } | Where-Object { $_.ObjectId.Value -eq '1.3.6.1.5.5.7.3.3' })
-    if ($codeSigningEku.Count -eq 0) {
+    if (-not (Test-ReleaseCertificateCodeSigningEku -Certificate $certificate)) {
         throw 'The selected certificate is not valid for code signing.'
     }
     $now = Get-Date

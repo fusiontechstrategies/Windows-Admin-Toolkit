@@ -4,18 +4,18 @@ Windows Admin Toolkit uses a dependency-free test harness so the same checks run
 
 ## Final 3.0.0 qualification
 
-The final 3.0.0 controlled-orchestration tree was qualified on August 24, 2026. Every deterministic suite execution completed 647 of 647 checks.
+The final 3.0.0 controlled-orchestration repository tree was qualified on August 24, 2026. The final host and CI suite contains 649 checks. The clean virtual-machine runs completed the preceding 647-check suite before two release-certificate regression checks were added; the application script did not change between those runs and the final signing fix.
 
 | Environment | PowerShell | Checks | Result |
 | --- | --- | ---: | --- |
-| Windows 11 Pro 25H2, build 26200.9168 native host | Windows PowerShell 5.1.26100.9168 | 647 | Passed |
-| Windows 11 Pro 25H2, build 26200.9168 native host | PowerShell 7.6.4 | 647 | Passed |
+| Windows 11 Pro 25H2, build 26200.9168 native host | Windows PowerShell 5.1.26100.9168 | 649 | Passed |
+| Windows 11 Pro 25H2, build 26200.9168 native host | PowerShell 7.6.4 | 649 | Passed |
 | Windows 10 Pro, build 19045 clean virtual machine | Windows PowerShell 5.1 | 647 | Passed |
 | Windows 11 Pro, build 26200 clean virtual machine | Windows PowerShell 5.1 | 647 | Passed |
 | Windows Server 2022 Datacenter, build 20348 clean virtual machine | Windows PowerShell 5.1 | 647 | Passed |
 | Windows Server 2025 Standard, build 26100 clean virtual machine | Windows PowerShell 5.1 | 647 | Passed |
 
-Total completed host and baseline-VM checks: 3,882.
+Total completed host and baseline-VM checks: 3,886.
 
 The pull request and public `main` branch also passed GitHub CI on Windows Server 2022 and Windows Server 2025 under both Windows PowerShell 5.1 and PowerShell 7. PSScriptAnalyzer 1.25.0 reported zero findings, and the repository secret scan passed.
 
@@ -34,7 +34,7 @@ Each virtual machine ran individually from a disposable baseline and was restore
 | Microsoft Defender custom scan of the exact source tree | 0 new detections and 0 active threats |
 | Release-candidate manifest, SPDX 2.3 SBOM, source-byte, parser, and path-safety checks | Passed |
 
-The controlled live-change run affected only test-created or immediately reversible state: exact marker creation, a test-created Notepad process, the Windows Update service, and a scheduled reboot that was immediately aborted. Actual update installation and broad temporary-file deletion were not run live because they are not narrowly reversible. Successful WinRM used the real remoting stack on both supported server editions. A positive PsExec execution was not attempted because no trusted local PsExec binary was present; its fail-closed validation paths passed. The release candidate remains unsigned because no usable code-signing certificate was installed.
+The controlled live-change run affected only test-created or immediately reversible state: exact marker creation, a test-created Notepad process, the Windows Update service, and a scheduled reboot that was immediately aborted. Actual update installation and broad temporary-file deletion were not run live because they are not narrowly reversible. Successful WinRM used the real remoting stack on both supported server editions. A positive PsExec execution was not attempted because no trusted local PsExec binary was present; its fail-closed validation paths passed. The qualification candidate was unsigned; official signing remains a separate maintainer-controlled release step.
 
 The 3.0.0 tree was not rerun in Windows containers because Docker Desktop was using a Linux rather than Windows container runtime. The clean virtual-machine matrix and GitHub Windows runners provide the 3.0.0 operating-system coverage. The container results below remain the exact historical record for release 2.0.0 and are not presented as 3.0.0 validation.
 
