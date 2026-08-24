@@ -228,7 +228,7 @@ Opt-in enterprise audit files are separate per-run `.jsonl` artifacts. They are 
 
 ## Testing and validation
 
-Release 2.0.0 completed 496 automated checks across four Windows and PowerShell environments on August 12, 2026. The 3.0.0 controlled-orchestration milestone contains 643 deterministic checks and has passed natively under both Windows PowerShell 5.1 and PowerShell 7.6.4, for 1,286 completed native checks.
+Release 2.0.0 completed 496 automated checks across four Windows and PowerShell environments on August 12, 2026. The final 3.0.0 controlled-orchestration suite contains 647 deterministic checks and passed on the native host under both Windows PowerShell 5.1 and PowerShell 7.6.4, for 1,294 completed host checks. The same 647-check suite also passed in clean Windows 10 Pro, Windows 11 Pro, Windows Server 2022, and Windows Server 2025 virtual machines.
 
 | Environment | PowerShell | Result |
 | --- | --- | --- |

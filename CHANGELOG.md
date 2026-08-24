@@ -36,7 +36,7 @@ The format follows Keep a Changelog principles, and the project uses Semantic Ve
 
 - Refactored interactive and automation modes to share one action catalog and one execution implementation
 - Added deterministic per-target timing, attempts, normalized errors, and concurrency-order restoration
-- Increased the dependency-free native suite to 643 deterministic checks per PowerShell edition
+- Increased the dependency-free native suite to 647 deterministic checks per PowerShell edition
 - Updated the toolkit version to 3.0.0 while retaining the direct automation result contract at schema version 1.2
 - Made controlled orchestration sequential at one-target checkpoint granularity so interruption recovery has deterministic boundaries
 
@@ -51,6 +51,8 @@ The format follows Keep a Changelog principles, and the project uses Semantic Ve
 - Appended an explicit audit failure and authoritative replacement summary when JSON result delivery fails after an audited execution
 - Wrote automation JSON files as interoperable UTF-8 without a byte-order mark while preserving BOM behavior for interactive exports
 - Removed the optional local PsExec binary from the deterministic test count while retaining its validation when available
+- Applied one consistent local-computer identity rule when importing plans, including legacy Windows names that contain underscores
+- Normalized remoted enum and scalar values before JSON serialization so case-colliding extended properties cannot produce JSON that Windows PowerShell rejects
 
 ### Security
 
