@@ -6,6 +6,8 @@ The format follows Keep a Changelog principles, and the project uses Semantic Ve
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-08-24
+
 ### Added
 
 - Noninteractive `-Automation` mode with 20 stable named action identifiers
@@ -116,5 +118,6 @@ The format follows Keep a Changelog principles, and the project uses Semantic Ve
 - Made WinRM the default remote-management transport
 - Moved default logs to `%LOCALAPPDATA%\WindowsAdminToolkit\Logs`
 
+[3.0.0]: https://github.com/fusiontechstrategies/Windows-Admin-Toolkit/releases/tag/v3.0.0
 [2.0.0]: https://github.com/fusiontechstrategies/Windows-Admin-Toolkit/releases/tag/v2.0.0
-[Unreleased]: https://github.com/fusiontechstrategies/Windows-Admin-Toolkit/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/fusiontechstrategies/Windows-Admin-Toolkit/compare/v3.0.0...HEAD

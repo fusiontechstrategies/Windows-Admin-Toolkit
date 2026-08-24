@@ -3,6 +3,7 @@
 One script. Twenty guarded Windows administration workflows. Secure local and remote operations across Windows PowerShell 5.1 and PowerShell 7.x.
 
 [![CI](https://github.com/fusiontechstrategies/Windows-Admin-Toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/fusiontechstrategies/Windows-Admin-Toolkit/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/fusiontechstrategies/Windows-Admin-Toolkit.svg)](https://github.com/fusiontechstrategies/Windows-Admin-Toolkit/releases/latest)
 [![PowerShell](https://img.shields.io/badge/PowerShell-5.1%20%7C%207.x-2671be.svg)](https://learn.microsoft.com/powershell/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
@@ -63,6 +64,20 @@ Read [SECURITY.md](SECURITY.md) and [RESPONSIBLE_USE.md](RESPONSIBLE_USE.md) bef
 - Optional: Microsoft Sysinternals PsExec 2.43 or newer for the fallback transport
 
 The toolkit does not enable remote-management services or weaken security settings on your behalf.
+
+## Signed release
+
+Version 3.0.0 is available from the [GitHub release page](https://github.com/fusiontechstrategies/Windows-Admin-Toolkit/releases/tag/v3.0.0). The attached `WindowsAdminToolkit.ps1` and the copy inside the signed release archive are Authenticode-signed by Fusion Technology Strategies, Inc. with a DigiCert-issued code-signing certificate and a verified DigiCert timestamp. GitHub-generated source archives contain the reviewable repository source and are not the signed release assets.
+
+Verify the downloaded script before running it:
+
+```powershell
+$signature = Get-AuthenticodeSignature -LiteralPath .\WindowsAdminToolkit.ps1
+if ($signature.Status -ne 'Valid') {
+    throw "Signature verification failed: $($signature.StatusMessage)"
+}
+$signature.SignerCertificate.Subject
+```
 
 ## Quick start
 
@@ -243,7 +258,7 @@ The prior release's container tags, digests, commands, and the exact current nat
 
 ## Enterprise roadmap
 
-The 2.1.0 automation interface, 2.2.0 policy boundary, 2.3.0 enterprise auditability, and 3.0.0 controlled orchestration implementation are complete for release review. Release candidates can be built with optional Authenticode signing, a verified SHA-256 manifest, and an SPDX 2.3 SBOM; no tag or public artifact is created automatically. See [ROADMAP.md](ROADMAP.md) and [RELEASING.md](RELEASING.md).
+The 2.1.0 automation interface, 2.2.0 policy boundary, 2.3.0 enterprise auditability, and 3.0.0 controlled orchestration capabilities were released together in version 3.0.0. The official release includes Authenticode-signed toolkit assets, a verified SHA-256 manifest, and an SPDX 2.3 SBOM. See [ROADMAP.md](ROADMAP.md) and [RELEASING.md](RELEASING.md).
 
 ## Contributing
 
