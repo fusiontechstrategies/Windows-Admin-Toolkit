@@ -1309,9 +1309,50 @@ try {
     $policyPlanExecuteEnvelope = ConvertFrom-Json -InputObject $policyPlanExecuteProcess.StdOut.Trim() -ErrorAction Stop
     Test-ToolkitAssertion -Condition ($policyPlanExecuteProcess.ExitCode -eq 2 -and $policyPlanExecuteEnvelope.errors[0].message -match 'policy file' -and -not (Test-Path -LiteralPath $policyCheckpointPath)) -Name 'Changed policy bytes invalidate the approved plan before checkpoint creation'
 
+    $releaseBuilderPath = Join-Path $projectRoot 'tools\New-ReleaseArtifacts.ps1'
+    $releaseBuilderSourceText = [IO.File]::ReadAllText($releaseBuilderPath)
+    $releaseBuilderTokens = $null
+    $releaseBuilderParseErrors = $null
+    $releaseBuilderAst = [Management.Automation.Language.Parser]::ParseInput($releaseBuilderSourceText, [ref]$releaseBuilderTokens, [ref]$releaseBuilderParseErrors)
+    if (@($releaseBuilderParseErrors).Count -gt 0) {
+        throw 'Release builder source did not parse for certificate validation tests.'
+    }
+    $releaseEkuFunctionAsts = @($releaseBuilderAst.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Test-ReleaseCertificateCodeSigningEku' }, $true))
+    if ($releaseEkuFunctionAsts.Count -ne 1) {
+        throw 'Release certificate EKU validation function was not found exactly once.'
+    }
+    . ([scriptblock]::Create($releaseEkuFunctionAsts[0].Extent.Text))
+
+    $releaseCodeSigningRsa = [Security.Cryptography.RSA]::Create(2048)
+    $releaseOtherEkuRsa = [Security.Cryptography.RSA]::Create(2048)
+    $releaseCodeSigningCertificate = $null
+    $releaseOtherEkuCertificate = $null
+    try {
+        $releaseCodeSigningRequest = New-Object Security.Cryptography.X509Certificates.CertificateRequest('CN=WAT Synthetic Code Signing Test', $releaseCodeSigningRsa, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)
+        $releaseCodeSigningOids = New-Object Security.Cryptography.OidCollection
+        [void]$releaseCodeSigningOids.Add((New-Object Security.Cryptography.Oid('1.3.6.1.5.5.7.3.3')))
+        [void]$releaseCodeSigningRequest.CertificateExtensions.Add((New-Object Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension($releaseCodeSigningOids, $false)))
+        $releaseCodeSigningCertificate = $releaseCodeSigningRequest.CreateSelfSigned((Get-Date).AddMinutes(-1), (Get-Date).AddMinutes(5))
+
+        $releaseOtherEkuRequest = New-Object Security.Cryptography.X509Certificates.CertificateRequest('CN=WAT Synthetic Non-Code-Signing Test', $releaseOtherEkuRsa, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)
+        $releaseOtherEkuOids = New-Object Security.Cryptography.OidCollection
+        [void]$releaseOtherEkuOids.Add((New-Object Security.Cryptography.Oid('1.3.6.1.5.5.7.3.1')))
+        [void]$releaseOtherEkuRequest.CertificateExtensions.Add((New-Object Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension($releaseOtherEkuOids, $false)))
+        $releaseOtherEkuCertificate = $releaseOtherEkuRequest.CreateSelfSigned((Get-Date).AddMinutes(-1), (Get-Date).AddMinutes(5))
+
+        Test-ToolkitAssertion -Condition (Test-ReleaseCertificateCodeSigningEku -Certificate $releaseCodeSigningCertificate) -Name 'Release certificate validation accepts the code-signing EKU from a real X.509 extension'
+        Test-ToolkitAssertion -Condition (-not (Test-ReleaseCertificateCodeSigningEku -Certificate $releaseOtherEkuCertificate)) -Name 'Release certificate validation rejects a certificate without the code-signing EKU'
+    }
+    finally {
+        if ($null -ne $releaseCodeSigningCertificate) { $releaseCodeSigningCertificate.Dispose() }
+        if ($null -ne $releaseOtherEkuCertificate) { $releaseOtherEkuCertificate.Dispose() }
+        $releaseCodeSigningRsa.Dispose()
+        $releaseOtherEkuRsa.Dispose()
+    }
+
     $releaseOutputPath = Join-Path $resolvedTemporaryRoot 'release-candidate'
     $toolkitHashBeforeReleaseBuild = (Get-FileHash -LiteralPath $toolkitPath -Algorithm SHA256).Hash
-    $releaseBuildResult = & (Join-Path $projectRoot 'tools\New-ReleaseArtifacts.ps1') -OutputDirectory $releaseOutputPath
+    $releaseBuildResult = & $releaseBuilderPath -OutputDirectory $releaseOutputPath
     $toolkitHashAfterReleaseBuild = (Get-FileHash -LiteralPath $toolkitPath -Algorithm SHA256).Hash
     $releaseManifestLines = @([System.IO.File]::ReadAllLines((Join-Path $releaseOutputPath 'SHA256SUMS.txt'), (New-Object System.Text.UTF8Encoding($false, $true))))
     $releaseSbom = Get-Content -LiteralPath (Join-Path $releaseOutputPath 'WindowsAdminToolkit.spdx.json') -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
@@ -1319,7 +1360,7 @@ try {
     Test-ToolkitAssertion -Condition ($toolkitHashBeforeReleaseBuild -eq $toolkitHashAfterReleaseBuild -and (Get-FileHash -LiteralPath (Join-Path $releaseOutputPath 'WindowsAdminToolkit.ps1') -Algorithm SHA256).Hash -eq $toolkitHashBeforeReleaseBuild) -Name 'Unsigned release build copies the toolkit without modifying source bytes'
     Test-ToolkitAssertion -Condition ($releaseSbom.spdxVersion -ceq 'SPDX-2.3' -and @($releaseSbom.files).Count -eq $releaseBuildResult.PayloadFileCount -and $releaseSbom.packages[0].versionInfo -ceq '3.0.0') -Name 'Release builder emits an SPDX 2.3 inventory for the exact copied payload'
     Test-ToolkitAssertion -Condition (@($releaseManifestLines | Where-Object { $_ -match '\*WindowsAdminToolkit\.spdx\.json$' }).Count -eq 1 -and @($releaseManifestLines | Where-Object { $_ -match '\*SHA256SUMS\.txt$' }).Count -eq 0) -Name 'SHA-256 manifest includes the SBOM and excludes its self-referential manifest file'
-    Test-ToolkitThrow -Action { & (Join-Path $projectRoot 'tools\New-ReleaseArtifacts.ps1') -OutputDirectory $releaseOutputPath | Out-Null } -Name 'Release builder refuses to overwrite an existing candidate directory'
+    Test-ToolkitThrow -Action { & $releaseBuilderPath -OutputDirectory $releaseOutputPath | Out-Null } -Name 'Release builder refuses to overwrite an existing candidate directory'
 
     $successProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -Action SystemInfo -Local -LogFile '$escapedAutomationLogPath'"
     $successJsonText = $successProcess.StdOut.Trim()
