@@ -6,7 +6,7 @@ Roadmap items describe direction, not guaranteed delivery dates. Security, Windo
 
 ## 2.1.0: Automation interface
 
-Implementation status: complete for release review.
+Release status: included in 3.0.0 on August 24, 2026.
 
 - Noninteractive named-action mode alongside the existing menu
 - Validated command parameters for targets, inputs, transport, and output
@@ -18,7 +18,7 @@ Implementation status: complete for release review.
 
 ## 2.2.0: Policy and least privilege
 
-Implementation status: complete for release review.
+Release status: included in 3.0.0 on August 24, 2026.
 
 - Versioned strict policy profiles for action, transport, target-mode, and target allow or deny decisions
 - Literal exact-target and leading star-dot suffix controls without wildcard expansion
@@ -30,7 +30,7 @@ Implementation status: complete for release review.
 
 ## 2.3.0: Enterprise auditability
 
-Implementation status: complete for release review.
+Release status: included in 3.0.0 on August 24, 2026.
 
 - New per-run JSON Lines audit logs with unique run IDs, stable cross-run target IDs, UTC timings, lifecycle stages, outcomes, and normalized errors
 - Explicit policy-decision events and bounded target start or completion events without raw action data
@@ -41,7 +41,7 @@ Implementation status: complete for release review.
 
 ## 3.0.0: Controlled orchestration
 
-Implementation status: complete for release review.
+Release status: released on August 24, 2026.
 
 - Strict versioned pending and approved change-plan files with canonical SHA-256 request hashes and separately hashed approval metadata
 - Exact full-hash approval, execution, and resume phrases without mutable action, input, target, transport, policy, or runtime overrides
