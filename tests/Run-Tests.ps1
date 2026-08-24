@@ -482,6 +482,7 @@ Test-ToolkitAssertion -Condition (-not (Test-AdminHostname -ComputerName '::1'))
 Test-ToolkitAssertion -Condition (-not (Test-AdminHostname -ComputerName '-server')) -Name 'Rejects a leading hyphen'
 Test-ToolkitAssertion -Condition (-not (Test-AdminHostname -ComputerName 'server&whoami')) -Name 'Rejects command metacharacters in targets'
 Test-ToolkitAssertion -Condition (-not (Test-AdminHostname -ComputerName 'server_name')) -Name 'Rejects invalid underscore labels'
+Test-ToolkitAssertion -Condition ((Test-AdminLocalComputerName -ComputerName 'FUSION11PRO_X64') -and -not (Test-AdminHostname -ComputerName 'FUSION11PRO_X64')) -Name 'Local Windows computer names permit safe legacy underscores without weakening remote hostname validation'
 Test-ToolkitAssertion -Condition (-not (Test-AdminTcpPort -ComputerName 'server&whoami' -Port 5985 -TimeoutSeconds 1)) -Name 'TCP probe rejects an invalid target before connecting'
 
 Test-ToolkitAssertion -Condition (Test-AdminServiceName -ServiceName 'wuauserv') -Name 'Accepts a valid service name'
@@ -1082,6 +1083,19 @@ try {
     $auditedPlanProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -PlanOperation Create -PlanPath '$escapedAuditedPlanPath' -Action SystemInfo -Local -AuditPath '$escapedAuditedPlanAuditPath'"
     $auditedPlanEnvelope = ConvertFrom-Json -InputObject $auditedPlanProcess.StdOut.Trim() -ErrorAction Stop
     Test-ToolkitAssertion -Condition ($auditedPlanProcess.ExitCode -eq 2 -and $auditedPlanEnvelope.errors[0].message -match 'AuditPath' -and -not (Test-Path -LiteralPath $auditedPlanPath) -and -not (Test-Path -LiteralPath $auditedPlanAuditPath)) -Name 'Plan creation keeps checkpoint evidence separate from direct-run audit sinks'
+
+    $legacyLocalPlanPath = Join-Path $resolvedTemporaryRoot 'legacy-local-name.watplan.json'
+    $escapedLegacyLocalPlanPath = $legacyLocalPlanPath.Replace("'", "''")
+    $originalComputerName = $env:COMPUTERNAME
+    try {
+        $env:COMPUTERNAME = 'FUSION11PRO_X64'
+        $legacyLocalPlanProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -PlanOperation Create -PlanPath '$escapedLegacyLocalPlanPath' -Action SystemInfo -Local -LogFile '$escapedAutomationLogPath'"
+    }
+    finally {
+        $env:COMPUTERNAME = $originalComputerName
+    }
+    $legacyLocalPlan = Import-AdminOrchestrationPlan -LiteralPath $legacyLocalPlanPath
+    Test-ToolkitAssertion -Condition ($legacyLocalPlanProcess.ExitCode -eq 0 -and $legacyLocalPlan.request.targetMode -ceq 'Local' -and $legacyLocalPlan.request.targets[0].name -ceq 'FUSION11PRO_X64' -and $legacyLocalPlan.request.targets[0].targetId -ceq (Get-AdminStableTargetId -ComputerName 'FUSION11PRO_X64')) -Name 'A local plan created for a Windows computer name with an underscore imports consistently'
 
     $pendingPlanPath = Join-Path $resolvedTemporaryRoot 'system-info-pending.watplan.json'
     $approvedPlanPath = Join-Path $resolvedTemporaryRoot 'system-info-approved.watplan.json'
