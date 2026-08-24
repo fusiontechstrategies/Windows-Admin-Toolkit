@@ -4533,6 +4533,12 @@ function ConvertTo-AdminJsonSafeValue {
     if ($Value -is [timespan]) {
         return $Value.ToString('c', [System.Globalization.CultureInfo]::InvariantCulture)
     }
+    if (@($Value.PSObject.TypeNames) -contains 'Deserialized.System.Enum') {
+        $deserializedEnumValue = $Value.PSObject.Properties['Value']
+        if ($null -ne $deserializedEnumValue -and -not [string]::IsNullOrWhiteSpace([string]$deserializedEnumValue.Value)) {
+            return [string]$deserializedEnumValue.Value
+        }
+    }
     if ($Value -is [guid] -or $Value -is [version] -or $Value -is [uri] -or $Value.GetType().IsEnum) {
         return [string]$Value
     }
@@ -4547,17 +4553,24 @@ function ConvertTo-AdminJsonSafeValue {
         if ([double]::IsNegativeInfinity($floatingPointValue)) {
             return '-Infinity'
         }
-        return $Value
+        return $(if ($Value -is [single]) { [single]$Value } else { [double]$Value })
     }
-    if ($Value -is [string] -or $Value -is [char] -or $Value -is [bool] -or
-        $Value -is [byte] -or $Value -is [sbyte] -or $Value -is [int16] -or
-        $Value -is [uint16] -or $Value -is [int32] -or $Value -is [uint32] -or
-        $Value -is [int64] -or $Value -is [uint64] -or $Value -is [decimal]) {
-        return $Value
-    }
+    if ($Value -is [string]) { return [string]$Value }
+    if ($Value -is [char]) { return [char]$Value }
+    if ($Value -is [bool]) { return [bool]$Value }
+    if ($Value -is [byte]) { return [byte]$Value }
+    if ($Value -is [sbyte]) { return [sbyte]$Value }
+    if ($Value -is [int16]) { return [int16]$Value }
+    if ($Value -is [uint16]) { return [uint16]$Value }
+    if ($Value -is [int32]) { return [int32]$Value }
+    if ($Value -is [uint32]) { return [uint32]$Value }
+    if ($Value -is [int64]) { return [int64]$Value }
+    if ($Value -is [uint64]) { return [uint64]$Value }
+    if ($Value -is [decimal]) { return [decimal]$Value }
 
     if ($Value -is [System.Collections.IDictionary]) {
         $safeDictionary = [ordered]@{}
+        $safeDictionaryKeys = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
         $dictionaryEntries = New-Object 'System.Collections.Generic.List[object]'
         $dictionaryIndex = 0
         foreach ($dictionaryEntry in $Value.GetEnumerator()) {
@@ -4600,7 +4613,7 @@ function ConvertTo-AdminJsonSafeValue {
 
             $outputKey = $dictionaryKeyText
             $outputKeySuffix = 2
-            while ($safeDictionary.Contains($outputKey)) {
+            while (-not $safeDictionaryKeys.Add($outputKey)) {
                 $outputKey = '{0}#{1}' -f $dictionaryKeyText, $outputKeySuffix
                 $outputKeySuffix++
             }
@@ -4618,17 +4631,41 @@ function ConvertTo-AdminJsonSafeValue {
     }
 
     $safeObject = [ordered]@{}
-    [string[]]$propertyNames = @($Value.PSObject.Properties.Name | Sort-Object -Unique)
-    [array]::Sort($propertyNames, [System.StringComparer]::Ordinal)
-    foreach ($propertyName in $propertyNames) {
+    $safeObjectKeys = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $propertyEntries = New-Object 'System.Collections.Generic.List[object]'
+    $propertyIndex = 0
+    foreach ($property in $Value.PSObject.Properties) {
+        $propertyName = [string]$property.Name
+        $propertyEntries.Add([pscustomobject]@{
+                Name     = $propertyName
+                SortKey  = ('{0}{1}{2:D10}' -f $propertyName, ([char]0), $propertyIndex)
+                Property = $property
+            }) | Out-Null
+        $propertyIndex++
+    }
+    [string[]]$propertySortKeys = @($propertyEntries | ForEach-Object { $_.SortKey })
+    [object[]]$sortedPropertyEntries = @($propertyEntries.ToArray())
+    [System.Array]::Sort(
+        [System.Array]$propertySortKeys,
+        [System.Array]$sortedPropertyEntries,
+        [System.StringComparer]::Ordinal
+    )
+    foreach ($propertyEntry in $sortedPropertyEntries) {
+        $propertyName = [string]$propertyEntry.Name
         if ($propertyName -match '^(?i:Credential|Password|SecureString|ScriptBlock|InvocationInfo|Exception|RunspaceId|PSComputerName|PSShowComputerName)$') {
             continue
         }
+        $outputKey = $propertyName
+        $outputKeySuffix = 2
+        while (-not $safeObjectKeys.Add($outputKey)) {
+            $outputKey = '{0}#{1}' -f $propertyName, $outputKeySuffix
+            $outputKeySuffix++
+        }
         try {
-            $safeObject[$propertyName] = ConvertTo-AdminJsonSafeValue -Value $Value.$propertyName -Depth ($Depth + 1) -MaximumDepth $MaximumDepth
+            $safeObject[$outputKey] = ConvertTo-AdminJsonSafeValue -Value $propertyEntry.Property.Value -Depth ($Depth + 1) -MaximumDepth $MaximumDepth
         }
         catch {
-            $safeObject[$propertyName] = $null
+            $safeObject[$outputKey] = $null
         }
     }
 

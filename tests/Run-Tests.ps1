@@ -450,6 +450,17 @@ $dictionaryValue.Add([string]'1', 'string key')
 $dictionaryValue.Add([int]2, 'second integer key')
 $dictionaryJsonText = ConvertTo-Json -InputObject (ConvertTo-AdminJsonSafeValue -Value $dictionaryValue) -Compress
 Test-ToolkitAssertion -Condition ($dictionaryJsonText -ceq '{"1":"integer key","1#2":"string key","2":"second integer key"}') -Name 'JSON normalization preserves values for non-string and colliding dictionary keys'
+$caseCollisionDictionary = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([System.StringComparer]::Ordinal)
+$caseCollisionDictionary.Add('value', 4)
+$caseCollisionDictionary.Add('Value', 'Running')
+$caseCollisionJsonText = ConvertTo-Json -InputObject (ConvertTo-AdminJsonSafeValue -Value $caseCollisionDictionary) -Compress
+$caseCollisionJson = ConvertFrom-Json -InputObject $caseCollisionJsonText -ErrorAction Stop
+Test-ToolkitAssertion -Condition ($caseCollisionJsonText -ceq '{"Value":"Running","value#2":4}' -and [string]$caseCollisionJson.Value -ceq 'Running' -and [int]$caseCollisionJson.'value#2' -eq 4) -Name 'JSON normalization disambiguates case-colliding dictionary keys for Windows PowerShell consumers'
+$remotingEnumSource = [pscustomobject]@{ State = [System.DayOfWeek]::Monday }
+$remotingEnumCopy = [System.Management.Automation.PSSerializer]::Deserialize([System.Management.Automation.PSSerializer]::Serialize($remotingEnumSource))
+$remotingEnumJsonText = ConvertTo-Json -InputObject (ConvertTo-AdminJsonSafeValue -Value $remotingEnumCopy) -Compress
+$remotingEnumJson = ConvertFrom-Json -InputObject $remotingEnumJsonText -ErrorAction Stop
+Test-ToolkitAssertion -Condition ($remotingEnumJsonText -ceq '{"State":"Monday"}' -and [string]$remotingEnumJson.State -ceq 'Monday') -Name 'JSON normalization restores deserialized remoting enums without case-colliding value fields'
 $canonicalJsonText = ConvertTo-AdminCanonicalJson -Value ([pscustomobject][ordered]@{ z = [string][char]0x00E9; a = @(2, $true, $null) })
 Test-ToolkitAssertion -Condition ($canonicalJsonText -ceq '{"a":[2,true,null],"z":"\u00e9"}') -Name 'Canonical JSON sorts object keys and ASCII-escapes Unicode deterministically'
 Test-ToolkitAssertion -Condition ((Get-AdminSha256Hex -Text $canonicalJsonText) -ceq '35ee15051460b0eb3e3160c5fa85d6ae111359af9c6d633345cfc5979ad285dc') -Name 'Canonical JSON SHA-256 is stable across supported editions'
