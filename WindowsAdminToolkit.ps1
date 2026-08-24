@@ -744,6 +744,26 @@ function Test-AdminHostname {
     return $true
 }
 
+function Test-AdminLocalComputerName {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$ComputerName
+    )
+
+    if ([string]::IsNullOrWhiteSpace($ComputerName)) {
+        return $false
+    }
+
+    $value = $ComputerName.Trim()
+    if ($value.Length -gt 253 -or $value -match '\s') {
+        return $false
+    }
+
+    return $value.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -lt 0
+}
+
 function Import-AdminComputerList {
     [CmdletBinding()]
     param(
@@ -7608,7 +7628,13 @@ function Import-AdminOrchestrationPlan {
         if ($indexValue -ne $targetIndex) { throw 'Orchestration plan target indexes must be contiguous and input ordered.' }
         if ($targetValue.name -isnot [string]) { throw 'An orchestration plan target name must be a string.' }
         $targetName = ([string]$targetValue.name).Trim()
-        if (-not (Test-AdminHostname -ComputerName $targetName) -or -not $seenTargets.Add($targetName)) {
+        $validTargetName = if ($targetMode -eq 'Local') {
+            Test-AdminLocalComputerName -ComputerName $targetName
+        }
+        else {
+            Test-AdminHostname -ComputerName $targetName
+        }
+        if (-not $validTargetName -or -not $seenTargets.Add($targetName)) {
             throw 'The orchestration plan contains an invalid or duplicate target name.'
         }
         $expectedTargetId = Get-AdminStableTargetId -ComputerName $targetName
