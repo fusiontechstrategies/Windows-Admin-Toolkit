@@ -1,6 +1,6 @@
 # Enterprise auditability
 
-Windows Admin Toolkit 3.0.0 retains the 2.3 opt-in, machine-readable audit contract for direct automation runs. Audit output is designed for SIEM, RMM, ticketing, and change-review pipelines without changing the toolkit's authorization model or silently modifying Windows configuration.
+Windows Admin Toolkit 3.0.1 retains the 2.3 opt-in, machine-readable audit contract for direct automation runs. Audit output is designed for SIEM, RMM, ticketing, and change-review pipelines without changing the toolkit's authorization model or silently modifying Windows configuration.
 
 Auditing does not grant access, configure remoting, register an Event Log source, replace a policy decision, replace `ShouldProcess`, or replace an exact confirmation phrase.
 

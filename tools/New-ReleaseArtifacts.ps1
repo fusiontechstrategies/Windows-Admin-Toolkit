@@ -175,6 +175,7 @@ if ([IO.Directory]::Exists($resolvedOutput) -or [IO.File]::Exists($resolvedOutpu
 $rootFileNames = @(
     'WindowsAdminToolkit.ps1',
     'README.md',
+    'INSTALL.md',
     'AUTOMATION.md',
     'ORCHESTRATION.md',
     'POLICY.md',
@@ -190,7 +191,8 @@ $rootFileNames = @(
     'CODE_OF_CONDUCT.md',
     'LICENSE',
     'PSScriptAnalyzerSettings.psd1',
-    'computers_example.txt'
+    'computers_example.txt',
+    '.github/assets/social-preview.jpg'
 )
 $releaseDirectories = @('schemas', 'examples', 'tests', 'tools')
 $sourceFiles = New-Object 'System.Collections.Generic.List[System.IO.FileInfo]'
@@ -296,7 +298,19 @@ foreach ($payloadFile in $payloadFiles) {
     $sha1 = Get-ReleaseHash -LiteralPath $payloadFile.FullName -Algorithm SHA1
     $sha256 = Get-ReleaseHash -LiteralPath $payloadFile.FullName -Algorithm SHA256
     $verificationSha1.Add($sha1) | Out-Null
-    $fileType = if ($payloadFile.Extension -ieq '.ps1' -or $payloadFile.Extension -ieq '.psd1') { 'SOURCE' } elseif ($payloadFile.Extension -ieq '.json') { 'DOCUMENTATION' } else { 'TEXT' }
+    $extension = $payloadFile.Extension.ToLowerInvariant()
+    $fileType = if ($extension -in @('.ps1', '.psd1')) {
+        'SOURCE'
+    }
+    elseif ($extension -in @('.jpg', '.jpeg', '.png', '.gif', '.svg')) {
+        'IMAGE'
+    }
+    elseif ($extension -ceq '.json') {
+        'DOCUMENTATION'
+    }
+    else {
+        'TEXT'
+    }
     $fileSpdxId = 'SPDXRef-File-{0:D4}' -f $fileIndex
     $spdxFiles.Add([pscustomobject][ordered]@{
             fileName           = "./$relativePath"

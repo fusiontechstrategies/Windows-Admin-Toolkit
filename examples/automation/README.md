@@ -2,6 +2,8 @@
 
 These examples use synthetic hostnames and documentation-only network ranges. Replace them only with systems you are authorized to administer. Run commands from the repository root unless an example sets another working directory.
 
+For a no-connection first look, start with the [sanitized JSON and HTML demo](../demo/README.md).
+
 ## Local inventory to stdout JSON
 
 ```powershell

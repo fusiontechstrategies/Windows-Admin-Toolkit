@@ -1,6 +1,6 @@
 {
   "schemaVersion": "1.2",
-  "toolkitVersion": "3.0.0",
+  "toolkitVersion": "3.0.1",
   "runId": "99999999-9999-4999-8999-999999999999",
   "startedAtUtc": "2026-08-22T14:08:00.000Z",
   "finishedAtUtc": "2026-08-22T14:08:00.250Z",
@@ -13,7 +13,7 @@
   "targetMode": "Local",
   "transport": { "name": "Local", "authentication": null, "useSsl": false },
   "policy": { "applied": false, "schemaVersion": null, "profileName": null, "decision": "NotApplied", "reasonCode": "NoPolicy", "reason": "No policy profile was supplied." },
-  "audit": { "enabled": true, "schemaVersion": "1.0", "path": "C:\\Audit\\wat-run-999.jsonl", "eventLog": false, "eventSource": null, "recordCount": 6, "complete": true, "hashAlgorithm": "SHA-256", "canonicalization": "WAT-AUDIT-SUMMARY-1", "summaryHash": "036856b91e9386d2412d4dcd349809c795cf674c157050ead0725ea3ccffc529" },
+  "audit": { "enabled": true, "schemaVersion": "1.0", "path": "C:\\Audit\\wat-run-999.jsonl", "eventLog": false, "eventSource": null, "recordCount": 6, "complete": true, "hashAlgorithm": "SHA-256", "canonicalization": "WAT-AUDIT-SUMMARY-1", "summaryHash": "19074a7d25465145560c669a202d8038a15f1cb72fd9e529ce9a4ab6e81f024a" },
   "status": "Succeeded",
   "outcome": "CompleteSuccess",
   "exitCode": 0,

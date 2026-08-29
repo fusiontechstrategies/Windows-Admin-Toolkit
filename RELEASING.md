@@ -22,7 +22,7 @@ The release builder copies an explicit allowlist of source, documentation, schem
 
 ```powershell
 ./tools/New-ReleaseArtifacts.ps1 `
-  -OutputDirectory 'C:\ReleaseStaging\WindowsAdminToolkit-3.0.0'
+  -OutputDirectory 'C:\ReleaseStaging\WindowsAdminToolkit-3.0.1'
 ```
 
 An unsigned candidate is useful for reproducibility review, testing, and environments that apply signatures in a separate protected build service. It is not represented as a signed official artifact.
@@ -33,7 +33,7 @@ Import or provision the release certificate outside this repository. It must be 
 
 ```powershell
 ./tools/New-ReleaseArtifacts.ps1 `
-  -OutputDirectory 'C:\ReleaseStaging\WindowsAdminToolkit-3.0.0-signed' `
+  -OutputDirectory 'C:\ReleaseStaging\WindowsAdminToolkit-3.0.1-signed' `
   -CertificateThumbprint '0123456789ABCDEF0123456789ABCDEF01234567' `
   -CertificateStoreLocation CurrentUser `
   -TimestampServer 'http://timestamp.digicert.com'
@@ -45,12 +45,27 @@ Certificate identity and trust must also be checked by the release reviewer:
 
 ```powershell
 $signature = Get-AuthenticodeSignature `
-  'C:\ReleaseStaging\WindowsAdminToolkit-3.0.0-signed\WindowsAdminToolkit.ps1'
+  'C:\ReleaseStaging\WindowsAdminToolkit-3.0.1-signed\WindowsAdminToolkit.ps1'
 
 $signature | Select-Object Status, StatusMessage, SignerCertificate, TimeStamperCertificate
 ```
 
 Authenticode proves which certificate signed the bytes and whether Windows currently trusts that signature. It does not prove that every toolkit operation is appropriate for a particular environment. Pin the expected publisher or certificate according to organizational policy.
+
+### Rotate documented signer pins safely
+
+The latest-release installers in `README.md` and `INSTALL.md` pin each approved signer as one tuple containing the exact full certificate subject, certificate thumbprint, and SHA-256 of `X509Certificate2.GetPublicKey()`. They also require trusted Authenticode status, a timestamp, and post-copy signature revalidation.
+
+For a planned certificate renewal or replacement:
+
+1. Independently validate the replacement certificate and protected key before using it.
+2. Compute its tuple from a verified candidate, then add that complete tuple to both installers in one reviewed change. Do not maintain independent subject, thumbprint, or public-key allow lists that could match fields from different certificates.
+3. Test both the current and replacement tuples under Windows PowerShell 5.1 and PowerShell 7.x while the current release is still latest.
+4. Merge the dual-pin documentation before publishing the replacement-signed release, so the moving `releases/latest` URL remains usable throughout the transition.
+5. Repeat the online installer, signature, timestamp, manifest, catalog, and installed-copy checks immediately after publication.
+6. Remove the retired tuple only in a later reviewed change after rollout and rollback requirements permit it.
+
+An unexpected signer tuple is a release blocker. Do not weaken the check to a common name, generic trust result, or execution-policy bypass.
 
 ## SHA-256 manifest
 
@@ -59,7 +74,7 @@ Authenticode proves which certificate signed the bytes and whether Windows curre
 Independent PowerShell verification:
 
 ```powershell
-$root = 'C:\ReleaseStaging\WindowsAdminToolkit-3.0.0-signed'
+$root = 'C:\ReleaseStaging\WindowsAdminToolkit-3.0.1-signed'
 foreach ($line in Get-Content (Join-Path $root 'SHA256SUMS.txt')) {
   if ($line -notmatch '^(?<hash>[0-9a-f]{64}) \*(?<path>.+)$') { throw "Bad line: $line" }
   $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $root $Matches.path)).Hash
@@ -74,6 +89,24 @@ Publish the manifest through the same authenticated release channel as the artif
 `WindowsAdminToolkit.spdx.json` uses SPDX 2.3 JSON and enumerates the exact copied payload before the SBOM and manifest are added. It records SHA-1 only where the SPDX 2.3 package verification-code algorithm requires it; file identity and release integrity are also recorded and enforced with SHA-256. The SBOM contains no runtime inventory, credentials, host data, or dependency download.
 
 Review the SBOM for the expected toolkit version, payload list, checksums, license, package verification code, and unique document namespace. Consumers may ingest it into their normal software-composition and release-evidence systems.
+
+## PowerShell Gallery candidate
+
+The signed 3.0.0 release script does not contain the `PSScriptInfo` metadata required for a PowerShell Gallery script. Adding metadata would change its signed bytes. Never modify, re-sign, or publish a different script as version 3.0.0.
+
+Prepare Gallery distribution only as part of a future versioned release:
+
+1. Confirm that the intended Gallery name is available or controlled by the publisher. Do not publish a placeholder package to reserve it.
+2. Update the canonical toolkit version and every version-bound schema, example, test, and document as one reviewed change.
+3. Add a `PSScriptInfo` block before the comment-based help and before `#Requires`. It must include a matching semantic version, stable GUID, author, company, copyright, description, project URI, HTTPS license URI, release notes, and searchable Windows and PowerShell edition tags.
+4. Run `Test-ScriptFileInfo` with the supported PowerShellGet baseline. When Microsoft.PowerShell.PSResourceGet is present, also run `Test-PSScriptFileInfo`. Treat a failure or metadata disagreement as a release blocker.
+5. Run the complete Windows PowerShell 5.1 and PowerShell 7.x test suites and PSScriptAnalyzer before and after adding metadata.
+6. Build and sign the normal release candidate. Re-run the metadata validators against the signed copy and confirm that the script version, release version, manifest, SBOM, and tag all agree.
+7. Test `Publish-Script -WhatIf -Verbose` and a private local repository workflow without a production API key. Install the resulting package into an isolated current-user scope and repeat Authenticode, publisher, startup, catalog, preflight, and read-only smoke checks.
+8. Obtain explicit publication approval. Keep the production Gallery API key outside source, logs, command history, and build artifacts.
+9. After publication, use `Save-Script` or `Install-Script` from an isolated machine, verify the retrieved script's Authenticode signature and publisher, and compare it with the approved release script. Record the Gallery owner, package URL, version, and validation evidence.
+
+Microsoft's current guidance requires script metadata and pre-validation, recommends signing and testing through a local repository, and notes that published packages cannot be casually deleted. Review the official [publishing workflow](https://learn.microsoft.com/powershell/gallery/how-to/publishing-packages/publishing-a-package), [publishing guidelines](https://learn.microsoft.com/powershell/gallery/concepts/publishing-guidelines), and current PowerShellGet or PSResourceGet command documentation again at release time.
 
 ## Publication discipline
 

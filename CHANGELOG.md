@@ -6,6 +6,27 @@ The format follows Keep a Changelog principles, and the project uses Semantic Ve
 
 ## [Unreleased]
 
+## [3.0.1] - 2026-08-27
+
+### Added
+
+- A copy-pasteable signed-release installation path with SHA-256 manifest, Authenticode, publisher, timestamp, and installed-copy verification
+- Deterministic sanitized JSON and self-contained HTML demonstrations for a no-connection first look
+- Controlled RMM and MSP staging guidance that begins with catalog discovery, restrictive policy, and no-action preflight
+
+### Changed
+
+- Made the signed standalone GitHub release the primary user installation path and clearly separated it from unsigned reviewable source
+- Added an explicit next-version gate for PowerShell Gallery metadata, signing, validation, and publication so version 3.0.0 is never rebuilt with different bytes
+
+### Fixed
+
+- Pinned release installation to one complete certificate identity and revalidated the timestamped signature after promotion
+- Made documented installs validate a unique same-directory candidate before atomic promotion and restore the prior installation if post-promotion verification fails
+- Made the RMM wrapper launch an explicit child PowerShell process and propagate missing-file, execution-policy, prelaunch, and toolkit exit failures reliably
+- Corrected synthetic demo target identifiers to match the toolkit's canonical stable-target algorithm
+- Included the README social-preview image in release payloads, checksum manifests, and SPDX inventories with the `IMAGE` file type
+
 ## [3.0.0] - 2026-08-24
 
 ### Added
@@ -118,6 +139,7 @@ The format follows Keep a Changelog principles, and the project uses Semantic Ve
 - Made WinRM the default remote-management transport
 - Moved default logs to `%LOCALAPPDATA%\WindowsAdminToolkit\Logs`
 
+[3.0.1]: https://github.com/fusiontechstrategies/Windows-Admin-Toolkit/releases/tag/v3.0.1
 [3.0.0]: https://github.com/fusiontechstrategies/Windows-Admin-Toolkit/releases/tag/v3.0.0
 [2.0.0]: https://github.com/fusiontechstrategies/Windows-Admin-Toolkit/releases/tag/v2.0.0
-[Unreleased]: https://github.com/fusiontechstrategies/Windows-Admin-Toolkit/compare/v3.0.0...HEAD
+[Unreleased]: https://github.com/fusiontechstrategies/Windows-Admin-Toolkit/compare/v3.0.1...HEAD

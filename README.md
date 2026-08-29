@@ -1,13 +1,19 @@
 # Windows Admin Toolkit
 
-One script. Twenty guarded Windows administration workflows. Secure local and remote operations across Windows PowerShell 5.1 and PowerShell 7.x.
+<p align="center">
+  <img src=".github/assets/social-preview.jpg" width="960" alt="Windows Admin Toolkit: Signed. Guarded. MSP-ready.">
+</p>
+
+Signed, portable Windows administration for help desks, MSPs, and RMM automation. Twenty guarded workflows run from one PowerShell script across Windows PowerShell 5.1 and PowerShell 7.x.
 
 [![CI](https://github.com/fusiontechstrategies/Windows-Admin-Toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/fusiontechstrategies/Windows-Admin-Toolkit/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/fusiontechstrategies/Windows-Admin-Toolkit.svg)](https://github.com/fusiontechstrategies/Windows-Admin-Toolkit/releases/latest)
 [![PowerShell](https://img.shields.io/badge/PowerShell-5.1%20%7C%207.x-2671be.svg)](https://learn.microsoft.com/powershell/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-Windows Admin Toolkit turns common Windows administration work into a focused interactive or noninteractive experience without becoming a framework, module collection, or installation project. The application remains a single PowerShell script that can inspect, report on, and administer authorized local or remote Windows systems.
+Windows Admin Toolkit gives technicians an interactive console and gives automation systems stable actions, JSON results, audit evidence, policy boundaries, and useful exit codes. Start with the signed standalone release, evaluate it against synthetic data or a read-only lab, and move to authorized endpoints only after reviewing the security model.
+
+[Install the signed release](#install-and-verify-the-signed-release) | [Preview sanitized output](examples/demo/README.md) | [Use it with RMM](examples/automation/README.md#read-only-rmm-execution) | [Review the security model](SECURITY.md)
 
 ## Why administrators use it
 
@@ -65,35 +71,193 @@ Read [SECURITY.md](SECURITY.md) and [RESPONSIBLE_USE.md](RESPONSIBLE_USE.md) bef
 
 The toolkit does not enable remote-management services or weaken security settings on your behalf.
 
-## Signed release
+## Install and verify the signed release
 
-Version 3.0.0 is available from the [GitHub release page](https://github.com/fusiontechstrategies/Windows-Admin-Toolkit/releases/tag/v3.0.0). The attached `WindowsAdminToolkit.ps1` and the copy inside the signed release archive are Authenticode-signed by Fusion Technology Strategies, Inc. with a DigiCert-issued code-signing certificate and a verified DigiCert timestamp. GitHub-generated source archives contain the reviewable repository source and are not the signed release assets.
-
-Verify the downloaded script before running it:
+This copy-pasteable current-user install downloads the standalone asset from the latest GitHub release, requires a valid Windows Authenticode trust result, pins the complete approved signer identity, and only then installs it. It validates a unique same-directory candidate before an atomic move or replacement, and restores an existing installation if post-promotion verification fails. The installer preserves the machine execution policy; the effective policy and application-control rules must permit trusted signed scripts.
 
 ```powershell
-$signature = Get-AuthenticodeSignature -LiteralPath .\WindowsAdminToolkit.ps1
-if ($signature.Status -ne 'Valid') {
-    throw "Signature verification failed: $($signature.StatusMessage)"
+$installDirectory = Join-Path $env:LOCALAPPDATA 'Programs\WindowsAdminToolkit'
+$installedScript = Join-Path $installDirectory 'WindowsAdminToolkit.ps1'
+$stagedScript = Join-Path ([IO.Path]::GetTempPath()) ("WindowsAdminToolkit-$([guid]::NewGuid().ToString('N')).ps1")
+
+function Test-WatReleaseSignature {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$LiteralPath
+    )
+
+    $approvedSigners = @(
+        [pscustomobject]@{
+            Subject = 'CN="Fusion Technology Strategies, Inc.", O="Fusion Technology Strategies, Inc.", L=Ormond Beach, S=Florida, C=US, SERIALNUMBER=P15000091612, OID.2.5.4.15=Private Organization, OID.1.3.6.1.4.1.311.60.2.1.2=Florida, OID.1.3.6.1.4.1.311.60.2.1.3=US'
+            Thumbprint = '44BB10D1C4ACB6B8A043BA136AE5442BEFD47131'
+            PublicKeySha256 = '9ABCB20E3D546C2F2D0973AA98DC6E503387E88462EC9F9E5FD5DC5047A65275'
+        }
+    )
+
+    $signature = Get-AuthenticodeSignature -LiteralPath $LiteralPath
+    if ($signature.Status -ne 'Valid' -or -not $signature.SignerCertificate) {
+        throw "Authenticode verification failed: $($signature.StatusMessage)"
+    }
+
+    $certificate = $signature.SignerCertificate
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $publicKeySha256 = ([BitConverter]::ToString($sha256.ComputeHash($certificate.GetPublicKey())) -replace '-', '')
+    }
+    finally {
+        $sha256.Dispose()
+    }
+
+    $matchingSigners = @(
+        $approvedSigners | Where-Object {
+            $_.Subject -ceq $certificate.Subject -and
+            $_.Thumbprint -ceq $certificate.Thumbprint -and
+            $_.PublicKeySha256 -ceq $publicKeySha256
+        }
+    )
+    if ($matchingSigners.Count -ne 1) {
+        throw "The signer certificate is valid but is not an approved release identity. Subject: $($certificate.Subject); thumbprint: $($certificate.Thumbprint); public-key SHA-256: $publicKeySha256"
+    }
+    if (-not $signature.TimeStamperCertificate) {
+        throw 'The Authenticode signature does not contain a timestamp certificate.'
+    }
+
+    return $signature
 }
-$signature.SignerCertificate.Subject
+
+function Install-WatVerifiedScript {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SourcePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DestinationPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedSha256
+    )
+
+    $sourceFullPath = [IO.Path]::GetFullPath($SourcePath)
+    $destinationFullPath = [IO.Path]::GetFullPath($DestinationPath)
+    $normalizedExpectedHash = $ExpectedSha256.ToUpperInvariant()
+    if ($normalizedExpectedHash -cnotmatch '^[0-9A-F]{64}$') {
+        throw 'The expected SHA-256 value is not canonical.'
+    }
+
+    $validatePayload = {
+        param([string]$LiteralPath)
+
+        if (-not [IO.File]::Exists($LiteralPath)) {
+            throw "The file to validate does not exist: $LiteralPath"
+        }
+        $actualHash = (Get-FileHash -LiteralPath $LiteralPath -Algorithm SHA256 -ErrorAction Stop).Hash
+        if ($actualHash -cne $normalizedExpectedHash) {
+            throw "SHA-256 mismatch. Expected $normalizedExpectedHash; received $actualHash."
+        }
+        [void](Test-WatReleaseSignature -LiteralPath $LiteralPath)
+    }
+
+    & $validatePayload $sourceFullPath
+
+    $destinationDirectory = [IO.Path]::GetDirectoryName($destinationFullPath)
+    if ([string]::IsNullOrWhiteSpace($destinationDirectory)) {
+        throw 'The installation path has no parent directory.'
+    }
+    [void](New-Item -ItemType Directory -Path $destinationDirectory -Force -ErrorAction Stop)
+
+    $operationId = [guid]::NewGuid().ToString('N')
+    $candidatePath = Join-Path $destinationDirectory ".WindowsAdminToolkit-$operationId.candidate.ps1"
+    $rollbackPath = Join-Path $destinationDirectory ".WindowsAdminToolkit-$operationId.rollback.ps1"
+
+    try {
+        [IO.File]::Copy($sourceFullPath, $candidatePath, $false)
+        Unblock-File -LiteralPath $candidatePath -ErrorAction Stop
+        & $validatePayload $candidatePath
+
+        if ([IO.File]::Exists($destinationFullPath)) {
+            try {
+                [IO.File]::Replace($candidatePath, $destinationFullPath, $rollbackPath)
+            }
+            catch {
+                if ([IO.File]::Exists($rollbackPath)) {
+                    throw "Atomic replacement failed. The recovery copy remains at '$rollbackPath'. $($_.Exception.Message)"
+                }
+                throw
+            }
+
+            try {
+                & $validatePayload $destinationFullPath
+            }
+            catch {
+                $verificationError = $_
+                try {
+                    if (-not [IO.File]::Exists($rollbackPath)) {
+                        throw 'The rollback copy is missing.'
+                    }
+                    if ([IO.File]::Exists($destinationFullPath)) {
+                        [IO.File]::Replace($rollbackPath, $destinationFullPath, $candidatePath)
+                    }
+                    else {
+                        [IO.File]::Move($rollbackPath, $destinationFullPath)
+                    }
+                }
+                catch {
+                    throw "The promoted file failed verification and automatic rollback failed. The recovery copy, if available, remains at '$rollbackPath'. Verification error: $($verificationError.Exception.Message) Rollback error: $($_.Exception.Message)"
+                }
+                throw $verificationError
+            }
+
+            if ([IO.File]::Exists($rollbackPath)) {
+                [IO.File]::Delete($rollbackPath)
+            }
+        }
+        else {
+            [IO.File]::Move($candidatePath, $destinationFullPath)
+            try {
+                & $validatePayload $destinationFullPath
+            }
+            catch {
+                $verificationError = $_
+                try {
+                    [IO.File]::Move($destinationFullPath, $candidatePath)
+                }
+                catch {
+                    throw "The first installation failed verification and could not be removed safely. Verification error: $($verificationError.Exception.Message) Cleanup error: $($_.Exception.Message)"
+                }
+                throw $verificationError
+            }
+        }
+    }
+    finally {
+        if ([IO.File]::Exists($candidatePath)) {
+            [IO.File]::Delete($candidatePath)
+        }
+    }
+}
+
+try {
+    Invoke-WebRequest `
+        -Uri 'https://github.com/fusiontechstrategies/Windows-Admin-Toolkit/releases/latest/download/WindowsAdminToolkit.ps1' `
+        -UseBasicParsing `
+        -OutFile $stagedScript
+
+    $expectedHash = (Get-FileHash -LiteralPath $stagedScript -Algorithm SHA256 -ErrorAction Stop).Hash
+    [void](Install-WatVerifiedScript -SourcePath $stagedScript -DestinationPath $installedScript -ExpectedSha256 $expectedHash)
+}
+finally {
+    if ([IO.File]::Exists($stagedScript)) { [IO.File]::Delete($stagedScript) }
+}
+
+& $installedScript -Automation -ListActions -JsonOutputPath -
 ```
 
-## Quick start
+For SHA-256 manifest verification, offline deployment, update procedures, and RMM staging guidance, use the complete [installation and trust guide](INSTALL.md). Version 3.0.1 is also available as a [complete signed ZIP](https://github.com/fusiontechstrategies/Windows-Admin-Toolkit/releases/tag/v3.0.1). GitHub-generated source archives and repository clones are reviewable source, not signed release assets.
 
-```powershell
-git clone https://github.com/fusiontechstrategies/Windows-Admin-Toolkit.git
-Set-Location .\Windows-Admin-Toolkit
-.\WindowsAdminToolkit.ps1
-```
+## Five-minute no-change evaluation
 
-If Windows marks a trusted downloaded copy as blocked, review the source and then remove only the downloaded-file marker:
-
-```powershell
-Unblock-File -LiteralPath .\WindowsAdminToolkit.ps1
-```
-
-The toolkit does not require or recommend an execution-policy bypass.
+Download and open the [sanitized HTML report](examples/demo/system-info-sample.html) or inspect the matching [JSON result](examples/demo/system-info-sample.json) without contacting a system. Then use `-ListActions` or a capability `-Preflight` in an isolated lab; neither operation executes the requested administration action. The [demo guide](examples/demo/README.md) walks through the sequence and marks the boundary before any live endpoint use.
 
 ## Common launch options
 
@@ -154,7 +318,7 @@ Automation mode accepts `WinRmIdentity` (or its backward-compatible `Credential`
 
 ## Automation, policy, audit, and controlled orchestration
 
-Version 3.0.0 builds on the fail-closed automation, least-privilege policy, and enterprise audit interfaces with controlled orchestration. Direct automation runs one stable named action without menus or prompts and uses the same action implementations as the interactive menu.
+Version 3.0.1 preserves the fail-closed automation, least-privilege policy, enterprise audit interfaces, and controlled orchestration introduced in 3.0.0. Direct automation runs one stable named action without menus or prompts and uses the same action implementations as the interactive menu.
 
 ```powershell
 # Enumerate all stable action IDs and input requirements

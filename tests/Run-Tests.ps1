@@ -140,7 +140,60 @@ exit `$LASTEXITCODE
     }
 }
 
-Test-ToolkitAssertion -Condition ($Script:ToolkitVersion -eq '3.0.0') -Name 'Version is 3.0.0'
+function Invoke-TestPowerShellCommandProcess {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$EnginePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$CommandText,
+
+        [Parameter()]
+        [string]$ExecutionPolicy = '',
+
+        [Parameter()]
+        [ValidateRange(5, 60)]
+        [int]$TimeoutSeconds = 30
+    )
+
+    $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($CommandText))
+    $executionPolicyArgument = if ([string]::IsNullOrWhiteSpace($ExecutionPolicy)) { '' } else { "-ExecutionPolicy $ExecutionPolicy " }
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $EnginePath
+    $startInfo.Arguments = "-NoLogo -NoProfile -NonInteractive $executionPolicyArgument-EncodedCommand $encodedCommand"
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+    $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+    try {
+        if (-not $process.Start()) {
+            throw 'Unable to start the PowerShell command test process.'
+        }
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $process.StandardInput.Close()
+        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+            try { $process.Kill() } catch { Write-Verbose $_.Exception.Message }
+            throw "The PowerShell command test process exceeded $TimeoutSeconds seconds."
+        }
+        return [pscustomobject]@{
+            ExitCode = $process.ExitCode
+            StdOut   = $stdoutTask.GetAwaiter().GetResult()
+            StdErr   = $stderrTask.GetAwaiter().GetResult()
+        }
+    }
+    finally {
+        $process.Dispose()
+    }
+}
+
+Test-ToolkitAssertion -Condition ($Script:ToolkitVersion -eq '3.0.1') -Name 'Version is 3.0.1'
 Test-ToolkitAssertion -Condition ($Script:ActionCatalog.Count -eq 20) -Name 'Action catalog contains 20 actions'
 Test-ToolkitAssertion -Condition ($Script:ActionScripts.Count -eq 20) -Name 'Action script registry contains 20 scripts'
 Test-ToolkitAssertion -Condition ($Script:AutomationSchemaVersion -eq '1.2') -Name 'Automation schema version is 1.2'
@@ -557,6 +610,63 @@ $emDashFiles = @(
 )
 Test-ToolkitAssertion -Condition ($emDashFiles.Count -eq 0) -Name 'Repository text contains no em dashes'
 
+$publicMarkdownEmDashFiles = @(
+    Get-ChildItem -LiteralPath $projectRoot -Recurse -File -Filter '*.md' -ErrorAction Stop |
+        Where-Object { $_.FullName -notmatch '[\\/]\.git[\\/]' } |
+        Where-Object { (Get-Content -LiteralPath $_.FullName -Raw).IndexOf([char]0x2014) -ge 0 }
+)
+Test-ToolkitAssertion -Condition ($publicMarkdownEmDashFiles.Count -eq 0) -Name 'Public Markdown contains no Unicode em dashes'
+
+$readmePath = Join-Path $projectRoot 'README.md'
+$installGuidePath = Join-Path $projectRoot 'INSTALL.md'
+$demoGuidePath = Join-Path $projectRoot 'examples\demo\README.md'
+$demoJsonPath = Join-Path $projectRoot 'examples\demo\system-info-sample.json'
+$demoHtmlPath = Join-Path $projectRoot 'examples\demo\system-info-sample.html'
+$readmeText = [IO.File]::ReadAllText($readmePath)
+$installGuideText = [IO.File]::ReadAllText($installGuidePath)
+$demoGuideText = [IO.File]::ReadAllText($demoGuidePath)
+$demoJsonText = [IO.File]::ReadAllText($demoJsonPath)
+$demoHtmlText = [IO.File]::ReadAllText($demoHtmlPath)
+$demoResult = ConvertFrom-Json -InputObject $demoJsonText -ErrorAction Stop
+$expectedSignerSubject = 'CN="Fusion Technology Strategies, Inc.", O="Fusion Technology Strategies, Inc.", L=Ormond Beach, S=Florida, C=US, SERIALNUMBER=P15000091612, OID.2.5.4.15=Private Organization, OID.1.3.6.1.4.1.311.60.2.1.2=Florida, OID.1.3.6.1.4.1.311.60.2.1.3=US'
+$expectedSignerThumbprint = '44BB10D1C4ACB6B8A043BA136AE5442BEFD47131'
+$expectedSignerPublicKeySha256 = '9ABCB20E3D546C2F2D0973AA98DC6E503387E88462EC9F9E5FD5DC5047A65275'
+$readmeInstallMatch = [regex]::Match($readmeText, '(?ms)^## Install and verify the signed release\s+.*?^```powershell\s*\r?\n(?<Code>.*?)^```\s*$')
+$readmeInstallText = if ($readmeInstallMatch.Success) { $readmeInstallMatch.Groups['Code'].Value } else { '' }
+$atomicInstallerFunctionPattern = '(?ms)^function Install-WatVerifiedScript \{.*?^\}'
+$readmeAtomicInstallerMatch = [regex]::Match($readmeInstallText, $atomicInstallerFunctionPattern)
+$installAtomicInstallerMatch = [regex]::Match($installGuideText, $atomicInstallerFunctionPattern)
+$readmeAtomicInstallerText = if ($readmeAtomicInstallerMatch.Success) { $readmeAtomicInstallerMatch.Value } else { '' }
+$installAtomicInstallerText = if ($installAtomicInstallerMatch.Success) { $installAtomicInstallerMatch.Value } else { '' }
+$rmmWrapperMatch = [regex]::Match($installGuideText, '(?ms)^Example local preflight from an RMM agent.*?^```powershell\s*\r?\n(?<Code>.*?)^```\s*$')
+$rmmWrapperText = if ($rmmWrapperMatch.Success) { $rmmWrapperMatch.Groups['Code'].Value } else { '' }
+
+Test-ToolkitAssertion -Condition ($readmeText -match 'releases/latest/download/WindowsAdminToolkit\.ps1' -and $readmeText -notmatch '(?ms)## Install and verify the signed release.*?\bgit clone\b') -Name 'Primary installation uses the latest signed release asset instead of a source clone'
+Test-ToolkitAssertion -Condition ($readmeInstallMatch.Success -and $readmeAtomicInstallerMatch.Success -and $readmeAtomicInstallerText.IndexOf('& $validatePayload $sourceFullPath', [StringComparison]::Ordinal) -ge 0 -and $readmeAtomicInstallerText.IndexOf('& $validatePayload $sourceFullPath', [StringComparison]::Ordinal) -lt $readmeAtomicInstallerText.IndexOf('[IO.File]::Copy', [StringComparison]::Ordinal)) -Name 'Primary installation validates the staged payload before creating a candidate'
+Test-ToolkitAssertion -Condition ($readmeInstallText.Contains($expectedSignerSubject) -and $readmeInstallText.Contains($expectedSignerThumbprint) -and $readmeInstallText.Contains($expectedSignerPublicKeySha256) -and $installGuideText.Contains($expectedSignerSubject) -and $installGuideText.Contains($expectedSignerThumbprint) -and $installGuideText.Contains($expectedSignerPublicKeySha256)) -Name 'Installers pin the exact full signer subject, certificate, and public key'
+Test-ToolkitAssertion -Condition ($readmeInstallText -match 'TimeStamperCertificate' -and $readmeAtomicInstallerText -match '& \$validatePayload \$candidatePath' -and ([regex]::Matches($readmeAtomicInstallerText, '& \$validatePayload \$destinationFullPath')).Count -eq 2) -Name 'Primary installation requires a timestamp and validates the candidate plus promoted copy'
+Test-ToolkitAssertion -Condition ($readmeAtomicInstallerMatch.Success -and $installAtomicInstallerMatch.Success -and $readmeAtomicInstallerText -ceq $installAtomicInstallerText -and $readmeAtomicInstallerText -match '\[IO\.File\]::Replace\(\$candidatePath, \$destinationFullPath, \$rollbackPath\)' -and $readmeAtomicInstallerText -match '\[IO\.File\]::Move\(\$candidatePath, \$destinationFullPath\)' -and $readmeAtomicInstallerText -notmatch '\[IO\.File\]::Copy\(\$sourceFullPath, \$destinationFullPath' -and $readmeAtomicInstallerText -match '\[IO\.File\]::Replace\(\$rollbackPath, \$destinationFullPath, \$candidatePath\)') -Name 'Both installers use one candidate-first atomic promotion and rollback implementation'
+Test-ToolkitAssertion -Condition ($installGuideText -match 'SHA256SUMS\.txt' -and $installGuideText -match 'Get-FileHash' -and $installGuideText -match 'Get-AuthenticodeSignature' -and $installGuideText -match 'TimeStamperCertificate') -Name 'Installation guide verifies manifest, hash, signature, and timestamp'
+Test-ToolkitAssertion -Condition ($installGuideText -notmatch '(?i)Set-ExecutionPolicy|ExecutionPolicy\s+Bypass' -and $readmeText -notmatch '(?i)Set-ExecutionPolicy|ExecutionPolicy\s+Bypass' -and $readmeText -match 'effective policy.*must permit trusted signed scripts' -and $installGuideText -match 'effective execution policy.*must still allow this trusted signed script') -Name 'Installation guidance preserves policy, requires permission for signed scripts, and rejects bypasses'
+Test-ToolkitAssertion -Condition ($rmmWrapperMatch.Success -and $rmmWrapperText -match [regex]::Escape("System32\WindowsPowerShell\v1.0\powershell.exe") -and $rmmWrapperText -match '\$LASTEXITCODE\s*=\s*\$null' -and $rmmWrapperText -match 'exit \$childExitCode' -and $rmmWrapperText -match '(?s)not found.*?exit 10' -and $rmmWrapperText -notmatch '(?i)ExecutionPolicy\s+Bypass') -Name 'RMM wrapper launches an explicit child and propagates deterministic exit codes'
+Test-ToolkitAssertion -Condition ($demoResult.schemaVersion -ceq '1.2' -and $demoResult.toolkitVersion -ceq '3.0.1' -and $demoResult.actionId -ceq 'SystemInfo' -and $demoResult.outcome -ceq 'CompleteSuccess' -and $demoResult.exitCode -eq 0 -and $demoResult.targetCount -eq 3 -and $demoResult.recordCount -eq 3 -and @($demoResult.targets).Count -eq 3) -Name 'Sanitized demo JSON follows the documented successful result contract'
+Test-ToolkitAssertion -Condition (@($demoResult.targets | Where-Object { $_.target -notmatch '^[a-z0-9-]+\.example\.com$' -or $_.targetId -notmatch '^t-[0-9a-f]{24}$' -or $_.status -cne 'Success' -or @($_.data).Count -ne 1 }).Count -eq 0) -Name 'Sanitized demo JSON uses only synthetic targets and stable target records'
+$expectedDemoTargetIds = [ordered]@{
+    'client-a-ws01.example.com' = 't-220c92273cf41abb8bf20930'
+    'client-b-srv01.example.com' = 't-0c552a31902f0b5d11a8b11e'
+    'client-c-ws01.example.com' = 't-cd6c4f13f3104c24bd72a9f7'
+}
+$invalidDemoTargetIds = @(
+    $demoResult.targets | Where-Object {
+        -not $expectedDemoTargetIds.Contains($_.target) -or
+        $_.targetId -cne $expectedDemoTargetIds[$_.target] -or
+        $_.targetId -cne (Get-AdminStableTargetId -ComputerName $_.target)
+    }
+)
+Test-ToolkitAssertion -Condition ($invalidDemoTargetIds.Count -eq 0 -and @($demoResult.targets).Count -eq $expectedDemoTargetIds.Count) -Name 'Sanitized demo target IDs match the canonical stable-target algorithm'
+Test-ToolkitAssertion -Condition ($demoHtmlText -match 'SYNTHETIC SAMPLE' -and @($demoResult.targets | Where-Object { -not $demoHtmlText.Contains([string]$_.data[0].ComputerName) }).Count -eq 0) -Name 'Sanitized HTML report matches every JSON demo target and labels itself clearly'
+Test-ToolkitAssertion -Condition ($demoHtmlText -notmatch '(?i)<script\b|javascript:|\son[a-z]+\s*=' -and $demoHtmlText -notmatch '(?i)(?:src|href)\s*=\s*["'']https?://' -and $demoGuideText -match 'without connecting to a system') -Name 'Sanitized demo remains self-contained and no-connection by design'
+
 $dangerousValue = "safe'; Write-Output 'not executed'; #"
 $testAction = 'param([string]$Value) [pscustomobject]@{Value=$Value;Status=''Success''}'
 $payload = ConvertTo-AdminEncodedPayload -ActionText $testAction -ArgumentList @($dangerousValue)
@@ -641,6 +751,152 @@ if (-not $resolvedTemporaryRoot.StartsWith($resolvedTempBase, [System.StringComp
 
 try {
     [void][System.IO.Directory]::CreateDirectory($resolvedTemporaryRoot)
+
+    $documentedInstallerCases = @(
+        [pscustomobject]@{ Name = 'README'; FunctionText = $readmeAtomicInstallerText },
+        [pscustomobject]@{ Name = 'INSTALL'; FunctionText = $installAtomicInstallerText }
+    )
+    $documentedInstallerResults = @()
+    $installerRunnerPrefix = @'
+param(
+    [string]$SourcePath,
+    [string]$DestinationPath,
+    [string]$ExpectedSha256,
+    [ValidateSet('None', 'Candidate', 'Destination', 'DestinationMissing')]
+    [string]$FailureMode
+)
+
+function Test-WatReleaseSignature {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$LiteralPath
+    )
+
+    if ($FailureMode -ceq 'Candidate' -and $LiteralPath -like '*.candidate.ps1') {
+        throw 'Simulated candidate signature failure.'
+    }
+    if ($FailureMode -ceq 'Destination' -and [IO.Path]::GetFullPath($LiteralPath) -ceq [IO.Path]::GetFullPath($DestinationPath)) {
+        throw 'Simulated promoted signature failure.'
+    }
+    if ($FailureMode -ceq 'DestinationMissing' -and [IO.Path]::GetFullPath($LiteralPath) -ceq [IO.Path]::GetFullPath($DestinationPath)) {
+        [IO.File]::Delete($LiteralPath)
+        throw 'Simulated promoted-file removal race.'
+    }
+}
+
+'@
+    $installerRunnerSuffix = @'
+
+[void](Install-WatVerifiedScript -SourcePath $SourcePath -DestinationPath $DestinationPath -ExpectedSha256 $ExpectedSha256)
+'@
+
+    foreach ($documentedInstallerCase in $documentedInstallerCases) {
+        $installerCaseRoot = Join-Path $resolvedTemporaryRoot ("documented-installer-$($documentedInstallerCase.Name.ToLowerInvariant())")
+        [void][IO.Directory]::CreateDirectory($installerCaseRoot)
+        $installerSourcePath = Join-Path $installerCaseRoot 'source.ps1'
+        $installerDestinationPath = Join-Path $installerCaseRoot 'installed\WindowsAdminToolkit.ps1'
+        $installerRunner = [scriptblock]::Create($installerRunnerPrefix + $documentedInstallerCase.FunctionText + $installerRunnerSuffix)
+        $installerUtf8 = New-Object Text.UTF8Encoding($false)
+
+        [IO.File]::WriteAllText($installerSourcePath, "first-$($documentedInstallerCase.Name)-payload", $installerUtf8)
+        $installerSourceHash = (Get-FileHash -LiteralPath $installerSourcePath -Algorithm SHA256 -ErrorAction Stop).Hash
+        & $installerRunner $installerSourcePath $installerDestinationPath $installerSourceHash 'None'
+        $firstInstallPassed = [IO.File]::Exists($installerDestinationPath) -and [IO.File]::ReadAllText($installerDestinationPath) -ceq "first-$($documentedInstallerCase.Name)-payload"
+
+        [IO.File]::WriteAllText($installerSourcePath, "replacement-$($documentedInstallerCase.Name)-payload", $installerUtf8)
+        $installerSourceHash = (Get-FileHash -LiteralPath $installerSourcePath -Algorithm SHA256 -ErrorAction Stop).Hash
+        & $installerRunner $installerSourcePath $installerDestinationPath $installerSourceHash 'None'
+        $replacementPassed = [IO.File]::ReadAllText($installerDestinationPath) -ceq "replacement-$($documentedInstallerCase.Name)-payload"
+        $knownGoodBytes = [Convert]::ToBase64String([IO.File]::ReadAllBytes($installerDestinationPath))
+
+        [IO.File]::WriteAllText($installerSourcePath, "rejected-$($documentedInstallerCase.Name)-payload", $installerUtf8)
+        $installerSourceHash = (Get-FileHash -LiteralPath $installerSourcePath -Algorithm SHA256 -ErrorAction Stop).Hash
+        $candidateFailureReported = $false
+        try {
+            & $installerRunner $installerSourcePath $installerDestinationPath $installerSourceHash 'Candidate'
+        }
+        catch {
+            $candidateFailureReported = $_.Exception.Message -match 'Simulated candidate signature failure'
+        }
+        $candidateFailurePreservedExisting = $knownGoodBytes -ceq [Convert]::ToBase64String([IO.File]::ReadAllBytes($installerDestinationPath))
+
+        $postPromotionFailureReported = $false
+        try {
+            & $installerRunner $installerSourcePath $installerDestinationPath $installerSourceHash 'Destination'
+        }
+        catch {
+            $postPromotionFailureReported = $_.Exception.Message -match 'Simulated promoted signature failure'
+        }
+        $postPromotionRollbackPassed = $knownGoodBytes -ceq [Convert]::ToBase64String([IO.File]::ReadAllBytes($installerDestinationPath))
+
+        $destinationRemovalRaceReported = $false
+        try {
+            & $installerRunner $installerSourcePath $installerDestinationPath $installerSourceHash 'DestinationMissing'
+        }
+        catch {
+            $destinationRemovalRaceReported = $_.Exception.Message -match 'Simulated promoted-file removal race'
+        }
+        $destinationRemovalRaceRestored = [IO.File]::Exists($installerDestinationPath) -and $knownGoodBytes -ceq [Convert]::ToBase64String([IO.File]::ReadAllBytes($installerDestinationPath))
+        $installerTemporaryArtifacts = @(
+            Get-ChildItem -LiteralPath (Split-Path -Parent $installerDestinationPath) -Force -File -ErrorAction Stop |
+                Where-Object { $_.Name -match '^\.WindowsAdminToolkit-[0-9a-f]{32}\.(?:candidate|rollback)\.ps1$' }
+        )
+
+        $documentedInstallerResults += [pscustomobject]@{
+            Name                              = $documentedInstallerCase.Name
+            FirstInstallPassed                = $firstInstallPassed
+            ReplacementPassed                 = $replacementPassed
+            CandidateFailureReported          = $candidateFailureReported
+            CandidateFailurePreservedExisting = $candidateFailurePreservedExisting
+            PostPromotionFailureReported      = $postPromotionFailureReported
+            PostPromotionRollbackPassed       = $postPromotionRollbackPassed
+            DestinationRemovalRaceReported    = $destinationRemovalRaceReported
+            DestinationRemovalRaceRestored    = $destinationRemovalRaceRestored
+            TemporaryArtifactsRemoved         = $installerTemporaryArtifacts.Count -eq 0
+        }
+    }
+
+    Test-ToolkitAssertion -Condition (@($documentedInstallerResults | Where-Object { -not $_.FirstInstallPassed }).Count -eq 0) -Name 'Both documented installers atomically complete a first installation'
+    Test-ToolkitAssertion -Condition (@($documentedInstallerResults | Where-Object { -not $_.ReplacementPassed }).Count -eq 0) -Name 'Both documented installers atomically replace an existing installation'
+    Test-ToolkitAssertion -Condition (@($documentedInstallerResults | Where-Object { -not $_.CandidateFailureReported -or -not $_.CandidateFailurePreservedExisting }).Count -eq 0) -Name 'A rejected installer candidate leaves the existing installation byte-for-byte intact'
+    Test-ToolkitAssertion -Condition (@($documentedInstallerResults | Where-Object { -not $_.PostPromotionFailureReported -or -not $_.PostPromotionRollbackPassed }).Count -eq 0) -Name 'Post-promotion verification failure atomically restores the prior installation'
+    Test-ToolkitAssertion -Condition (@($documentedInstallerResults | Where-Object { -not $_.DestinationRemovalRaceReported -or -not $_.DestinationRemovalRaceRestored }).Count -eq 0) -Name 'A promoted-file removal race restores the prior installation with an atomic move'
+    Test-ToolkitAssertion -Condition (@($documentedInstallerResults | Where-Object { -not $_.TemporaryArtifactsRemoved }).Count -eq 0) -Name 'Documented installers remove only their exact temporary promotion artifacts after handled outcomes'
+
+    $documentTestEnginePath = (Get-Process -Id $PID -ErrorAction Stop).Path
+    $documentedToolkitPath = 'C:\ProgramData\WindowsAdminToolkit\WindowsAdminToolkit.ps1'
+    $missingDocumentedToolkitPath = Join-Path $resolvedTemporaryRoot 'missing-rmm-toolkit.ps1'
+    $missingRmmWrapperText = $rmmWrapperText.Replace($documentedToolkitPath, $missingDocumentedToolkitPath)
+    $missingRmmWrapperProcess = Invoke-TestPowerShellCommandProcess -EnginePath $documentTestEnginePath -CommandText $missingRmmWrapperText
+    Test-ToolkitAssertion -Condition ($missingRmmWrapperProcess.ExitCode -eq 10 -and $missingRmmWrapperProcess.StdOut.Trim().Length -eq 0 -and $missingRmmWrapperProcess.StdErr -match 'was not found') -Name 'RMM wrapper returns 10 when the toolkit script is missing'
+
+    $restrictedToolkitPath = Join-Path $resolvedTemporaryRoot 'restricted-rmm-toolkit.ps1'
+    $restrictedToolkitSource = @'
+[CmdletBinding()]
+param(
+    [switch]$Automation,
+    [string]$Action,
+    [switch]$Local,
+    [string]$PolicyPath,
+    [switch]$Preflight,
+    [string]$JsonOutputPath
+)
+[Console]::Out.WriteLine('{"outcome":"CompleteSuccess","exitCode":0}')
+exit 0
+'@
+    [IO.File]::WriteAllText($restrictedToolkitPath, $restrictedToolkitSource, (New-Object Text.UTF8Encoding($false)))
+    $restrictedRmmWrapperText = $rmmWrapperText.Replace($documentedToolkitPath, $restrictedToolkitPath)
+    $childArgumentMarker = '$childArguments = @('
+    $restrictedChildArgumentMarker = @'
+$childArguments = @(
+    '-ExecutionPolicy',
+    'Restricted',
+'@
+    $restrictedRmmWrapperText = $restrictedRmmWrapperText.Replace($childArgumentMarker, $restrictedChildArgumentMarker)
+    $restrictedRmmWrapperProcess = Invoke-TestPowerShellCommandProcess -EnginePath $documentTestEnginePath -CommandText $restrictedRmmWrapperText
+    Test-ToolkitAssertion -Condition ($restrictedRmmWrapperProcess.ExitCode -ne 0 -and $restrictedRmmWrapperProcess.ExitCode -ne 10 -and $restrictedRmmWrapperProcess.StdErr -match '(?i)execution policy|running scripts is disabled|UnauthorizedAccess|PSSecurityException') -Name 'RMM wrapper propagates a Restricted-policy child prelaunch failure'
+
     $outputProbePath = Join-Path $resolvedTemporaryRoot 'preflight-result.json'
     $resolvedOutputProbePath = Resolve-AdminAutomationOutputPath -LiteralPath $outputProbePath
     $leftoverOutputProbes = @(Get-ChildItem -LiteralPath $resolvedTemporaryRoot -Filter '.admin-json-probe-*.tmp' -File -ErrorAction Stop)
@@ -989,20 +1245,20 @@ try {
 
     $planSchemaPath = Join-Path $projectRoot 'schemas\orchestration-plan-v1.schema.json'
     $planSchema = Get-Content -LiteralPath $planSchemaPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-    Test-ToolkitAssertion -Condition ($planSchema.properties.schemaVersion.const -ceq '1.0' -and $planSchema.properties.toolkitVersion.const -ceq '3.0.0') -Name 'Committed orchestration plan schema locks its public versions'
+    Test-ToolkitAssertion -Condition ($planSchema.properties.schemaVersion.const -ceq '1.0' -and $planSchema.properties.toolkitVersion.const -ceq '3.0.1') -Name 'Committed orchestration plan schema locks its public versions'
     Test-ToolkitAssertion -Condition (-not [bool]$planSchema.additionalProperties -and -not [bool]$planSchema.'$defs'.request.additionalProperties) -Name 'Orchestration plan schema rejects unknown root and request properties'
     Test-ToolkitAssertion -Condition (@($planSchema.'$defs'.stableActionId.enum).Count -eq 18 -and @($planSchema.'$defs'.stableActionId.enum | Where-Object { $_ -in @('CustomCommand', 'CustomPowerShell') }).Count -eq 0) -Name 'Orchestration plan schema excludes both unsandboxed custom-code actions'
     Test-ToolkitAssertion -Condition ($planSchema.'$defs'.request.properties.targets.maxItems -eq 500 -and ($planSchema.'$defs'.approval.properties.status.enum -join '|') -ceq 'Pending|Approved') -Name 'Orchestration plan schema bounds targets and approval states'
 
     $checkpointSchemaPath = Join-Path $projectRoot 'schemas\orchestration-checkpoint-v1.schema.json'
     $checkpointSchema = Get-Content -LiteralPath $checkpointSchemaPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-    Test-ToolkitAssertion -Condition ($checkpointSchema.properties.schemaVersion.const -ceq '1.0' -and $checkpointSchema.properties.toolkitVersion.const -ceq '3.0.0') -Name 'Committed checkpoint schema locks its public versions'
+    Test-ToolkitAssertion -Condition ($checkpointSchema.properties.schemaVersion.const -ceq '1.0' -and $checkpointSchema.properties.toolkitVersion.const -ceq '3.0.1') -Name 'Committed checkpoint schema locks its public versions'
     Test-ToolkitAssertion -Condition (($checkpointSchema.'$defs'.lifecycleTarget.properties.state.enum -join '|') -ceq 'Pending|InProgress|Completed|Failed|TimedOut|Skipped|Unknown') -Name 'Checkpoint schema enumerates every explicit lifecycle state'
     Test-ToolkitAssertion -Condition ($checkpointSchema.'$defs'.lifecycleTarget.properties.attempts.maximum -eq 1 -and $checkpointSchema.properties.targets.maxItems -eq 500) -Name 'Checkpoint schema prohibits repeated orchestration attempts and bounds targets'
 
     $orchestrationResultSchemaPath = Join-Path $projectRoot 'schemas\orchestration-result-v1.schema.json'
     $orchestrationResultSchema = Get-Content -LiteralPath $orchestrationResultSchemaPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-    Test-ToolkitAssertion -Condition ($orchestrationResultSchema.properties.schemaVersion.const -ceq '1.0' -and $orchestrationResultSchema.properties.toolkitVersion.const -ceq '3.0.0') -Name 'Committed orchestration result schema locks its public versions'
+    Test-ToolkitAssertion -Condition ($orchestrationResultSchema.properties.schemaVersion.const -ceq '1.0' -and $orchestrationResultSchema.properties.toolkitVersion.const -ceq '3.0.1') -Name 'Committed orchestration result schema locks its public versions'
     Test-ToolkitAssertion -Condition (($orchestrationResultSchema.properties.operation.enum -join '|') -ceq 'Create|Approve|Execute|Resume|Unknown') -Name 'Orchestration result schema enumerates every plan operation'
     Test-ToolkitAssertion -Condition (@($orchestrationResultSchema.allOf).Count -eq 9 -and @($orchestrationResultSchema.required).Count -eq 20) -Name 'Orchestration result schema locks all outcomes and stable root fields'
 
@@ -1027,7 +1283,7 @@ try {
         Test-ToolkitAssertion -Condition (@($requiredRootFields | Where-Object { $_ -notin $presentFields }).Count -eq 0) -Name "Example $($exampleFile.Name) contains all stable root fields"
         Test-ToolkitAssertion -Condition ($example.outcome -eq $expectedExampleOutcomes[$exampleFile.BaseName]) -Name "Example $($exampleFile.Name) uses its documented outcome"
         Test-ToolkitAssertion -Condition (@($example.targets).Count -le [int]$example.targetCount) -Name "Example $($exampleFile.Name) preserves bounded target arrays"
-        Test-ToolkitAssertion -Condition ($example.schemaVersion -ceq '1.2' -and $example.toolkitVersion -ceq '3.0.0') -Name "Example $($exampleFile.Name) uses the current public versions"
+        Test-ToolkitAssertion -Condition ($example.schemaVersion -ceq '1.2' -and $example.toolkitVersion -ceq '3.0.1') -Name "Example $($exampleFile.Name) uses the current public versions"
         Test-ToolkitAssertion -Condition (@($example.policy.PSObject.Properties.Name | Where-Object { $_ -in @('applied', 'schemaVersion', 'profileName', 'decision', 'reasonCode', 'reason') }).Count -eq 6) -Name "Example $($exampleFile.Name) contains a complete policy decision"
         Test-ToolkitAssertion -Condition (@($example.audit.PSObject.Properties.Name).Count -eq 10) -Name "Example $($exampleFile.Name) contains complete audit metadata"
         Test-ToolkitAssertion -Condition (@($example.targets | Where-Object { $_.targetId -notmatch '^t-[0-9a-f]{24}$' }).Count -eq 0) -Name "Example $($exampleFile.Name) uses valid stable target identifiers"
@@ -1356,10 +1612,18 @@ try {
     $toolkitHashAfterReleaseBuild = (Get-FileHash -LiteralPath $toolkitPath -Algorithm SHA256).Hash
     $releaseManifestLines = @([System.IO.File]::ReadAllLines((Join-Path $releaseOutputPath 'SHA256SUMS.txt'), (New-Object System.Text.UTF8Encoding($false, $true))))
     $releaseSbom = Get-Content -LiteralPath (Join-Path $releaseOutputPath 'WindowsAdminToolkit.spdx.json') -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-    Test-ToolkitAssertion -Condition ($releaseBuildResult.ToolkitVersion -ceq '3.0.0' -and -not $releaseBuildResult.Signed -and $releaseBuildResult.PayloadFileCount -gt 0 -and $releaseBuildResult.ManifestFileCount -eq ($releaseBuildResult.PayloadFileCount + 1)) -Name 'Release builder creates an unsigned candidate with manifest coverage for payload plus SBOM'
+    Test-ToolkitAssertion -Condition ($releaseBuildResult.ToolkitVersion -ceq '3.0.1' -and -not $releaseBuildResult.Signed -and $releaseBuildResult.PayloadFileCount -gt 0 -and $releaseBuildResult.ManifestFileCount -eq ($releaseBuildResult.PayloadFileCount + 1)) -Name 'Release builder creates an unsigned candidate with manifest coverage for payload plus SBOM'
     Test-ToolkitAssertion -Condition ($toolkitHashBeforeReleaseBuild -eq $toolkitHashAfterReleaseBuild -and (Get-FileHash -LiteralPath (Join-Path $releaseOutputPath 'WindowsAdminToolkit.ps1') -Algorithm SHA256).Hash -eq $toolkitHashBeforeReleaseBuild) -Name 'Unsigned release build copies the toolkit without modifying source bytes'
-    Test-ToolkitAssertion -Condition ($releaseSbom.spdxVersion -ceq 'SPDX-2.3' -and @($releaseSbom.files).Count -eq $releaseBuildResult.PayloadFileCount -and $releaseSbom.packages[0].versionInfo -ceq '3.0.0') -Name 'Release builder emits an SPDX 2.3 inventory for the exact copied payload'
+    Test-ToolkitAssertion -Condition ($releaseSbom.spdxVersion -ceq 'SPDX-2.3' -and @($releaseSbom.files).Count -eq $releaseBuildResult.PayloadFileCount -and $releaseSbom.packages[0].versionInfo -ceq '3.0.1') -Name 'Release builder emits an SPDX 2.3 inventory for the exact copied payload'
     Test-ToolkitAssertion -Condition (@($releaseManifestLines | Where-Object { $_ -match '\*WindowsAdminToolkit\.spdx\.json$' }).Count -eq 1 -and @($releaseManifestLines | Where-Object { $_ -match '\*SHA256SUMS\.txt$' }).Count -eq 0) -Name 'SHA-256 manifest includes the SBOM and excludes its self-referential manifest file'
+    $adoptionPayloadPaths = @('.github/assets/social-preview.jpg', 'INSTALL.md', 'examples/demo/README.md', 'examples/demo/system-info-sample.json', 'examples/demo/system-info-sample.html')
+    $releaseManifestPaths = @($releaseManifestLines | ForEach-Object { if ($_ -match '^[0-9a-f]{64} \*(?<Path>.+)$') { $Matches.Path } })
+    $releaseSbomPaths = @($releaseSbom.files | ForEach-Object { $_.fileName -replace '^\./', '' })
+    Test-ToolkitAssertion -Condition (@($adoptionPayloadPaths | Where-Object { -not [IO.File]::Exists((Join-Path $releaseOutputPath $_)) -or $_ -notin $releaseManifestPaths -or $_ -notin $releaseSbomPaths }).Count -eq 0) -Name 'Release payload, manifest, and SBOM include artwork, installation guidance, and sanitized demos'
+    $releaseSocialPreviewFiles = @($releaseSbom.files | Where-Object { $_.fileName -ceq './.github/assets/social-preview.jpg' })
+    Test-ToolkitAssertion -Condition ($releaseSocialPreviewFiles.Count -eq 1 -and @($releaseSocialPreviewFiles[0].fileTypes).Count -eq 1 -and $releaseSocialPreviewFiles[0].fileTypes[0] -ceq 'IMAGE') -Name 'Release SBOM classifies the social preview as an image'
+    $releaseReadmeText = [IO.File]::ReadAllText((Join-Path $releaseOutputPath 'README.md'))
+    Test-ToolkitAssertion -Condition ($releaseReadmeText.Contains('src=".github/assets/social-preview.jpg"') -and [IO.File]::Exists((Join-Path $releaseOutputPath '.github/assets/social-preview.jpg'))) -Name 'Packaged README social preview reference resolves inside the release payload'
     Test-ToolkitThrow -Action { & $releaseBuilderPath -OutputDirectory $releaseOutputPath | Out-Null } -Name 'Release builder refuses to overwrite an existing candidate directory'
 
     $successProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -Action SystemInfo -Local -LogFile '$escapedAutomationLogPath'"
@@ -1368,7 +1632,7 @@ try {
     try { $successEnvelope = ConvertFrom-Json -InputObject $successJsonText -ErrorAction Stop } catch { Write-Verbose $_.Exception.Message }
     Test-ToolkitAssertion -Condition ($successProcess.ExitCode -eq 0) -Name 'Automation child process returns exit code 0 for complete success'
     Test-ToolkitAssertion -Condition ($null -ne $successEnvelope -and $successJsonText.StartsWith('{') -and $successJsonText.EndsWith('}')) -Name 'Automation stdout contains exactly one parseable JSON document'
-    Test-ToolkitAssertion -Condition ($successJsonText -match '^\{"schemaVersion":"1\.2","toolkitVersion":"3\.0\.0"') -Name 'Automation JSON root field ordering is deterministic'
+    Test-ToolkitAssertion -Condition ($successJsonText -match '^\{"schemaVersion":"1\.2","toolkitVersion":"3\.0\.1"') -Name 'Automation JSON root field ordering is deterministic'
     Test-ToolkitAssertion -Condition ($successEnvelope.outcome -eq 'CompleteSuccess' -and $successEnvelope.exitCode -eq 0) -Name 'Automation success envelope agrees with the process exit code'
     Test-ToolkitAssertion -Condition (@($successEnvelope.targets).Count -eq 1 -and @($successEnvelope.targets[0].data).Count -eq 1) -Name 'Automation success preserves target and data arrays for one item'
     Test-ToolkitAssertion -Condition (-not [bool]$successEnvelope.preflight -and $successEnvelope.policy.decision -ceq 'NotApplied' -and $successEnvelope.policy.reasonCode -ceq 'NoPolicy') -Name 'Automation success reports preflight and no-policy state explicitly'
