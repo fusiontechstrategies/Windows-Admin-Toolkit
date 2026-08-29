@@ -3,7 +3,7 @@
     Provides interactive and noninteractive tools for authorized Windows administration.
 
 .DESCRIPTION
-    Windows Admin Toolkit 3.0.0 supports local administration and
+    Windows Admin Toolkit 3.0.1 supports local administration and
     bounded remote execution through PowerShell Remoting or PsExec. PowerShell
     Remoting is the default because it does not place passwords on process
     command lines. The optional PsExec transport uses only the current Windows
@@ -215,7 +215,7 @@
     .\WindowsAdminToolkit.ps1 -Automation -PlanOperation Create -PlanPath C:\ChangePlans\system-info-pending.watplan.json -Action SystemInfo -Local -JsonOutputPath -
 
 .NOTES
-    Version: 3.0.0
+    Version: 3.0.1
     License: MIT
     Use only on systems you own or are explicitly authorized to administer.
 #>
@@ -412,7 +412,7 @@ param(
     [string]$PowerShellFile = ''
 )
 
-$Script:ToolkitVersion = '3.0.0'
+$Script:ToolkitVersion = '3.0.1'
 $Script:WasDotSourced = $MyInvocation.InvocationName -eq '.'
 $Script:ToolkitPath = $PSCommandPath
 $Script:InvocationParameters = @{}

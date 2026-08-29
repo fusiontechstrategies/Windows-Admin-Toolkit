@@ -1,6 +1,6 @@
 # Policy profiles and least privilege
 
-Windows Admin Toolkit 3.0.0 supports optional JSON policy profiles for interactive runs, direct automation, and plan creation. A profile narrows what the toolkit may do. It never grants Windows permissions, relaxes a built-in safety ceiling, replaces `ShouldProcess`, or replaces an exact confirmation phrase.
+Windows Admin Toolkit 3.0.1 supports optional JSON policy profiles for interactive runs, direct automation, and plan creation. A profile narrows what the toolkit may do. It never grants Windows permissions, relaxes a built-in safety ceiling, replaces `ShouldProcess`, or replaces an exact confirmation phrase.
 
 The public policy contract is JSON Schema Draft 2020-12 in [`schemas/policy-profile-v1.schema.json`](schemas/policy-profile-v1.schema.json). The current `schemaVersion` is `1.0`.
 

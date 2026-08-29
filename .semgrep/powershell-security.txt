@@ -1,0 +1,35 @@
+# ruleid: wat-powershell-invoke-expression
+Invoke-Expression $untrustedCommand
+
+# ruleid: wat-execution-policy-bypass
+powershell.exe -ExecutionPolicy Bypass -File .\task.ps1
+
+# ruleid: wat-tls-validation-bypass
+[System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+
+# ruleid: wat-host-security-modification
+Enable-PSRemoting -Force
+
+# ruleid: wat-plaintext-secure-string
+ConvertTo-SecureString $password -AsPlainText -Force
+
+# ruleid: wat-runtime-download
+Invoke-WebRequest -Uri 'https://example.invalid/tool.ps1' -OutFile '.\tool.ps1'
+
+# ok: wat-powershell-invoke-expression
+& $reviewedCommand
+
+# ok: wat-execution-policy-bypass
+powershell.exe -NoLogo -NoProfile -File .\task.ps1
+
+# ok: wat-tls-validation-bypass
+Get-ChildItem -Path Cert:\CurrentUser\Root
+
+# ok: wat-host-security-modification
+Get-NetFirewallProfile
+
+# ok: wat-plaintext-secure-string
+Read-Host -AsSecureString
+
+# ok: wat-runtime-download
+Get-Content -LiteralPath '.\tool.ps1'

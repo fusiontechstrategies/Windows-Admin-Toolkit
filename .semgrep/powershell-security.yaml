@@ -1,0 +1,36 @@
+rules:
+  - id: wat-powershell-invoke-expression
+    languages: [generic]
+    severity: ERROR
+    message: Avoid Invoke-Expression and its aliases in toolkit or release code.
+    pattern-regex: '(?im)^(?!\s*#)[^\r\n]*\b(?:Invoke-Expression|iex)\b'
+
+  - id: wat-execution-policy-bypass
+    languages: [generic]
+    severity: ERROR
+    message: Do not bypass or disable PowerShell execution policy.
+    pattern-regex: '(?im)^(?!\s*#)[^\r\n]*-\s*ExecutionPolicy\s+(?:Bypass|Unrestricted)\b'
+
+  - id: wat-tls-validation-bypass
+    languages: [generic]
+    severity: ERROR
+    message: Do not disable TLS certificate validation.
+    pattern-regex: '(?im)^(?!\s*#)[^\r\n]*\b(?:SkipCertificateCheck|ServerCertificateValidationCallback|TrustAllCertsPolicy|CertificatePolicy)\b'
+
+  - id: wat-host-security-modification
+    languages: [generic]
+    severity: ERROR
+    message: The toolkit must not automatically enable remoting or alter host security controls.
+    pattern-regex: '(?im)^(?!\s*#)[^\r\n]*\b(?:Enable-PSRemoting|Set-WSManQuickConfig|Set-ExecutionPolicy|New-NetFirewallRule|Set-NetFirewallProfile|Add-MpPreference|Set-MpPreference)\b'
+
+  - id: wat-plaintext-secure-string
+    languages: [generic]
+    severity: ERROR
+    message: Do not convert plaintext values into SecureString objects in toolkit or release code.
+    pattern-regex: '(?im)^(?!\s*#)[^\r\n]*\bConvertTo-SecureString\b[^\r\n]*-AsPlainText\b'
+
+  - id: wat-runtime-download
+    languages: [generic]
+    severity: ERROR
+    message: Toolkit and release code must not download remote content at runtime.
+    pattern-regex: '(?im)^(?!\s*#)[^\r\n]*(?:\b(?:Invoke-WebRequest|Invoke-RestMethod|Start-BitsTransfer)\b|(?:System\.)?Net\.WebClient|\bDownloadString\s*\()'

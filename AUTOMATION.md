@@ -1,6 +1,6 @@
 # Automation interface
 
-Windows Admin Toolkit 3.0.0 can run one named action without menus, prompts, or credential UI. Automation mode uses the same 20 action implementations as the interactive menu and returns a versioned JSON result with a stable process exit code. Optional policy profiles narrow the request, capability preflight assesses readiness without executing the requested action, and opt-in enterprise audit sinks record bounded lifecycle evidence. Controlled orchestration adds separate plan, approval, execution, and resume operations without changing this direct-run contract.
+Windows Admin Toolkit 3.0.1 can run one named action without menus, prompts, or credential UI. Automation mode uses the same 20 action implementations as the interactive menu and returns a versioned JSON result with a stable process exit code. Optional policy profiles narrow the request, capability preflight assesses readiness without executing the requested action, and opt-in enterprise audit sinks record bounded lifecycle evidence. Controlled orchestration adds separate plan, approval, execution, and resume operations without changing this direct-run contract.
 
 Use automation mode only in an already authorized Windows administration context. The toolkit does not enable WinRM, alter TrustedHosts, open firewall ports, bypass execution policy, or place passwords in process arguments.
 
