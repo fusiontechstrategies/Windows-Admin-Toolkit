@@ -61,6 +61,12 @@ Windows Admin Toolkit treats remote administration as a privileged security boun
 
 Read [SECURITY.md](SECURITY.md) and [RESPONSIBLE_USE.md](RESPONSIBLE_USE.md) before operating the toolkit in a production environment.
 
+### Guarded automation lifecycle
+
+![Synthetic Windows Admin Toolkit control flow showing capability preflight, a frozen plan, hash-bound approval, bounded execution, structured verification, complete audit evidence, and interruption-safe resume behavior.](examples/visuals/windows-admin-toolkit-guarded-automation.png)
+
+Constructed control map based on the published v3.0.0 examples. Policy can narrow built-in behavior but cannot broaden it. Preflight checks capability without executing the requested action, and `-WhatIf` previews a state change without opening the target connection. Resume runs only targets still marked `Pending`; interrupted `InProgress` targets become `Unknown` and require review.
+
 ## Requirements
 
 - A supported Windows client or Windows Server operating system
