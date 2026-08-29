@@ -637,6 +637,15 @@ if ([IO.File]::Exists($readmeVisualPath) -and [IO.File]::Exists($readmeVisualSou
         $readmeVisualWidth = (([int]$readmeVisualBytes[16] -shl 24) -bor ([int]$readmeVisualBytes[17] -shl 16) -bor ([int]$readmeVisualBytes[18] -shl 8) -bor [int]$readmeVisualBytes[19])
         $readmeVisualHeight = (([int]$readmeVisualBytes[20] -shl 24) -bor ([int]$readmeVisualBytes[21] -shl 16) -bor ([int]$readmeVisualBytes[22] -shl 8) -bor [int]$readmeVisualBytes[23])
         $readmeVisualSourceText = [IO.File]::ReadAllText($readmeVisualSourcePath)
+        $readmeVisualSourceCanonicalText = $readmeVisualSourceText.Replace("`r`n", "`n")
+        $readmeVisualSourceSha256Provider = [Security.Cryptography.SHA256]::Create()
+        try {
+            $readmeVisualSourceCanonicalBytes = (New-Object Text.UTF8Encoding($false)).GetBytes($readmeVisualSourceCanonicalText)
+            $readmeVisualSourceCanonicalSha256 = ([BitConverter]::ToString($readmeVisualSourceSha256Provider.ComputeHash($readmeVisualSourceCanonicalBytes))).Replace('-', '')
+        }
+        finally {
+            $readmeVisualSourceSha256Provider.Dispose()
+        }
         $readmeVisualSourceXml = [xml]$readmeVisualSourceText
         $readmeVisualActiveNodes = @($readmeVisualSourceXml.SelectNodes('//*[local-name()="script" or local-name()="foreignObject" or local-name()="image"]'))
         $readmeVisualLinkedNodes = @($readmeVisualSourceXml.SelectNodes('//*[@href or @*[local-name()="href"]]'))
@@ -647,7 +656,7 @@ if ([IO.File]::Exists($readmeVisualPath) -and [IO.File]::Exists($readmeVisualSou
             $readmeVisualBytes[0] -eq 0x89 -and $readmeVisualBytes[1] -eq 0x50 -and $readmeVisualBytes[2] -eq 0x4E -and $readmeVisualBytes[3] -eq 0x47 -and
             $readmeVisualWidth -eq 1200 -and $readmeVisualHeight -eq 1580 -and
             (Get-FileHash -LiteralPath $readmeVisualPath -Algorithm SHA256 -ErrorAction Stop).Hash -ceq '4F5E1495EC62CE0C906CF110F8234AE2E37E785914F6FB5316E27467D0B7C065' -and
-            (Get-FileHash -LiteralPath $readmeVisualSourcePath -Algorithm SHA256 -ErrorAction Stop).Hash -ceq '9E12391A1245E696A35115B85EFE2FC1F9A34E5C3BFA548A3979F7496BD3BBBF' -and
+            $readmeVisualSourceCanonicalSha256 -ceq '9E12391A1245E696A35115B85EFE2FC1F9A34E5C3BFA548A3979F7496BD3BBBF' -and
             $readmeVisualSourceXml.DocumentElement.LocalName -ceq 'svg' -and $readmeVisualSourceXml.svg.width -ceq '1200' -and $readmeVisualSourceXml.svg.height -ceq '1580' -and
             @($readmeVisualSourceXml.SelectNodes('//*[local-name()="title"]')).Count -eq 1 -and @($readmeVisualSourceXml.SelectNodes('//*[local-name()="desc"]')).Count -eq 1 -and
             $readmeVisualActiveNodes.Count -eq 0 -and $readmeVisualLinkedNodes.Count -eq 0 -and $readmeVisualEventAttributes.Count -eq 0 -and
@@ -1657,7 +1666,8 @@ $childArguments = @(
     $releaseReadmeText = [IO.File]::ReadAllText((Join-Path $releaseOutputPath 'README.md'))
     $releaseVisualPath = Join-Path $releaseOutputPath 'examples\visuals\windows-admin-toolkit-guarded-automation.png'
     $releaseVisualSourcePath = Join-Path $releaseOutputPath 'examples\visuals\source\windows-admin-toolkit-guarded-automation.svg'
-    Test-ToolkitAssertion -Condition ($readmeVisualValid -and $releaseReadmeText.Contains('src=".github/assets/social-preview.jpg"') -and $releaseReadmeText.Contains('](examples/visuals/windows-admin-toolkit-guarded-automation.png)') -and [IO.File]::Exists((Join-Path $releaseOutputPath '.github/assets/social-preview.jpg')) -and [IO.File]::Exists($releaseVisualPath) -and [IO.File]::Exists($releaseVisualSourcePath) -and (Get-FileHash -LiteralPath $releaseVisualPath -Algorithm SHA256).Hash -ceq '4F5E1495EC62CE0C906CF110F8234AE2E37E785914F6FB5316E27467D0B7C065' -and (Get-FileHash -LiteralPath $releaseVisualSourcePath -Algorithm SHA256).Hash -ceq '9E12391A1245E696A35115B85EFE2FC1F9A34E5C3BFA548A3979F7496BD3BBBF') -Name 'Packaged README artwork references resolve to exact release assets'
+    $releaseVisualSourceCanonicalText = if ([IO.File]::Exists($releaseVisualSourcePath)) { [IO.File]::ReadAllText($releaseVisualSourcePath).Replace("`r`n", "`n") } else { '' }
+    Test-ToolkitAssertion -Condition ($readmeVisualValid -and $releaseReadmeText.Contains('src=".github/assets/social-preview.jpg"') -and $releaseReadmeText.Contains('](examples/visuals/windows-admin-toolkit-guarded-automation.png)') -and [IO.File]::Exists((Join-Path $releaseOutputPath '.github/assets/social-preview.jpg')) -and [IO.File]::Exists($releaseVisualPath) -and [IO.File]::Exists($releaseVisualSourcePath) -and (Get-FileHash -LiteralPath $releaseVisualPath -Algorithm SHA256).Hash -ceq '4F5E1495EC62CE0C906CF110F8234AE2E37E785914F6FB5316E27467D0B7C065' -and $releaseVisualSourceCanonicalText -ceq $readmeVisualSourceCanonicalText) -Name 'Packaged README artwork references resolve to exact release assets'
     Test-ToolkitThrow -Action { & $releaseBuilderPath -OutputDirectory $releaseOutputPath | Out-Null } -Name 'Release builder refuses to overwrite an existing candidate directory'
 
     $successProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -Action SystemInfo -Local -LogFile '$escapedAutomationLogPath'"
