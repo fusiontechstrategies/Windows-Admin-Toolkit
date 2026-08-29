@@ -259,7 +259,7 @@ finally {
 & $installedScript -Automation -ListActions -JsonOutputPath -
 ```
 
-For SHA-256 manifest verification, offline deployment, update procedures, and RMM staging guidance, use the complete [installation and trust guide](INSTALL.md). Version 3.0.1 is also available as a [complete signed ZIP](https://github.com/fusiontechstrategies/Windows-Admin-Toolkit/releases/tag/v3.0.1). GitHub-generated source archives and repository clones are reviewable source, not signed release assets.
+For SHA-256 manifest verification, offline deployment, update procedures, and RMM staging guidance, use the complete [installation and trust guide](INSTALL.md). The current published release also provides a [complete signed ZIP](https://github.com/fusiontechstrategies/Windows-Admin-Toolkit/releases/latest). GitHub-generated source archives and repository clones are reviewable source, not signed release assets.
 
 ## Five-minute no-change evaluation
 
