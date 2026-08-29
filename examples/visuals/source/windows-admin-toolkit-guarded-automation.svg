@@ -1,0 +1,130 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1580" viewBox="0 0 1200 1580" role="img" aria-labelledby="title description">
+  <title id="title">Windows Admin Toolkit guarded automation lifecycle</title>
+  <desc id="description">Synthetic control flow showing capability preflight, frozen plans, hash-bound approval, bounded execution, structured verification, complete audit evidence, and interruption-safe resume behavior.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#071426"/>
+      <stop offset="0.52" stop-color="#102c43"/>
+      <stop offset="1" stop-color="#091827"/>
+    </linearGradient>
+    <linearGradient id="headerGlow" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#1f7593" stop-opacity="0.48"/>
+      <stop offset="1" stop-color="#4a3d80" stop-opacity="0.28"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="15" flood-color="#020711" flood-opacity="0.46"/>
+    </filter>
+  </defs>
+
+  <rect width="1200" height="1580" fill="url(#background)"/>
+  <circle cx="1115" cy="-80" r="330" fill="#41a9c7" opacity="0.12"/>
+  <circle cx="40" cy="1515" r="340" fill="#7757b8" opacity="0.10"/>
+
+  <text x="70" y="66" fill="#72d7ef" font-family="Segoe UI, Arial, sans-serif" font-size="18" font-weight="700" letter-spacing="2.4">WINDOWS ADMIN TOOLKIT 3.0</text>
+  <text x="70" y="119" fill="#f5f9fc" font-family="Segoe UI, Arial, sans-serif" font-size="42" font-weight="750">Guarded automation, from request to evidence</text>
+  <text x="70" y="159" fill="#b9c9d8" font-family="Segoe UI, Arial, sans-serif" font-size="20">A reviewable path for policy, execution, verification, and uncertain state</text>
+
+  <rect x="70" y="188" width="257" height="34" rx="17" fill="#15586d" stroke="#48a8c1"/>
+  <text x="198" y="211" text-anchor="middle" fill="#effcff" font-family="Segoe UI, Arial, sans-serif" font-size="13" font-weight="800" letter-spacing="1.2">SYNTHETIC CONTROL FLOW</text>
+  <rect x="344" y="188" width="235" height="34" rx="17" fill="#173d4d" stroke="#3c778d"/>
+  <text x="461" y="211" text-anchor="middle" fill="#dcecf3" font-family="Segoe UI, Arial, sans-serif" font-size="13" font-weight="750">NO LIVE TARGET DATA</text>
+
+  <g filter="url(#shadow)">
+    <rect x="70" y="243" width="1060" height="72" rx="18" fill="url(#headerGlow)" stroke="#3e7891" stroke-width="2"/>
+  </g>
+  <text x="100" y="273" fill="#7fe4e4" font-family="Segoe UI, Arial, sans-serif" font-size="15" font-weight="800" letter-spacing="1">LEAST-PRIVILEGE BOUNDARY</text>
+  <text x="100" y="300" fill="#f2f7fa" font-family="Segoe UI, Arial, sans-serif" font-size="20" font-weight="700">Policy can narrow built-in behavior. It can never broaden it.</text>
+  <rect x="835" y="261" width="265" height="38" rx="12" fill="#0a1a28" stroke="#56b6c8"/>
+  <text x="967" y="286" text-anchor="middle" fill="#8ce2ef" font-family="Segoe UI, Arial, sans-serif" font-size="15" font-weight="800">ALLOW OR FAIL CLOSED</text>
+
+  <path d="M126 352 L126 1410" stroke="#315a70" stroke-width="4" stroke-dasharray="8 10"/>
+
+  <g filter="url(#shadow)">
+    <rect x="70" y="340" width="1060" height="155" rx="20" fill="#102f3f" stroke="#347f98" stroke-width="2"/>
+  </g>
+  <circle cx="126" cy="417" r="31" fill="#176985" stroke="#74d9ef" stroke-width="2"/>
+  <text x="126" y="428" text-anchor="middle" fill="#ffffff" font-family="Segoe UI, Arial, sans-serif" font-size="28" font-weight="800">1</text>
+  <text x="184" y="378" fill="#72d7ef" font-family="Segoe UI, Arial, sans-serif" font-size="14" font-weight="800" letter-spacing="1.4">PREFLIGHT</text>
+  <text x="184" y="416" fill="#f5f9fc" font-family="Segoe UI, Arial, sans-serif" font-size="29" font-weight="750">Prove the request can run</text>
+  <text x="184" y="450" fill="#b9c9d8" font-family="Segoe UI, Arial, sans-serif" font-size="17">Validate inputs, policy, connectivity, runtime, and required dependencies.</text>
+  <rect x="820" y="376" width="280" height="78" rx="14" fill="#0a1c28" stroke="#3b8ca1"/>
+  <text x="960" y="405" text-anchor="middle" fill="#78dced" font-family="Segoe UI, Arial, sans-serif" font-size="14" font-weight="800">BOUNDARY</text>
+  <text x="960" y="433" text-anchor="middle" fill="#f5f9fc" font-family="Segoe UI, Arial, sans-serif" font-size="16" font-weight="700">Requested action is not executed</text>
+
+  <g filter="url(#shadow)">
+    <rect x="70" y="515" width="1060" height="155" rx="20" fill="#152d3d" stroke="#3b718c" stroke-width="2"/>
+  </g>
+  <circle cx="126" cy="592" r="31" fill="#285f7b" stroke="#86cce8" stroke-width="2"/>
+  <text x="126" y="603" text-anchor="middle" fill="#ffffff" font-family="Segoe UI, Arial, sans-serif" font-size="28" font-weight="800">2</text>
+  <text x="184" y="553" fill="#84cceb" font-family="Segoe UI, Arial, sans-serif" font-size="14" font-weight="800" letter-spacing="1.4">PLAN</text>
+  <text x="184" y="591" fill="#f5f9fc" font-family="Segoe UI, Arial, sans-serif" font-size="29" font-weight="750">Freeze the exact operating scope</text>
+  <text x="184" y="625" fill="#b9c9d8" font-family="Segoe UI, Arial, sans-serif" font-size="17">Action, inputs, ordered targets, transport, policy snapshot, identity, and safety.</text>
+  <rect x="820" y="551" width="280" height="78" rx="14" fill="#0a1c28" stroke="#4d829b"/>
+  <text x="960" y="580" text-anchor="middle" fill="#8ed7f0" font-family="Segoe UI, Arial, sans-serif" font-size="14" font-weight="800">ARTIFACT</text>
+  <text x="960" y="608" text-anchor="middle" fill="#f5f9fc" font-family="Segoe UI, Arial, sans-serif" font-size="17" font-weight="700">Canonical SHA-256 plan hash</text>
+
+  <g filter="url(#shadow)">
+    <rect x="70" y="690" width="1060" height="155" rx="20" fill="#302b31" stroke="#96743b" stroke-width="2"/>
+  </g>
+  <circle cx="126" cy="767" r="31" fill="#775b28" stroke="#f0c86d" stroke-width="2"/>
+  <text x="126" y="778" text-anchor="middle" fill="#ffffff" font-family="Segoe UI, Arial, sans-serif" font-size="28" font-weight="800">3</text>
+  <text x="184" y="728" fill="#f0c86d" font-family="Segoe UI, Arial, sans-serif" font-size="14" font-weight="800" letter-spacing="1.4">APPROVE</text>
+  <text x="184" y="766" fill="#f5f9fc" font-family="Segoe UI, Arial, sans-serif" font-size="29" font-weight="750">Bind approval to that plan</text>
+  <text x="184" y="800" fill="#d0c8ba" font-family="Segoe UI, Arial, sans-serif" font-size="17">Approval is separate from execution and records the exact plan hash.</text>
+  <rect x="820" y="726" width="280" height="78" rx="14" fill="#1d1b1b" stroke="#8c713d"/>
+  <text x="960" y="755" text-anchor="middle" fill="#f0c86d" font-family="Segoe UI, Arial, sans-serif" font-size="14" font-weight="800">FAIL CLOSED</text>
+  <text x="960" y="783" text-anchor="middle" fill="#fff7e8" font-family="Segoe UI, Arial, sans-serif" font-size="16" font-weight="700">Changed plan means no match</text>
+
+  <g filter="url(#shadow)">
+    <rect x="70" y="865" width="1060" height="155" rx="20" fill="#12342f" stroke="#358675" stroke-width="2"/>
+  </g>
+  <circle cx="126" cy="942" r="31" fill="#1e7060" stroke="#77e3bd" stroke-width="2"/>
+  <text x="126" y="953" text-anchor="middle" fill="#ffffff" font-family="Segoe UI, Arial, sans-serif" font-size="28" font-weight="800">4</text>
+  <text x="184" y="903" fill="#77e3bd" font-family="Segoe UI, Arial, sans-serif" font-size="14" font-weight="800" letter-spacing="1.4">EXECUTE</text>
+  <text x="184" y="941" fill="#f5f9fc" font-family="Segoe UI, Arial, sans-serif" font-size="29" font-weight="750">Run bounded work once</text>
+  <text x="184" y="975" fill="#bdd2ca" font-family="Segoe UI, Arial, sans-serif" font-size="17">Orchestrated targets have a one-attempt ceiling and atomic checkpoints.</text>
+  <rect x="820" y="901" width="280" height="78" rx="14" fill="#0b211e" stroke="#3d8c7c"/>
+  <text x="960" y="930" text-anchor="middle" fill="#80e9c6" font-family="Segoe UI, Arial, sans-serif" font-size="14" font-weight="800">WHATIF</text>
+  <text x="960" y="958" text-anchor="middle" fill="#effff9" font-family="Segoe UI, Arial, sans-serif" font-size="16" font-weight="700">Preview without target connection</text>
+
+  <g filter="url(#shadow)">
+    <rect x="70" y="1040" width="1060" height="155" rx="20" fill="#252842" stroke="#6865a1" stroke-width="2"/>
+  </g>
+  <circle cx="126" cy="1117" r="31" fill="#55528d" stroke="#b5a8ff" stroke-width="2"/>
+  <text x="126" y="1128" text-anchor="middle" fill="#ffffff" font-family="Segoe UI, Arial, sans-serif" font-size="28" font-weight="800">5</text>
+  <text x="184" y="1078" fill="#b5a8ff" font-family="Segoe UI, Arial, sans-serif" font-size="14" font-weight="800" letter-spacing="1.4">VERIFY</text>
+  <text x="184" y="1116" fill="#f5f9fc" font-family="Segoe UI, Arial, sans-serif" font-size="29" font-weight="750">Return a machine-readable verdict</text>
+  <text x="184" y="1150" fill="#cac8dd" font-family="Segoe UI, Arial, sans-serif" font-size="17">Status, outcome, exit code, target state, errors, warnings, and report paths.</text>
+  <rect x="820" y="1076" width="280" height="78" rx="14" fill="#17192b" stroke="#6b65a5"/>
+  <text x="960" y="1105" text-anchor="middle" fill="#b9adff" font-family="Segoe UI, Arial, sans-serif" font-size="14" font-weight="800">STRUCTURED OUTCOME</text>
+  <text x="960" y="1133" text-anchor="middle" fill="#f5f3ff" font-family="Segoe UI, Arial, sans-serif" font-size="16" font-weight="700">Success, partial, or explicit failure</text>
+
+  <g filter="url(#shadow)">
+    <rect x="70" y="1215" width="1060" height="235" rx="20" fill="#172c3e" stroke="#497c9a" stroke-width="2"/>
+  </g>
+  <circle cx="126" cy="1292" r="31" fill="#366a87" stroke="#8bd3f1" stroke-width="2"/>
+  <text x="126" y="1303" text-anchor="middle" fill="#ffffff" font-family="Segoe UI, Arial, sans-serif" font-size="28" font-weight="800">6</text>
+  <text x="184" y="1253" fill="#8bd3f1" font-family="Segoe UI, Arial, sans-serif" font-size="14" font-weight="800" letter-spacing="1.4">AUDIT &amp; RECOVER</text>
+  <text x="184" y="1291" fill="#f5f9fc" font-family="Segoe UI, Arial, sans-serif" font-size="29" font-weight="750">Make completion and uncertainty visible</text>
+  <text x="184" y="1325" fill="#c3d0dc" font-family="Segoe UI, Arial, sans-serif" font-size="17">Terminal summary, sequence continuity, canonical hash, and audit completeness.</text>
+
+  <rect x="184" y="1350" width="163" height="48" rx="12" fill="#0c1d2b" stroke="#4c86a1"/>
+  <text x="265" y="1380" text-anchor="middle" fill="#d8e8f2" font-family="Segoe UI, Arial, sans-serif" font-size="15" font-weight="750">PENDING</text>
+  <path d="M354 1374 L389 1374" stroke="#71bddb" stroke-width="3"/>
+  <path d="M382 1367 L391 1374 L382 1381" fill="none" stroke="#71bddb" stroke-width="3"/>
+  <rect x="399" y="1350" width="163" height="48" rx="12" fill="#0c1d2b" stroke="#4c86a1"/>
+  <text x="480" y="1380" text-anchor="middle" fill="#d8e8f2" font-family="Segoe UI, Arial, sans-serif" font-size="15" font-weight="750">IN PROGRESS</text>
+  <path d="M569 1374 L604 1374" stroke="#71bddb" stroke-width="3"/>
+  <path d="M597 1367 L606 1374 L597 1381" fill="none" stroke="#71bddb" stroke-width="3"/>
+  <rect x="614" y="1350" width="163" height="48" rx="12" fill="#102d2b" stroke="#48a58e"/>
+  <text x="695" y="1380" text-anchor="middle" fill="#7fe4c6" font-family="Segoe UI, Arial, sans-serif" font-size="15" font-weight="800">COMPLETED</text>
+  <rect x="805" y="1347" width="295" height="57" rx="13" fill="#291f25" stroke="#a35e66"/>
+  <text x="952" y="1370" text-anchor="middle" fill="#ff9aa5" font-family="Segoe UI, Arial, sans-serif" font-size="14" font-weight="800">IF INTERRUPTED</text>
+  <text x="952" y="1392" text-anchor="middle" fill="#fff0f2" font-family="Segoe UI, Arial, sans-serif" font-size="15" font-weight="700">InProgress becomes Unknown</text>
+  <text x="184" y="1429" fill="#f0c86d" font-family="Segoe UI, Arial, sans-serif" font-size="16" font-weight="750">Resume runs only Pending targets. Completed and Unknown targets are not repeated.</text>
+
+  <rect x="70" y="1476" width="1060" height="72" rx="18" fill="#081522" stroke="#3d718a" stroke-width="2"/>
+  <text x="100" y="1506" fill="#72d7ef" font-family="Segoe UI, Arial, sans-serif" font-size="14" font-weight="800" letter-spacing="1">SAFETY PRINCIPLE</text>
+  <text x="100" y="1533" fill="#f5f9fc" font-family="Segoe UI, Arial, sans-serif" font-size="19" font-weight="700">An uncertain state change requires reconciliation and review, never automatic repetition.</text>
+  <text x="1100" y="1531" text-anchor="end" fill="#8ea4b8" font-family="Segoe UI, Arial, sans-serif" font-size="12">published v3.0.0 behavior</text>
+</svg>

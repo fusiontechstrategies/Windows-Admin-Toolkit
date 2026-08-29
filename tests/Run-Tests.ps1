@@ -598,7 +598,7 @@ Test-ToolkitAssertion -Condition ($sourceText -notmatch '(?i)\bNew-EventLog\b|\b
 Test-ToolkitAssertion -Condition ($sourceText.IndexOf([char]0x2014) -lt 0) -Name 'Contains no em dashes'
 Test-ToolkitAssertion -Condition ($sourceText -notmatch '[^\x00-\x7F]') -Name 'Application script is ASCII-compatible'
 
-$repositoryTextExtensions = @('.md', '.ps1', '.psd1', '.txt', '.yml', '.yaml')
+$repositoryTextExtensions = @('.md', '.ps1', '.psd1', '.svg', '.txt', '.yml', '.yaml')
 $repositoryTextNames = @('.editorconfig', '.gitattributes', '.gitignore', 'LICENSE')
 $emDashFiles = @(
     Get-ChildItem -LiteralPath $projectRoot -Recurse -File -ErrorAction Stop |
@@ -622,12 +622,43 @@ $installGuidePath = Join-Path $projectRoot 'INSTALL.md'
 $demoGuidePath = Join-Path $projectRoot 'examples\demo\README.md'
 $demoJsonPath = Join-Path $projectRoot 'examples\demo\system-info-sample.json'
 $demoHtmlPath = Join-Path $projectRoot 'examples\demo\system-info-sample.html'
+$readmeVisualPath = Join-Path $projectRoot 'examples\visuals\windows-admin-toolkit-guarded-automation.png'
+$readmeVisualSourcePath = Join-Path $projectRoot 'examples\visuals\source\windows-admin-toolkit-guarded-automation.svg'
 $readmeText = [IO.File]::ReadAllText($readmePath)
 $installGuideText = [IO.File]::ReadAllText($installGuidePath)
 $demoGuideText = [IO.File]::ReadAllText($demoGuidePath)
 $demoJsonText = [IO.File]::ReadAllText($demoJsonPath)
 $demoHtmlText = [IO.File]::ReadAllText($demoHtmlPath)
 $demoResult = ConvertFrom-Json -InputObject $demoJsonText -ErrorAction Stop
+$readmeVisualValid = $false
+if ([IO.File]::Exists($readmeVisualPath) -and [IO.File]::Exists($readmeVisualSourcePath)) {
+    try {
+        $readmeVisualBytes = [IO.File]::ReadAllBytes($readmeVisualPath)
+        $readmeVisualWidth = (([int]$readmeVisualBytes[16] -shl 24) -bor ([int]$readmeVisualBytes[17] -shl 16) -bor ([int]$readmeVisualBytes[18] -shl 8) -bor [int]$readmeVisualBytes[19])
+        $readmeVisualHeight = (([int]$readmeVisualBytes[20] -shl 24) -bor ([int]$readmeVisualBytes[21] -shl 16) -bor ([int]$readmeVisualBytes[22] -shl 8) -bor [int]$readmeVisualBytes[23])
+        $readmeVisualSourceText = [IO.File]::ReadAllText($readmeVisualSourcePath)
+        $readmeVisualSourceXml = [xml]$readmeVisualSourceText
+        $readmeVisualActiveNodes = @($readmeVisualSourceXml.SelectNodes('//*[local-name()="script" or local-name()="foreignObject" or local-name()="image"]'))
+        $readmeVisualLinkedNodes = @($readmeVisualSourceXml.SelectNodes('//*[@href or @*[local-name()="href"]]'))
+        $readmeVisualEventAttributes = @($readmeVisualSourceXml.SelectNodes('//@*') | Where-Object { $_.LocalName -match '^on' })
+        $readmeVisualMarkdown = '![Synthetic Windows Admin Toolkit control flow showing capability preflight, a frozen plan, hash-bound approval, bounded execution, structured verification, complete audit evidence, and interruption-safe resume behavior.](examples/visuals/windows-admin-toolkit-guarded-automation.png)'
+        $readmeVisualValid = (
+            $readmeVisualBytes.Length -eq 462417 -and
+            $readmeVisualBytes[0] -eq 0x89 -and $readmeVisualBytes[1] -eq 0x50 -and $readmeVisualBytes[2] -eq 0x4E -and $readmeVisualBytes[3] -eq 0x47 -and
+            $readmeVisualWidth -eq 1200 -and $readmeVisualHeight -eq 1580 -and
+            (Get-FileHash -LiteralPath $readmeVisualPath -Algorithm SHA256 -ErrorAction Stop).Hash -ceq '4F5E1495EC62CE0C906CF110F8234AE2E37E785914F6FB5316E27467D0B7C065' -and
+            (Get-FileHash -LiteralPath $readmeVisualSourcePath -Algorithm SHA256 -ErrorAction Stop).Hash -ceq '9E12391A1245E696A35115B85EFE2FC1F9A34E5C3BFA548A3979F7496BD3BBBF' -and
+            $readmeVisualSourceXml.DocumentElement.LocalName -ceq 'svg' -and $readmeVisualSourceXml.svg.width -ceq '1200' -and $readmeVisualSourceXml.svg.height -ceq '1580' -and
+            @($readmeVisualSourceXml.SelectNodes('//*[local-name()="title"]')).Count -eq 1 -and @($readmeVisualSourceXml.SelectNodes('//*[local-name()="desc"]')).Count -eq 1 -and
+            $readmeVisualActiveNodes.Count -eq 0 -and $readmeVisualLinkedNodes.Count -eq 0 -and $readmeVisualEventAttributes.Count -eq 0 -and
+            $readmeVisualSourceText.Contains('SYNTHETIC CONTROL FLOW') -and $readmeVisualSourceText.IndexOf([char]0x2014) -lt 0 -and
+            $readmeText.Contains($readmeVisualMarkdown) -and $readmeText.Contains('Constructed control map based on the published v3.0.0 examples.')
+        )
+    }
+    catch {
+        Write-Verbose $_.Exception.Message
+    }
+}
 $expectedSignerSubject = 'CN="Fusion Technology Strategies, Inc.", O="Fusion Technology Strategies, Inc.", L=Ormond Beach, S=Florida, C=US, SERIALNUMBER=P15000091612, OID.2.5.4.15=Private Organization, OID.1.3.6.1.4.1.311.60.2.1.2=Florida, OID.1.3.6.1.4.1.311.60.2.1.3=US'
 $expectedSignerThumbprint = '44BB10D1C4ACB6B8A043BA136AE5442BEFD47131'
 $expectedSignerPublicKeySha256 = '9ABCB20E3D546C2F2D0973AA98DC6E503387E88462EC9F9E5FD5DC5047A65275'
@@ -1616,14 +1647,17 @@ $childArguments = @(
     Test-ToolkitAssertion -Condition ($toolkitHashBeforeReleaseBuild -eq $toolkitHashAfterReleaseBuild -and (Get-FileHash -LiteralPath (Join-Path $releaseOutputPath 'WindowsAdminToolkit.ps1') -Algorithm SHA256).Hash -eq $toolkitHashBeforeReleaseBuild) -Name 'Unsigned release build copies the toolkit without modifying source bytes'
     Test-ToolkitAssertion -Condition ($releaseSbom.spdxVersion -ceq 'SPDX-2.3' -and @($releaseSbom.files).Count -eq $releaseBuildResult.PayloadFileCount -and $releaseSbom.packages[0].versionInfo -ceq '3.0.1') -Name 'Release builder emits an SPDX 2.3 inventory for the exact copied payload'
     Test-ToolkitAssertion -Condition (@($releaseManifestLines | Where-Object { $_ -match '\*WindowsAdminToolkit\.spdx\.json$' }).Count -eq 1 -and @($releaseManifestLines | Where-Object { $_ -match '\*SHA256SUMS\.txt$' }).Count -eq 0) -Name 'SHA-256 manifest includes the SBOM and excludes its self-referential manifest file'
-    $adoptionPayloadPaths = @('.github/assets/social-preview.jpg', 'INSTALL.md', 'examples/demo/README.md', 'examples/demo/system-info-sample.json', 'examples/demo/system-info-sample.html')
+    $adoptionPayloadPaths = @('.github/assets/social-preview.jpg', 'INSTALL.md', 'examples/demo/README.md', 'examples/demo/system-info-sample.json', 'examples/demo/system-info-sample.html', 'examples/visuals/windows-admin-toolkit-guarded-automation.png', 'examples/visuals/source/windows-admin-toolkit-guarded-automation.svg')
     $releaseManifestPaths = @($releaseManifestLines | ForEach-Object { if ($_ -match '^[0-9a-f]{64} \*(?<Path>.+)$') { $Matches.Path } })
     $releaseSbomPaths = @($releaseSbom.files | ForEach-Object { $_.fileName -replace '^\./', '' })
     Test-ToolkitAssertion -Condition (@($adoptionPayloadPaths | Where-Object { -not [IO.File]::Exists((Join-Path $releaseOutputPath $_)) -or $_ -notin $releaseManifestPaths -or $_ -notin $releaseSbomPaths }).Count -eq 0) -Name 'Release payload, manifest, and SBOM include artwork, installation guidance, and sanitized demos'
-    $releaseSocialPreviewFiles = @($releaseSbom.files | Where-Object { $_.fileName -ceq './.github/assets/social-preview.jpg' })
-    Test-ToolkitAssertion -Condition ($releaseSocialPreviewFiles.Count -eq 1 -and @($releaseSocialPreviewFiles[0].fileTypes).Count -eq 1 -and $releaseSocialPreviewFiles[0].fileTypes[0] -ceq 'IMAGE') -Name 'Release SBOM classifies the social preview as an image'
+    $releaseArtworkPaths = @('./.github/assets/social-preview.jpg', './examples/visuals/windows-admin-toolkit-guarded-automation.png', './examples/visuals/source/windows-admin-toolkit-guarded-automation.svg')
+    $releaseArtworkFiles = @($releaseSbom.files | Where-Object { $_.fileName -in $releaseArtworkPaths })
+    Test-ToolkitAssertion -Condition ($releaseArtworkFiles.Count -eq $releaseArtworkPaths.Count -and @($releaseArtworkFiles | Where-Object { @($_.fileTypes).Count -ne 1 -or $_.fileTypes[0] -cne 'IMAGE' }).Count -eq 0) -Name 'Release SBOM classifies README artwork as images'
     $releaseReadmeText = [IO.File]::ReadAllText((Join-Path $releaseOutputPath 'README.md'))
-    Test-ToolkitAssertion -Condition ($releaseReadmeText.Contains('src=".github/assets/social-preview.jpg"') -and [IO.File]::Exists((Join-Path $releaseOutputPath '.github/assets/social-preview.jpg'))) -Name 'Packaged README social preview reference resolves inside the release payload'
+    $releaseVisualPath = Join-Path $releaseOutputPath 'examples\visuals\windows-admin-toolkit-guarded-automation.png'
+    $releaseVisualSourcePath = Join-Path $releaseOutputPath 'examples\visuals\source\windows-admin-toolkit-guarded-automation.svg'
+    Test-ToolkitAssertion -Condition ($readmeVisualValid -and $releaseReadmeText.Contains('src=".github/assets/social-preview.jpg"') -and $releaseReadmeText.Contains('](examples/visuals/windows-admin-toolkit-guarded-automation.png)') -and [IO.File]::Exists((Join-Path $releaseOutputPath '.github/assets/social-preview.jpg')) -and [IO.File]::Exists($releaseVisualPath) -and [IO.File]::Exists($releaseVisualSourcePath) -and (Get-FileHash -LiteralPath $releaseVisualPath -Algorithm SHA256).Hash -ceq '4F5E1495EC62CE0C906CF110F8234AE2E37E785914F6FB5316E27467D0B7C065' -and (Get-FileHash -LiteralPath $releaseVisualSourcePath -Algorithm SHA256).Hash -ceq '9E12391A1245E696A35115B85EFE2FC1F9A34E5C3BFA548A3979F7496BD3BBBF') -Name 'Packaged README artwork references resolve to exact release assets'
     Test-ToolkitThrow -Action { & $releaseBuilderPath -OutputDirectory $releaseOutputPath | Out-Null } -Name 'Release builder refuses to overwrite an existing candidate directory'
 
     $successProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -Action SystemInfo -Local -LogFile '$escapedAutomationLogPath'"
