@@ -1,3 +1,36 @@
+<#PSScriptInfo
+
+.VERSION 3.0.1
+
+.GUID 652d03ba-0456-4c7e-abdd-b631ea7b8dfc
+
+.AUTHOR Jeff Friedler
+
+.COMPANYNAME Fusion Technology Strategies
+
+.COPYRIGHT Copyright (c) 2026 Fusion Technology Strategies. Licensed under the MIT License.
+
+.TAGS Windows WindowsServer PowerShell Administration RemoteAdministration RMM MSP WinRM PsExec Security Automation PSEdition_Desktop PSEdition_Core
+
+.LICENSEURI https://github.com/fusiontechstrategies/Windows-Admin-Toolkit/blob/main/LICENSE
+
+.PROJECTURI https://github.com/fusiontechstrategies/Windows-Admin-Toolkit
+
+.ICONURI
+
+.EXTERNALMODULEDEPENDENCIES
+
+.REQUIREDSCRIPTS
+
+.EXTERNALSCRIPTDEPENDENCIES
+
+.RELEASENOTES
+Adds PowerShell Gallery metadata for the guarded 3.0.1 release candidate.
+
+.PRIVATEDATA
+
+#>
+
 <#
 .SYNOPSIS
     Provides interactive and noninteractive tools for authorized Windows administration.

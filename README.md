@@ -79,6 +79,8 @@ The toolkit does not enable remote-management services or weaken security settin
 
 ## Install and verify the signed release
 
+No PowerShell Gallery package has been published. Version 3.0.1 contains validated Gallery metadata so the exact future release candidate can be tested through both modern and legacy package clients before any publication decision. Until that process is complete, use only the signed GitHub release linked here.
+
 This copy-pasteable current-user install downloads the standalone asset from the latest GitHub release, requires a valid Windows Authenticode trust result, pins the complete approved signer identity, and only then installs it. It validates a unique same-directory candidate before an atomic move or replacement, and restores an existing installation if post-promotion verification fails. The installer preserves the machine execution policy; the effective policy and application-control rules must permit trusted signed scripts.
 
 ```powershell

@@ -94,7 +94,9 @@ Review the SBOM for the expected toolkit version, payload list, checksums, licen
 
 The signed 3.0.0 release script does not contain the `PSScriptInfo` metadata required for a PowerShell Gallery script. Adding metadata would change its signed bytes. Never modify, re-sign, or publish a different script as version 3.0.0.
 
-Prepare Gallery distribution only as part of a future versioned release:
+Version 3.0.1 source contains the candidate metadata for package name `WindowsAdminToolkit`. This does not reserve the public name and does not authorize a Gallery publication. The metadata and the complete candidate must still pass every gate below, including repeat validation after any Authenticode signature is applied.
+
+Prepare Gallery distribution only as part of the reviewed versioned release:
 
 1. Confirm that the intended Gallery name is available or controlled by the publisher. Do not publish a placeholder package to reserve it.
 2. Update the canonical toolkit version and every version-bound schema, example, test, and document as one reviewed change.

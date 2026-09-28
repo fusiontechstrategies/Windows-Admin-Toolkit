@@ -587,6 +587,9 @@ Test-ToolkitAssertion -Condition ((ConvertTo-AdminCsvSafeValue -Value 'ordinary 
 Test-ToolkitAssertion -Condition ((ConvertTo-AdminHtmlEncoded -Value '<script>') -eq '&lt;script&gt;') -Name 'HTML-encodes report values'
 
 $sourceText = Get-Content -LiteralPath $toolkitPath -Raw
+Test-ToolkitAssertion -Condition ($sourceText -match '(?s)^<#PSScriptInfo\s+.*?\.VERSION\s+3\.0\.1\s+.*?\.GUID\s+652d03ba-0456-4c7e-abdd-b631ea7b8dfc\s+.*?\.AUTHOR\s+Jeff Friedler\s+.*?\.COMPANYNAME\s+Fusion Technology Strategies\s+') -Name 'Gallery metadata identifies the approved package version and publisher'
+Test-ToolkitAssertion -Condition ($sourceText -match '(?s)\.LICENSEURI\s+https://github\.com/fusiontechstrategies/Windows-Admin-Toolkit/blob/main/LICENSE\s+.*?\.PROJECTURI\s+https://github\.com/fusiontechstrategies/Windows-Admin-Toolkit\s+') -Name 'Gallery metadata uses the canonical project and license links'
+Test-ToolkitAssertion -Condition ($sourceText -match '(?s)\.TAGS\s+[^\r\n]*Windows[^\r\n]*PowerShell[^\r\n]*Security[^\r\n]*PSEdition_Desktop[^\r\n]*PSEdition_Core') -Name 'Gallery metadata contains focused discovery and edition tags'
 Test-ToolkitAssertion -Condition ($sourceText -match '#Requires -Version 5\.1') -Name 'Declares Windows PowerShell 5.1 compatibility'
 Test-ToolkitAssertion -Condition ($sourceText -match 'SupportsShouldProcess\s*=\s*\$true') -Name 'Enables ShouldProcess safeguards'
 Test-ToolkitAssertion -Condition ($sourceText -notmatch '\bInvoke-Expression\b|\biex\b') -Name 'Does not use Invoke-Expression'
