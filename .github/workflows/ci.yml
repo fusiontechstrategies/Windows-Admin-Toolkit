@@ -17,6 +17,39 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  gallery-metadata:
+    name: PowerShell Gallery metadata
+    runs-on: windows-2025
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate with PowerShellGet
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Install-Module PowerShellGet -RequiredVersion 2.2.5 -Scope CurrentUser -Force -AllowClobber -Repository PSGallery
+          Import-Module PowerShellGet -RequiredVersion 2.2.5 -Force
+          $metadata = Test-ScriptFileInfo -Path .\WindowsAdminToolkit.ps1
+          if ($metadata.Name -cne 'WindowsAdminToolkit' -or $metadata.Version.ToString() -cne '3.0.1') {
+              throw "Unexpected legacy package identity: $($metadata.Name) $($metadata.Version)"
+          }
+          if ($metadata.Author -cne 'Jeff Friedler' -or $metadata.CompanyName -cne 'Fusion Technology Strategies') {
+              throw 'Unexpected legacy package author or company metadata.'
+          }
+
+      - name: Validate with PSResourceGet
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Install-PSResource -Name Microsoft.PowerShell.PSResourceGet -Version 1.2.0 -Repository PSGallery -Scope CurrentUser -TrustRepository -AcceptLicense -Quiet
+          Import-Module Microsoft.PowerShell.PSResourceGet -RequiredVersion 1.2.0 -Force
+          if (-not (Test-PSScriptFileInfo -Path .\WindowsAdminToolkit.ps1)) {
+              throw 'PSResourceGet rejected the PSScriptInfo metadata.'
+          }
+
   tests:
     name: Tests (${{ matrix.os }}, ${{ matrix.edition }})
     strategy:
