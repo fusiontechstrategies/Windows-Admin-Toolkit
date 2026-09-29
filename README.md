@@ -15,6 +15,8 @@ Windows Admin Toolkit gives technicians an interactive console and gives automat
 
 [Install the signed release](#install-and-verify-the-signed-release) | [Preview sanitized output](examples/demo/README.md) | [Use it with RMM](examples/automation/README.md#read-only-rmm-execution) | [Review the security model](SECURITY.md)
 
+**Help improve the first-use path:** Windows administrators and MSP operators can try a 15-minute, no-change [synthetic walkthrough and share feedback](https://github.com/fusiontechstrategies/Windows-Admin-Toolkit/discussions/13).
+
 ## Why administrators use it
 
 - One portable application file: `WindowsAdminToolkit.ps1`
