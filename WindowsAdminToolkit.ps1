@@ -1,4 +1,4 @@
-<#PSScriptInfo
+﻿<#PSScriptInfo
 
 .VERSION 3.0.1
 
@@ -287,6 +287,9 @@ param(
     [string]$LogFile,
 
     [Parameter()]
+    [switch]$AppendTrustedLog,
+
+    [Parameter()]
     [switch]$UseSsl,
 
     [Parameter()]
@@ -448,6 +451,11 @@ param(
 $Script:ToolkitVersion = '3.0.1'
 $Script:WasDotSourced = $MyInvocation.InvocationName -eq '.'
 $Script:ToolkitPath = $PSCommandPath
+# The parser's original buffer binds workers to the code that is already loaded.
+# Reading or hashing ToolkitPath here would authenticate a different, mutable file.
+$Script:ToolkitLoadedSource = $MyInvocation.MyCommand.ScriptBlock.Ast.Extent.Text
+$Script:MutableSinks = New-Object 'System.Collections.Generic.List[object]'
+$Script:CheckpointFiles = @{}
 $Script:InvocationParameters = @{}
 foreach ($boundName in $PSBoundParameters.Keys) {
     $canonicalBoundName = if ($boundName -eq 'WinRmIdentity') { 'Credential' } else { $boundName }
@@ -457,6 +465,7 @@ $normalizedTransport = if ($Transport -ieq 'WinRM') { 'WinRM' } elseif ($Transpo
 $normalizedAuthentication = if ($Authentication -ieq 'Default') { 'Default' } elseif ($Authentication -ieq 'Kerberos') { 'Kerberos' } elseif ($Authentication -ieq 'Negotiate') { 'Negotiate' } else { $Authentication }
 $Script:State = [ordered]@{
     LogFile                    = $null
+    LogContext                 = $null
     Quiet                      = [bool]$Quiet
     Transport                  = $normalizedTransport
     PsExecPath                 = $PsExecPath
@@ -590,51 +599,63 @@ function Get-AdminRuntimeConfigurationError {
     return $null
 }
 
+function Open-AdminMutableFile {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$LiteralPath, [Parameter()][switch]$Create)
+    if (-not (Test-AdminLiteralFilePathText -LiteralPath $LiteralPath)) { throw 'Unsafe retained output path.' }
+    Initialize-AdminSafeFileType
+    $fullPath = [IO.Path]::GetFullPath($LiteralPath)
+    $parent = [IO.Path]::GetDirectoryName($fullPath)
+    $pending = New-Object 'System.Collections.Generic.Stack[string]'
+    $existing = $parent
+    while (-not [IO.Directory]::Exists($existing)) {
+        $pending.Push($existing)
+        $next = [IO.Path]::GetDirectoryName($existing)
+        if ([string]::IsNullOrWhiteSpace($next) -or $next -ceq $existing) { throw 'No trusted output ancestor exists.' }
+        $existing = $next
+    }
+    $guard = [WindowsAdminToolkit.Security.PathLease]::OpenTrusted($existing, $true, $false, $false)
+    try {
+        while ($pending.Count -gt 0) {
+            $child = $pending.Pop()
+            [WindowsAdminToolkit.Security.StorageSecurity]::CreatePrivateDirectory($child)
+            $nextGuard = [WindowsAdminToolkit.Security.PathLease]::OpenTrusted($child, $true, $false, $true)
+            $guard.Dispose(); $guard = $nextGuard
+        }
+        return [WindowsAdminToolkit.Security.MutableFile]::Open($fullPath, [bool]$Create)
+    }
+    finally { $guard.Dispose() }
+}
+
+function Close-AdminRunSink {
+    [CmdletBinding()]
+    param()
+    foreach ($sink in $Script:MutableSinks) { $sink.Dispose() }
+    $Script:MutableSinks.Clear()
+    $Script:State.LogContext = $null
+}
+
+function Get-AdminLogDirectory {
+    [CmdletBinding()]
+    param()
+    Initialize-AdminSafeFileType
+    return Join-Path ([WindowsAdminToolkit.Security.SystemPaths]::LocalApplicationData()) 'WindowsAdminToolkit\Logs'
+}
+
 function Initialize-AdminLog {
     [CmdletBinding()]
-    param(
-        [Parameter()]
-        [string]$RequestedPath
-    )
-
+    param([Parameter()][string]$RequestedPath, [Parameter()][switch]$AppendTrusted)
     if ([string]::IsNullOrWhiteSpace($RequestedPath)) {
-        $basePath = $env:LOCALAPPDATA
-        if ([string]::IsNullOrWhiteSpace($basePath)) {
-            $basePath = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
-        }
-
-        $logDirectory = Join-Path $basePath 'WindowsAdminToolkit\Logs'
-        $RequestedPath = Join-Path $logDirectory ("WindowsAdminToolkit_{0}_{1}.log" -f (Get-Date -Format 'yyyyMMdd_HHmmss_fff'), [guid]::NewGuid().ToString('N').Substring(0, 8))
+        Initialize-AdminSafeFileType
+        $RequestedPath = Join-Path (Get-AdminLogDirectory) ("WindowsAdminToolkit_{0}_{1}.log" -f (Get-Date -Format 'yyyyMMdd_HHmmss_fff'), [guid]::NewGuid().ToString('N'))
     }
-
-    if (-not (Test-AdminLiteralFilePathText -LiteralPath $RequestedPath)) {
-        throw 'The log path contains an unsafe or unsupported component.'
-    }
-
-    $fullPath = [System.IO.Path]::GetFullPath($RequestedPath)
-    $parent = Split-Path -Parent $fullPath
-    if ([string]::IsNullOrWhiteSpace($parent)) {
-        throw 'The log path must include a valid parent directory.'
-    }
-
-    if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
-        [void][System.IO.Directory]::CreateDirectory($parent)
-    }
-
-    if (Test-Path -LiteralPath $fullPath -PathType Container) {
-        throw "The log path points to a directory: $fullPath"
-    }
-
-    $logProbe = $null
-    try {
-        $logProbe = [System.IO.File]::Open($fullPath, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)
-    }
-    finally {
-        if ($logProbe) {
-            $logProbe.Dispose()
-        }
-    }
-
+    if (-not (Test-AdminLiteralFilePathText -LiteralPath $RequestedPath)) { throw 'Unsafe log path.' }
+    $fullPath = [IO.Path]::GetFullPath($RequestedPath)
+    if ($Script:State.LogContext -and $Script:State.LogContext.Path.Equals($fullPath, [StringComparison]::OrdinalIgnoreCase)) { return $fullPath }
+    if ([IO.File]::Exists($fullPath) -and -not $AppendTrusted) { throw 'An existing log requires explicit -AppendTrustedLog and trusted private ownership.' }
+    $sink = Open-AdminMutableFile -LiteralPath $fullPath -Create:(-not $AppendTrusted -or -not [IO.File]::Exists($fullPath))
+    $Script:MutableSinks.Add($sink) | Out-Null
+    $Script:State.LogContext = $sink
     $Script:State.LogFile = $fullPath
     return $fullPath
 }
@@ -654,12 +675,14 @@ function Write-AdminLog {
         [switch]$NoConsole
     )
 
-    $entry = '[{0}] [{1}] {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $Message
+    $entry = '[{0}] [{1}] {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, (ConvertTo-AdminTerminalLiteral -Value $Message)
 
     if (-not [string]::IsNullOrWhiteSpace([string]$Script:State.LogFile)) {
         try {
             $encoding = New-Object System.Text.UTF8Encoding($false)
-            [System.IO.File]::AppendAllText($Script:State.LogFile, $entry + [Environment]::NewLine, $encoding)
+            if (-not $Script:State.LogContext) { throw 'The log has no retained object handle.' }
+            $bytes = $encoding.GetBytes($entry + [Environment]::NewLine)
+            $Script:State.LogContext.Append($bytes, $Script:State.LogContext.Length, 67108864)
         }
         catch {
             if (-not $NoConsole -and -not $Script:State.Quiet) {
@@ -728,9 +751,8 @@ function Test-AdminHostname {
         return $ip.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork -and $ip.ToString() -ceq $value
     }
 
-    if ($value.EndsWith('.')) {
-        $value = $value.Substring(0, $value.Length - 1)
-    }
+    # Reject DNS presentation aliases before counting, policy, identity or dispatch.
+    if ($value.EndsWith('.')) { return $false }
 
     if ([string]::IsNullOrWhiteSpace($value)) {
         return $false
@@ -1165,6 +1187,35 @@ using System.Security.Cryptography;
 using Microsoft.Win32.SafeHandles;
 
 namespace WindowsAdminToolkit.Security {
+    public static class SystemPaths {
+        [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+        static extern uint GetSystemDirectory(StringBuilder path, uint size);
+        [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+        static extern uint GetWindowsDirectory(StringBuilder path, uint size);
+        [DllImport("shell32.dll")] static extern int SHGetKnownFolderPath(ref Guid folder, uint flags, IntPtr token, out IntPtr path);
+        public static string SystemDirectory() {
+            StringBuilder path = new StringBuilder(32768); uint count = GetSystemDirectory(path, (uint)path.Capacity);
+            if (count == 0 || count >= path.Capacity) throw new Win32Exception(Marshal.GetLastWin32Error());
+            return path.ToString();
+        }
+        public static string WindowsDirectory() {
+            StringBuilder path = new StringBuilder(32768); uint count = GetWindowsDirectory(path, (uint)path.Capacity);
+            if (count == 0 || count >= path.Capacity) throw new Win32Exception(Marshal.GetLastWin32Error());
+            return path.ToString();
+        }
+        public static string LocalApplicationData() {
+            Guid folder = new Guid("F1B32785-6FBA-4FCF-9D55-7B8E7F157091"); IntPtr path = IntPtr.Zero;
+            try {
+                int error = SHGetKnownFolderPath(ref folder, 0, IntPtr.Zero, out path);
+                if (error != 0) Marshal.ThrowExceptionForHR(error);
+                if (path == IntPtr.Zero) throw new IOException("Cannot resolve the current identity's known folder.");
+                return Marshal.PtrToStringUni(path);
+            } finally { if (path != IntPtr.Zero) Marshal.FreeCoTaskMem(path); }
+        }
+        public static string[] CleanupRoots() {
+            return new string[] { System.IO.Path.Combine(LocalApplicationData(), "Temp"), System.IO.Path.Combine(WindowsDirectory(), "Temp") };
+        }
+    }
     // Each ancestor is held without write/delete sharing until the leaf is consumed.
     // OPEN_REPARSE_POINT makes both the initial walk and later object inspection no-follow.
     public sealed class PathLease : IDisposable {
@@ -1184,6 +1235,18 @@ namespace WindowsAdminToolkit.Security {
         readonly List<SafeFileHandle> handles = new List<SafeFileHandle>();
         FileStream stream; SafeFileHandle leaf; Info info; bool disposed;
         public string Path { get; private set; }
+        internal SafeFileHandle Handle { get { if (disposed) throw new ObjectDisposedException("PathLease"); return leaf; } }
+        // HOST_TRUST_BEGIN
+        public void ValidateHeld() {
+            if (disposed) throw new ObjectDisposedException("PathLease");
+            foreach (SafeFileHandle handle in handles) {
+                Info held;
+                if (!GetFileInformationByHandle(handle, out held)) throw new Win32Exception(Marshal.GetLastWin32Error());
+                if ((held.Attributes & 0x400) != 0) throw new IOException("A retained path became a reparse point.");
+                StorageSecurity.Validate(handle, false, (held.Attributes & 16) != 0);
+            }
+        }
+        // HOST_TRUST_END
         public string Identity { get { return info.Volume.ToString("X8") + ":" + info.IndexHigh.ToString("X8") + info.IndexLow.ToString("X8"); } }
         public uint LinkCount { get { return info.Links; } }
         public bool IsDirectory { get { return (info.Attributes & 16) != 0; } }
@@ -1242,6 +1305,15 @@ namespace WindowsAdminToolkit.Security {
                 if (!directory && lease.LinkCount != 1) throw new IOException("Private artifacts cannot have multiple hard links.");
                 return lease;
             } catch (Exception error) { lease.Dispose(); throw new IOException("Protected storage trust check failed for " + path + ": " + error.Message, error); }
+        }
+        public static PathLease OpenAdministratorTrusted(string path) {
+            PathLease lease = OpenCore(path, false, false, false);
+            try {
+                for (int i = 0; i < lease.handles.Count; i++)
+                    StorageSecurity.Validate(lease.handles[i], false, i != lease.handles.Count - 1, true);
+                if (lease.LinkCount != 1) throw new IOException("Executable source cannot have multiple hard links.");
+                return lease;
+            } catch { lease.Dispose(); throw; }
         }
         // HOST_TRUST_END
         FileStream Reader() {
@@ -1313,8 +1385,11 @@ namespace WindowsAdminToolkit.Security {
                 sid == "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
         }
         public static void ValidateDescriptor(byte[] bytes, bool privateLeaf, bool directory, bool volumeRoot) {
+            ValidateDescriptor(bytes, privateLeaf, directory, volumeRoot, false);
+        }
+        public static void ValidateDescriptor(byte[] bytes, bool privateLeaf, bool directory, bool volumeRoot, bool administratorOnly) {
             System.Security.AccessControl.RawSecurityDescriptor descriptor = new System.Security.AccessControl.RawSecurityDescriptor(bytes, 0);
-            string user = CurrentSid;
+            string user = administratorOnly ? "" : CurrentSid;
             if (descriptor.Owner == null || !Trusted(descriptor.Owner.Value, user) || (privateLeaf && descriptor.Owner.Value != user))
                 throw new IOException("Protected storage has an untrusted owner.");
             if (descriptor.DiscretionaryAcl == null) throw new IOException("Protected storage has a NULL DACL.");
@@ -1342,6 +1417,9 @@ namespace WindowsAdminToolkit.Security {
             }
         }
         public static void Validate(SafeFileHandle handle, bool privateLeaf, bool directory) {
+            Validate(handle, privateLeaf, directory, false);
+        }
+        public static void Validate(SafeFileHandle handle, bool privateLeaf, bool directory, bool administratorOnly) {
             IntPtr owner, dacl, descriptor;
             uint error = GetSecurityInfo(handle, 1, 5, out owner, IntPtr.Zero, out dacl, IntPtr.Zero, out descriptor);
             if (error != 0) throw new Win32Exception((int)error);
@@ -1353,7 +1431,7 @@ namespace WindowsAdminToolkit.Security {
                 uint count = GetFinalPathNameByHandle(handle, name, (uint)name.Capacity, 1);
                 bool root = directory && count > 0 && count < name.Capacity &&
                     System.Text.RegularExpressions.Regex.IsMatch(name.ToString(), @"^\\\\\?\\Volume\{[0-9A-Fa-f-]{36}\}\\$");
-                ValidateDescriptor(bytes, privateLeaf, directory, root);
+                ValidateDescriptor(bytes, privateLeaf, directory, root, administratorOnly);
             } finally { LocalFree(descriptor); }
         }
         public static void CreatePrivateDirectory(string path) {
@@ -1383,6 +1461,97 @@ namespace WindowsAdminToolkit.Security {
                     }
                 }
             } finally { LocalFree(descriptor); }
+        }
+    }
+    // A single object handle owns every read/write revision. The relative native
+    // open is anchored to a retained directory rather than a second path lookup.
+    public sealed class MutableFile : IDisposable {
+        [StructLayout(LayoutKind.Sequential)] struct UnicodeString { public ushort Length, MaximumLength; public IntPtr Buffer; }
+        [StructLayout(LayoutKind.Sequential)] struct ObjectAttributes {
+            public int Length; public IntPtr RootDirectory, ObjectName; public uint Attributes; public IntPtr SecurityDescriptor, SecurityQualityOfService;
+        }
+        [StructLayout(LayoutKind.Sequential)] struct IoStatus { public IntPtr Status, Information; }
+        [StructLayout(LayoutKind.Sequential)] struct Info {
+            public uint Attributes; public System.Runtime.InteropServices.ComTypes.FILETIME Creation, Access, Write;
+            public uint Volume, SizeHigh, SizeLow, Links, IndexHigh, IndexLow;
+        }
+        [DllImport("ntdll.dll")] static extern int NtCreateFile(out SafeFileHandle handle, uint access, ref ObjectAttributes attributes,
+            out IoStatus status, IntPtr allocation, uint fileAttributes, uint share, uint disposition, uint options, IntPtr ea, uint eaLength);
+        [DllImport("ntdll.dll")] static extern uint RtlNtStatusToDosError(int status);
+        [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetFileInformationByHandle(SafeFileHandle handle, out Info info);
+        [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+        static extern bool ConvertStringSecurityDescriptorToSecurityDescriptor(string text, uint revision, out IntPtr descriptor, out uint size);
+        [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
+        PathLease parent; SafeFileHandle handle; FileStream stream; bool disposed;
+        public string Path { get; private set; }
+        public string Identity { get; private set; }
+        public long Length { get { Validate(); return stream.Length; } }
+        MutableFile() {}
+        public static MutableFile Open(string path, bool create) {
+            string full = System.IO.Path.GetFullPath(path), name = System.IO.Path.GetFileName(full);
+            if (name.Length == 0 || name.Length > 255 || name == "." || name == ".." || name.IndexOfAny(new char[] {'\\','/',':','\0'}) >= 0)
+                throw new IOException("A strict relative output leaf is required.");
+            MutableFile file = new MutableFile(); file.Path = full;
+            IntPtr text = IntPtr.Zero, unicode = IntPtr.Zero, descriptor = IntPtr.Zero;
+            try {
+                file.parent = PathLease.OpenTrusted(System.IO.Path.GetDirectoryName(full), true, false, false);
+                file.parent.ValidateHeld();
+                text = Marshal.StringToHGlobalUni(name);
+                UnicodeString us = new UnicodeString(); us.Length = checked((ushort)(name.Length * 2)); us.MaximumLength = checked((ushort)(us.Length + 2)); us.Buffer = text;
+                unicode = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(UnicodeString))); Marshal.StructureToPtr(us, unicode, false);
+                string sid = StorageSecurity.CurrentSid; uint size;
+                if (!ConvertStringSecurityDescriptorToSecurityDescriptor("O:"+sid+"G:"+sid+"D:P(A;;FA;;;"+sid+")(A;;FA;;;SY)(A;;FA;;;BA)", 1, out descriptor, out size))
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                ObjectAttributes oa = new ObjectAttributes(); oa.Length = Marshal.SizeOf(typeof(ObjectAttributes));
+                oa.RootDirectory = file.parent.Handle.DangerousGetHandle(); oa.ObjectName = unicode; oa.Attributes = 0x1040; oa.SecurityDescriptor = create ? descriptor : IntPtr.Zero;
+                IoStatus io;
+                int status = NtCreateFile(out file.handle, 0xc0120000u, ref oa, out io, IntPtr.Zero, 0x80u, 1u, create ? 2u : 1u, 0x200060u, IntPtr.Zero, 0);
+                if (status < 0) throw new Win32Exception((int)RtlNtStatusToDosError(status), "Cannot acquire retained output object.");
+                Info opened;
+                if (!GetFileInformationByHandle(file.handle, out opened)) throw new Win32Exception(Marshal.GetLastWin32Error());
+                if ((opened.Attributes & (0x400u | 16u)) != 0 || opened.Links != 1) throw new IOException("Output must be an ordinary file with one hard link.");
+                StorageSecurity.Validate(file.handle, true, false);
+                file.Identity = opened.Volume.ToString("X8")+":"+opened.IndexHigh.ToString("X8")+opened.IndexLow.ToString("X8");
+                file.stream = new FileStream(file.handle, FileAccess.ReadWrite);
+                return file;
+            } catch { file.Dispose(); throw; }
+            finally {
+                if (descriptor != IntPtr.Zero) LocalFree(descriptor);
+                if (unicode != IntPtr.Zero) Marshal.FreeHGlobal(unicode);
+                if (text != IntPtr.Zero) Marshal.FreeHGlobal(text);
+            }
+        }
+        void Validate() {
+            if (disposed) throw new ObjectDisposedException("MutableFile");
+            parent.ValidateHeld(); StorageSecurity.Validate(handle, true, false);
+            Info current;
+            if (!GetFileInformationByHandle(handle, out current)) throw new Win32Exception(Marshal.GetLastWin32Error());
+            if ((current.Attributes & (0x400u | 16u)) != 0 || current.Links != 1) throw new IOException("Retained output object changed unexpectedly.");
+        }
+        public byte[] ReadBytes(int maximum) {
+            Validate();
+            if (stream.Length > maximum) throw new IOException("Retained file exceeds its byte limit.");
+            byte[] bytes = new byte[(int)stream.Length]; stream.Position = 0; int offset = 0;
+            while (offset < bytes.Length) { int count = stream.Read(bytes, offset, bytes.Length-offset); if (count == 0) throw new IOException("Incomplete retained file."); offset += count; }
+            return bytes;
+        }
+        public void Append(byte[] bytes, long expectedLength, int maximum) {
+            Validate();
+            if (stream.Length != expectedLength || stream.Length+bytes.Length > maximum) throw new IOException("Retained output length or budget changed.");
+            stream.Position = stream.Length; stream.Write(bytes, 0, bytes.Length); stream.Flush(true);
+        }
+        public void ReplaceBytes(byte[] bytes, int maximum) {
+            Validate(); if (bytes.Length > maximum) throw new IOException("Retained checkpoint exceeds its byte limit.");
+            // The identity ledger is flushed first by the caller. An interrupted
+            // in-place revision is rejected on resume, never replayed automatically.
+            stream.Position = 0; stream.Write(bytes, 0, bytes.Length); stream.SetLength(bytes.Length); stream.Flush(true);
+            Validate();
+        }
+        public void Dispose() {
+            if (disposed) return; disposed = true;
+            if (stream != null) stream.Dispose();
+            if (handle != null) handle.Dispose();
+            if (parent != null) parent.Dispose();
         }
     }
     public sealed class CapturedProcess {
@@ -1866,7 +2035,7 @@ $Script:ActionScripts.ScheduleReboot = {
         [int]$DelaySeconds = 60
     )
 
-    $shutdownPath = Join-Path $env:SystemRoot 'System32\shutdown.exe'
+    $shutdownPath = Join-Path ([WindowsAdminToolkit.Security.SystemPaths]::SystemDirectory()) 'shutdown.exe'
     $message = 'Administrative reboot scheduled by Windows Admin Toolkit'
     $output = & $shutdownPath '/r' '/t' ([string]$DelaySeconds) '/d' 'p:4:1' '/c' $message 2>&1
     $exitCode = $LASTEXITCODE
@@ -2025,8 +2194,7 @@ if (-not ('WindowsAdminToolkit.Security.PathLease' -as [type])) {
 __NATIVE_FILE_SOURCE__
 "@ -ErrorAction Stop
 }
-$roots = [string[]]@(@($env:TEMP, (Join-Path $env:SystemRoot 'Temp')) |
-    Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)
+$roots = [WindowsAdminToolkit.Security.SystemPaths]::CleanupRoots()
 $result = [WindowsAdminToolkit.Security.TempCleanup]::Run($roots, [datetime]::UtcNow.AddDays(-$MinimumAgeDays), $MaximumFiles)
 [pscustomobject]@{
     ComputerName = $env:COMPUTERNAME
@@ -2200,7 +2368,7 @@ $Script:ActionScripts.CustomCommand = {
         $sha256.Dispose()
     }
 
-    $commandShell = Join-Path $env:SystemRoot 'System32\cmd.exe'
+    $commandShell = Join-Path ([WindowsAdminToolkit.Security.SystemPaths]::SystemDirectory()) 'cmd.exe'
     $output = & $commandShell '/d' '/s' '/c' $Command 2>&1
     $exitCode = $LASTEXITCODE
     $text = $output -join [Environment]::NewLine
@@ -2253,6 +2421,25 @@ $Script:ActionScripts.CustomPowerShell = {
         OutputTruncated = $truncated
         Status         = 'Success'
     }
+}
+
+# Standalone remote actions include only the native system-directory resolver.
+$systemPathClassSource = $Script:NativeFileSource.Substring(0, $Script:NativeFileSource.IndexOf('    // Each ancestor is held')) + "}`n"
+foreach ($systemAction in @('ScheduleReboot', 'CustomCommand')) {
+    $systemActionText = $Script:ActionScripts[$systemAction].ToString()
+    $systemActionAst = $Script:ActionScripts[$systemAction].Ast
+    $systemParamEnd = $systemActionAst.ParamBlock.Extent.EndOffset - $systemActionAst.Extent.StartOffset
+    # AST extent of a literal action includes its braces; ToString excludes them.
+    $systemParamEnd--
+    $systemPrelude = @'
+
+if (-not ('WindowsAdminToolkit.Security.SystemPaths' -as [type])) {
+    Add-Type -TypeDefinition @"
+__SYSTEM_PATH_SOURCE__
+"@ -ErrorAction Stop
+}
+'@.Replace('__SYSTEM_PATH_SOURCE__', $systemPathClassSource)
+    $Script:ActionScripts[$systemAction] = [scriptblock]::Create($systemActionText.Insert($systemParamEnd, $systemPrelude))
 }
 
 $Script:CapabilityDiscoveryScript = {
@@ -2854,7 +3041,8 @@ function Get-AdminAuthenticodeSignatureInfo {
         }
     }
 
-    $windowsPowerShellPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    Initialize-AdminSafeFileType
+    $windowsPowerShellPath = Join-Path ([WindowsAdminToolkit.Security.SystemPaths]::SystemDirectory()) 'WindowsPowerShell\v1.0\powershell.exe'
     if (-not (Test-Path -LiteralPath $windowsPowerShellPath -PathType Leaf)) {
         throw 'Windows PowerShell is required to validate the PsExec Authenticode signature in this PowerShell edition.'
     }
@@ -2881,7 +3069,9 @@ if ($signature.SignerCertificate) {
 '@
 
     $encodedPayload = ConvertTo-AdminEncodedPayload -ActionText $signatureAction -ArgumentList @($LiteralPath)
-    $helperOutput = @(& $windowsPowerShellPath -NoLogo -NoProfile -NonInteractive -EncodedCommand $encodedPayload 2>&1)
+    $helperLease = [WindowsAdminToolkit.Security.PathLease]::OpenAdministratorTrusted($windowsPowerShellPath)
+    try { $helperOutput = @(& $windowsPowerShellPath -NoLogo -NoProfile -NonInteractive -EncodedCommand $encodedPayload 2>&1) }
+    finally { $helperLease.Dispose() }
     $outputText = ($helperOutput | ForEach-Object { [string]$_ }) -join [Environment]::NewLine
     $resultMatches = [regex]::Matches($outputText, '(?m)^ADMINRESULT:(?<Data>[A-Za-z0-9+/=]+)\s*$')
     if ($resultMatches.Count -eq 0) {
@@ -3466,7 +3656,11 @@ function Add-AdminNormalizedData {
             continue
         }
 
-        if ($null -eq $item.PSObject.Properties['ComputerName']) {
+        # Selected target identity is authoritative even when the producer disagrees.
+        if ($item -is [System.Collections.IDictionary]) {
+            $item['ComputerName'] = $ComputerName
+        }
+        else {
             $item | Add-Member -NotePropertyName ComputerName -NotePropertyValue $ComputerName -Force
         }
         $Destination.Add($item) | Out-Null
@@ -3588,6 +3782,19 @@ function ConvertTo-AdminDetailedTargetResult {
     }
 }
 
+function Assert-AdminPrivilegedSourceTrust {
+    [CmdletBinding()]
+    param()
+    if (-not (Test-Administrator) -and $null -eq $Script:State.Credential) { return }
+    if ([string]::IsNullOrWhiteSpace($Script:ToolkitPath)) {
+        throw 'Privileged invocation requires an administrator-protected original executable source.'
+    }
+    Initialize-AdminSafeFileType
+    $lease = [WindowsAdminToolkit.Security.PathLease]::OpenAdministratorTrusted($Script:ToolkitPath)
+    try { [void]$lease.Identity }
+    finally { $lease.Dispose() }
+}
+
 function Invoke-AdminTargetDetailed {
     [CmdletBinding()]
     param(
@@ -3635,6 +3842,7 @@ function Invoke-AdminTargetDetailed {
         }
     }
 
+    Assert-AdminPrivilegedSourceTrust
     $actionBlock = if ($ActionName -ceq 'CapabilityPreflight') { $Script:CapabilityDiscoveryScript } else { $Script:ActionScripts[$ActionName] }
     $targetResults = New-Object 'System.Collections.Generic.List[object]'
 
@@ -3694,7 +3902,7 @@ function Invoke-AdminTargetDetailed {
             try {
                 $job = Start-Job -Name ('AdminJob_{0}' -f [guid]::NewGuid().ToString('N')) -ScriptBlock {
                     param(
-                        $ToolkitPath,
+                        $LoadedToolkitSource,
                         $SelectedTransport,
                         $TargetComputer,
                         [System.Management.Automation.PSCredential]$RemoteCredential,
@@ -3710,11 +3918,14 @@ function Invoke-AdminTargetDetailed {
                         $RemoteOutputItems
                     )
 
-                    . $ToolkitPath
+                    . ([scriptblock]::Create($LoadedToolkitSource))
+                    # This worker receives only the parent's captured source; source
+                    # trust was checked before dispatch in the privileged parent.
+                    $Script:ToolkitPath = $null
                     $remoteArguments = @(ConvertFrom-AdminArgumentEnvelope -EncodedEnvelope $RemoteArgumentEnvelope)
                     Invoke-AdminTargetWithRetry -Transport $SelectedTransport -ComputerName $TargetComputer -Credential $RemoteCredential -ActionText $RemoteActionText -ArgumentList $remoteArguments -PsExecFullPath $RemotePsExecPath -UseSsl ([bool]$RemoteUseSsl) -Authentication $RemoteAuthentication -RetryCount $RemoteRetryCount -RetryDelaySeconds $RemoteRetryDelay -TimeoutSeconds $RemoteTimeoutSeconds -MaximumOutputBytes $RemoteOutputBytes -MaximumOutputItems $RemoteOutputItems
                 } -ArgumentList @(
-                    $Script:ToolkitPath,
+                    $Script:ToolkitLoadedSource,
                     $Script:State.Transport,
                     $computer,
                     $Script:State.Credential,
@@ -4721,6 +4932,7 @@ function Initialize-AdminAuditContext {
         Path            = if ([string]::IsNullOrWhiteSpace([string]$ResolvedAuditPath)) { $null } else { [string]$ResolvedAuditPath }
         EventLogEnabled = [bool]$EventLogEnabled
         EventSource     = if ($EventLogEnabled) { $eventSourceName } else { $null }
+        Sink            = $null
         RecordCount     = 0
         BytesWritten    = [int64]0
         SinkFailed      = $false
@@ -4732,19 +4944,8 @@ function Initialize-AdminAuditContext {
     }
 
     if ($context.Path) {
-        $parent = Split-Path -Parent $context.Path
-        if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
-            [void][System.IO.Directory]::CreateDirectory($parent)
-        }
-        $stream = $null
-        try {
-            $stream = New-Object System.IO.FileStream($context.Path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)
-        }
-        finally {
-            if ($stream) {
-                $stream.Dispose()
-            }
-        }
+        $context.Sink = Open-AdminMutableFile -LiteralPath $context.Path -Create
+        $Script:MutableSinks.Add($context.Sink) | Out-Null
     }
 
     return $context
@@ -4842,22 +5043,9 @@ function Write-AdminAuditRecord {
         }
 
         if ($Context.Path) {
-            $stream = $null
-            try {
-                $stream = New-Object System.IO.FileStream($Context.Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
-                if ($stream.Length -ne $Context.BytesWritten) {
-                    throw 'The audit file changed unexpectedly during the run.'
-                }
-                [void]$stream.Seek(0, [System.IO.SeekOrigin]::End)
-                $stream.Write($recordBytes, 0, $recordBytes.Length)
-                $stream.Flush()
-                $Context.BytesWritten = [int64]($Context.BytesWritten + $recordBytes.Length)
-            }
-            finally {
-                if ($stream) {
-                    $stream.Dispose()
-                }
-            }
+            if (-not $Context.Sink) { throw 'The audit sink has no retained object handle.' }
+            $Context.Sink.Append($recordBytes, $Context.BytesWritten, $Script:AuditMaximumBytes)
+            $Context.BytesWritten = [int64]($Context.BytesWritten + $recordBytes.Length)
         }
 
         if ($Context.EventLogEnabled) {
@@ -7239,6 +7427,7 @@ function Invoke-AdminAutomationCore {
             'OperationTimeoutMinutes',
             'ConnectivityTimeoutSeconds',
             'LogFile',
+            'AppendTrustedLog',
             'UseSsl',
             'Authentication',
             'Quiet',
@@ -7287,6 +7476,10 @@ function Invoke-AdminAutomationCore {
         return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -ActionId $requestedActionId -PolicyDecision $requestedPolicyDecision -Status ValidationFailed -Outcome ValidationFailure -ExitCode $Script:AutomationExitCodes.ValidationFailure -Errors @([pscustomobject]@{ Category = 'Validation'; Message = 'Windows Admin Toolkit runs only on Windows.' }) -ReportPaths $reportPaths
     }
 
+    try { Assert-AdminDistinctConfiguredPath -Parameters $Parameters -ResolvedOutputPath $ResolvedOutputPath }
+    catch {
+        return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc ([datetime]::UtcNow) -ActionId $requestedActionId -PolicyDecision $requestedPolicyDecision -Status ValidationFailed -Outcome ValidationFailure -ExitCode $Script:AutomationExitCodes.ValidationFailure -Errors @([pscustomobject]@{ Category = 'Validation'; Message = $_.Exception.Message })
+    }
     $resolution = Resolve-AdminAutomationRequest -Parameters $Parameters
     if (-not $resolution.Success) {
         $catalogItem = if ($requestedActionId) { Get-AdminActionCatalogItem -ActionId $requestedActionId } else { $null }
@@ -7299,7 +7492,7 @@ function Invoke-AdminAutomationCore {
         if ($resolution.PolicyDecision.applied) {
             try {
                 $requestedFailureLogPath = if (Test-AdminParameterBound -Parameters $Parameters -Name 'LogFile') { [string]$Parameters['LogFile'] } else { $null }
-                [void](Initialize-AdminLog -RequestedPath $requestedFailureLogPath)
+                [void](Initialize-AdminLog -RequestedPath $requestedFailureLogPath -AppendTrusted:([bool]$Parameters['AppendTrustedLog']))
                 Write-AdminLog -Message ("Automation run {0} policy decision: {1} ({2})." -f $runId, $resolution.PolicyDecision.decision, $resolution.PolicyDecision.reasonCode) -NoConsole
             }
             catch {
@@ -7311,12 +7504,19 @@ function Invoke-AdminAutomationCore {
     }
 
     $request = $resolution.Request
+    try {
+        $trustPreview = (Test-AdminParameterBound -Parameters $Parameters -Name 'WhatIf') -and [bool]$Parameters['WhatIf']
+        if (-not $trustPreview) { Assert-AdminPrivilegedSourceTrust }
+    }
+    catch {
+        return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc ([datetime]::UtcNow) -ActionId $request.ActionId -ActionName $request.ActionName -ReadOnly $request.ReadOnly -PolicyDecision $request.PolicyDecision -Status ValidationFailed -Outcome ValidationFailure -ExitCode $Script:AutomationExitCodes.ValidationFailure -Errors @([pscustomobject]@{ Category = 'Validation'; Message = $_.Exception.Message })
+    }
     $transportName = if ($request.TargetMode -eq 'Local') { 'Local' } else { $Script:State.Transport }
     $transportAuthentication = if ($request.TargetMode -eq 'Remote' -and $Script:State.Transport -eq 'WinRM') { $Script:State.Authentication } else { $null }
     $transportUseSsl = $request.TargetMode -eq 'Remote' -and $Script:State.Transport -eq 'WinRM' -and [bool]$Script:State.UseSsl
     try {
         $requestedLogPath = if (Test-AdminParameterBound -Parameters $Parameters -Name 'LogFile') { [string]$Parameters['LogFile'] } else { $null }
-        [void](Initialize-AdminLog -RequestedPath $requestedLogPath)
+        [void](Initialize-AdminLog -RequestedPath $requestedLogPath -AppendTrusted:([bool]$Parameters['AppendTrustedLog']))
         Write-AdminLog -Message ("Automation run {0} prepared action '{1}' for {2} target(s)." -f $runId, $request.ActionName, $request.Computers.Count) -NoConsole
         Write-AdminLog -Message ("Automation run {0} policy decision: {1} ({2})." -f $runId, $request.PolicyDecision.decision, $request.PolicyDecision.reasonCode) -NoConsole
     }
@@ -7448,6 +7648,34 @@ function Invoke-AdminAutomationCore {
     return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -ActionId $request.ActionId -ActionName $request.ActionName -ReadOnly $request.ReadOnly -Preflight $request.Preflight -PolicyDecision $request.PolicyDecision -TargetMode $request.TargetMode -Transport $transportName -Authentication $transportAuthentication -UseSsl $transportUseSsl -Status $aggregate.Status -Outcome $aggregate.Outcome -ExitCode $aggregate.ExitCode -RequestedTargetCount $request.Computers.Count -TargetResults $orderedResults.ToArray() -Warnings $warnings.ToArray() -ReportPaths $reportPaths
 }
 
+function Assert-AdminDistinctConfiguredPath {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][System.Collections.IDictionary]$Parameters,
+        [Parameter()][AllowNull()][string]$ResolvedOutputPath)
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $declaredOutput = $null
+    foreach ($name in @('JsonOutputPath', 'LogFile', 'AuditPath', 'PlanPath', 'ApprovedPlanPath', 'CheckpointPath', 'PolicyPath', 'ComputerListPath', 'PowerShellFilePath', 'PsExecPath')) {
+        if (-not (Test-AdminParameterBound -Parameters $Parameters -Name $name)) { continue }
+        $value = [string]$Parameters[$name]
+        if ([string]::IsNullOrWhiteSpace($value)) { continue }
+        if ($name -ceq 'JsonOutputPath' -and $value -in @('-', 'STDOUT')) { $declaredOutput = '-'; continue }
+        if (-not (Test-AdminLiteralFilePathText -LiteralPath $value)) { throw "Unsafe configured path: $name." }
+        $canonical = [IO.Path]::GetFullPath($value)
+        if ($name -ceq 'JsonOutputPath') { $declaredOutput = $canonical }
+        if (-not $seen.Add($canonical)) { throw 'Configured input and output paths must be distinct before execution.' }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ResolvedOutputPath)) {
+        $actual = if ($ResolvedOutputPath -ceq '-') { '-' } else {
+            if (-not (Test-AdminLiteralFilePathText -LiteralPath $ResolvedOutputPath)) { throw 'Unsafe resolved JSON output path.' }
+            [IO.Path]::GetFullPath($ResolvedOutputPath)
+        }
+        if ($declaredOutput) {
+            if (-not $declaredOutput.Equals($actual, [StringComparison]::OrdinalIgnoreCase)) { throw 'Resolved JSON output must match the declared destination.' }
+        }
+        elseif ($actual -cne '-' -and -not $seen.Add($actual)) { throw 'Resolved JSON output collides with another configured path.' }
+    }
+}
+
 function Invoke-AdminAutomation {
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
     param(
@@ -7477,6 +7705,11 @@ function Invoke-AdminAutomation {
         ConvertTo-AdminPolicyDecision -Decision NotApplied -ReasonCode NoPolicy -Reason 'No policy profile was supplied.'
     }
     $reportPaths = if ($ResolvedOutputPath -ceq '-') { @() } else { @($ResolvedOutputPath) }
+    try { Assert-AdminDistinctConfiguredPath -Parameters $Parameters -ResolvedOutputPath $ResolvedOutputPath }
+    catch {
+        return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc ([datetime]::UtcNow) -ActionId $requestedActionId -PolicyDecision $requestedPolicyDecision -Status ValidationFailed -Outcome ValidationFailure -ExitCode $Script:AutomationExitCodes.ValidationFailure -Errors @([pscustomobject]@{ Category = 'Validation'; Message = $_.Exception.Message })
+    }
+
 
     if ($eventSourceBound -and -not $eventLogRequested) {
         $finishedAtUtc = [datetime]::UtcNow
@@ -7678,10 +7911,12 @@ function Read-AdminStrictOrchestrationJson {
 
         [Parameter(Mandatory = $true)]
         [ValidateNotNullOrEmpty()]
-        [string]$ArtifactName
+        [string]$ArtifactName,
+
+        [Parameter()][AllowNull()]$Lease
     )
 
-    $jsonText = Read-AdminBoundedUtf8File -LiteralPath $LiteralPath -MaximumBytes $MaximumBytes -RejectBom
+    $jsonText = Read-AdminBoundedUtf8File -LiteralPath $LiteralPath -MaximumBytes $MaximumBytes -RejectBom -Lease $Lease
     if (Test-AdminJsonHasDuplicateProperty -JsonText $jsonText) {
         throw "The $ArtifactName contains duplicate or case-conflicting property names."
     }
@@ -7966,38 +8201,10 @@ function Write-AdminCheckpoint {
     # An interrupted append or artifact update refuses subsequent automatic action.
     [void](Write-AdminCheckpointLedger -LiteralPath $fullPath -Checkpoint $Checkpoint -Create:$Create)
 
-    $parent = Split-Path -Parent $fullPath
-    if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
-        [void][System.IO.Directory]::CreateDirectory($parent)
-    }
-    $temporaryPath = Join-Path $parent ('.wat-checkpoint-{0}.tmp' -f [guid]::NewGuid().ToString('N'))
-    $backupPath = Join-Path $parent ('.wat-checkpoint-backup-{0}.tmp' -f [guid]::NewGuid().ToString('N'))
-    try {
-        [System.IO.File]::WriteAllText($temporaryPath, $json, $encoding)
-        if ($Create) {
-            if (Test-Path -LiteralPath $fullPath) {
-                throw "Refusing to overwrite an existing checkpoint file: $fullPath"
-            }
-            [System.IO.File]::Move($temporaryPath, $fullPath)
-        }
-        else {
-            if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
-                throw "Checkpoint file not found during atomic update: $fullPath"
-            }
-            [System.IO.File]::Replace($temporaryPath, $fullPath, $backupPath, $true)
-            if (Test-Path -LiteralPath $backupPath -PathType Leaf) {
-                [System.IO.File]::Delete($backupPath)
-            }
-        }
-    }
-    finally {
-        if (Test-Path -LiteralPath $temporaryPath -PathType Leaf) {
-            [System.IO.File]::Delete($temporaryPath)
-        }
-        if (Test-Path -LiteralPath $backupPath -PathType Leaf) {
-            [System.IO.File]::Delete($backupPath)
-        }
-    }
+    $ownsFile = -not $Script:CheckpointFiles.ContainsKey($fullPath)
+    $file = if ($ownsFile) { Open-AdminMutableFile -LiteralPath $fullPath -Create:$Create } else { $Script:CheckpointFiles[$fullPath] }
+    try { $file.ReplaceBytes($bytes, $Script:CheckpointMaximumBytes) }
+    finally { if ($ownsFile) { $file.Dispose() } }
     return $Checkpoint
 }
 
@@ -8668,7 +8875,7 @@ function Invoke-AdminPlanApprove {
         [string]$ResolvedOutputPath
     )
 
-    $allowedNames = @('Automation', 'PlanOperation', 'PlanPath', 'ApprovedPlanPath', 'ApprovedBy', 'ApprovalReference', 'PlanApprovalText', 'JsonOutputPath', 'LogFile', 'Quiet')
+    $allowedNames = @('Automation', 'PlanOperation', 'PlanPath', 'ApprovedPlanPath', 'ApprovedBy', 'ApprovalReference', 'PlanApprovalText', 'JsonOutputPath', 'LogFile', 'AppendTrustedLog', 'Quiet')
     foreach ($parameterName in @($Parameters.Keys)) {
         if ([string]$parameterName -cnotin $allowedNames) {
             throw "Parameter -$parameterName cannot be combined with PlanOperation Approve."
@@ -8753,11 +8960,13 @@ function Import-AdminOrchestrationCheckpoint {
         [string]$LiteralPath,
 
         [Parameter(Mandatory = $true)]
-        [psobject]$Plan
+        [psobject]$Plan,
+
+        [Parameter()][AllowNull()]$Lease
     )
 
     $resolvedPath = Resolve-AdminOrchestrationArtifactPath -LiteralPath $LiteralPath -ArtifactType Checkpoint -Existing
-    $checkpointObject = Read-AdminStrictOrchestrationJson -LiteralPath $resolvedPath -MaximumBytes $Script:CheckpointMaximumBytes -ArtifactName 'orchestration checkpoint'
+    $checkpointObject = Read-AdminStrictOrchestrationJson -LiteralPath $resolvedPath -MaximumBytes $Script:CheckpointMaximumBytes -ArtifactName 'orchestration checkpoint' -Lease $Lease
     $rootError = Get-AdminPolicyPropertyError -InputObject $checkpointObject -AllowedProperties @('schemaVersion', 'toolkitVersion', 'checkpointId', 'planId', 'planHash', 'createdAtUtc', 'updatedAtUtc', 'revision', 'lastRunId', 'targets', 'summary', 'checkpointHash') -RequiredProperties @('schemaVersion', 'toolkitVersion', 'checkpointId', 'planId', 'planHash', 'createdAtUtc', 'updatedAtUtc', 'revision', 'lastRunId', 'targets', 'summary', 'checkpointHash') -Context 'The orchestration checkpoint'
     if ($rootError) { throw $rootError }
     if ($checkpointObject.schemaVersion -isnot [string] -or [string]$checkpointObject.schemaVersion -cne $Script:CheckpointSchemaVersion) { throw "The orchestration checkpoint schemaVersion must be $Script:CheckpointSchemaVersion." }
@@ -8932,6 +9141,7 @@ function ConvertTo-AdminPlanExecutionParameter {
         }
     }
     if (Test-AdminParameterBound -Parameters $OperationParameter -Name 'LogFile') { $parameters.LogFile = [string]$OperationParameter['LogFile'] }
+    if (Test-AdminParameterBound -Parameters $OperationParameter -Name 'AppendTrustedLog') { $parameters.AppendTrustedLog = [bool]$OperationParameter['AppendTrustedLog'] }
     return $parameters
 }
 
@@ -9003,7 +9213,7 @@ function Get-AdminOrchestrationExecutionOutcome {
         [bool]$InternalFailure = $false
     )
 
-    if ($InternalFailure -or $Summary.inProgressCount -gt 0) {
+    if ($InternalFailure -or $Summary.inProgressCount -gt 0 -or $Summary.unknownCount -gt 0) {
         return [pscustomobject]@{ Status = 'InternalFailure'; Outcome = 'InternalFailure'; ExitCode = $Script:AutomationExitCodes.InternalFailure }
     }
     if ($Summary.completedCount -eq $Summary.targetCount -and $Summary.targetCount -gt 0) {
@@ -9026,9 +9236,18 @@ function Get-AdminOrchestrationExecutionOutcome {
         if ($skippedOutcomes.Count -eq 1 -and $skippedOutcomes[0] -ceq 'AuthorizationFailure') {
             return [pscustomobject]@{ Status = 'AuthorizationFailed'; Outcome = 'AuthorizationFailure'; ExitCode = $Script:AutomationExitCodes.AuthorizationFailure }
         }
+        return [pscustomobject]@{ Status = 'Failed'; Outcome = 'ExecutionFailure'; ExitCode = $Script:AutomationExitCodes.ExecutionFailure }
+    }
+    if ($Summary.completedCount -gt 0) {
         return [pscustomobject]@{ Status = 'CompletedWithExceptions'; Outcome = 'PartialSuccess'; ExitCode = $Script:AutomationExitCodes.PartialSuccess }
     }
-    return [pscustomobject]@{ Status = 'CompletedWithExceptions'; Outcome = 'PartialSuccess'; ExitCode = $Script:AutomationExitCodes.PartialSuccess }
+    if ($Summary.failedCount -gt 0 -or $Summary.skippedCount -gt 0) {
+        return [pscustomobject]@{ Status = 'Failed'; Outcome = 'ExecutionFailure'; ExitCode = $Script:AutomationExitCodes.ExecutionFailure }
+    }
+    if ($Summary.timedOutCount -gt 0) {
+        return [pscustomobject]@{ Status = 'TimedOut'; Outcome = 'Timeout'; ExitCode = $Script:AutomationExitCodes.Timeout }
+    }
+    return [pscustomobject]@{ Status = 'InternalFailure'; Outcome = 'InternalFailure'; ExitCode = $Script:AutomationExitCodes.InternalFailure }
 }
 
 function ConvertTo-AdminCheckpointTargetTerminalState {
@@ -9088,7 +9307,7 @@ function Invoke-AdminPlanExecution {
             throw "PlanOperation $Operation requires -$requiredName."
         }
     }
-    $allowedNames = @('Automation', 'PlanOperation', 'PlanPath', 'CheckpointPath', 'PlanApprovalText', 'ConfirmationText', 'TargetListConfirmationText', 'PsExecConfirmationText', 'JsonOutputPath', 'LogFile', 'Quiet')
+    $allowedNames = @('Automation', 'PlanOperation', 'PlanPath', 'CheckpointPath', 'PlanApprovalText', 'ConfirmationText', 'TargetListConfirmationText', 'PsExecConfirmationText', 'JsonOutputPath', 'LogFile', 'AppendTrustedLog', 'Quiet')
     foreach ($parameterName in @($Parameters.Keys)) {
         if ([string]$parameterName -cnotin $allowedNames) {
             throw "Parameter -$parameterName cannot override an approved plan during $Operation."
@@ -9131,12 +9350,15 @@ function Invoke-AdminPlanExecution {
 
     $checkpointLease = Open-AdminCheckpointLease -LiteralPath $resolvedCheckpointPath
     $checkpointIdentityLease = $null
+    $checkpointFile = $null
     $planReferences = $null
     try {
     $planReferences = Open-AdminPlanExternalReferenceLock -Plan $plan
     [void](Test-AdminPlanExecutionContract -Plan $plan -OperationParameter $Parameters -ValidatedPolicyProfile $planReferences.PolicyProfile)
+    $checkpointFile = Open-AdminMutableFile -LiteralPath $resolvedCheckpointPath -Create:($Operation -eq 'Execute')
+    $Script:CheckpointFiles[$resolvedCheckpointPath] = $checkpointFile
     $checkpoint = if ($Operation -eq 'Execute') { ConvertTo-AdminInitialCheckpoint -Plan $plan -RunId $RunId }
-        else { Import-AdminOrchestrationCheckpoint -LiteralPath $resolvedCheckpointPath -Plan $plan }
+        else { Import-AdminOrchestrationCheckpoint -LiteralPath $resolvedCheckpointPath -Plan $plan -Lease $checkpointFile }
     $checkpointIdentityLease = [WindowsAdminToolkit.Security.CheckpointLease]::Open((Get-AdminSha256Hex -Text ('ID:' + [string]$checkpoint.checkpointId)))
     if ($Operation -eq 'Execute') { [void](Write-AdminCheckpoint -LiteralPath $resolvedCheckpointPath -Checkpoint $checkpoint -Create) }
     else { [void](Test-AdminCheckpointLedger -LiteralPath $resolvedCheckpointPath -Checkpoint $checkpoint) }
@@ -9217,6 +9439,7 @@ function Invoke-AdminPlanExecution {
     finally {
         if ($planReferences) { foreach ($lease in $planReferences.Leases) { $lease.Dispose() } }
         if ($checkpointIdentityLease) { $checkpointIdentityLease.Dispose() }
+        if ($checkpointFile) { $checkpointFile.Dispose(); $Script:CheckpointFiles.Remove($resolvedCheckpointPath) }
         $checkpointLease.Dispose()
     }
 }
@@ -9276,6 +9499,19 @@ function Invoke-AdminPlanOperation {
     }
 }
 
+function ConvertTo-AdminTerminalLiteral {
+    [CmdletBinding()]
+    param([Parameter()][AllowNull()]$Value)
+    if ($null -eq $Value) { return '' }
+    $text = if ($Value -is [string] -or $Value.GetType().IsPrimitive) { [string]$Value }
+        else { ConvertTo-Json -InputObject $Value -Compress -Depth 12 }
+    # JSON serializes nested values; escape controls in scalar strings as well.
+    return [regex]::Replace($text, '[\x00-\x1F\x7F-\x9F]', {
+        param($match)
+        '\u{0:x4}' -f [int][char]$match.Value
+    })
+}
+
 function Show-AdminResult {
     [CmdletBinding()]
     param(
@@ -9298,7 +9534,7 @@ function Show-AdminResult {
             if ($property.Name -eq 'Output' -and $null -ne $value -and ([string]$value).Length -gt 4000) {
                 $value = ([string]$value).Substring(0, 4000) + [Environment]::NewLine + '[console output truncated]'
             }
-            $display[$property.Name] = $value
+            $display[(ConvertTo-AdminTerminalLiteral -Value $property.Name)] = ConvertTo-AdminTerminalLiteral -Value $value
         }
         [pscustomobject]$display | Format-List | Out-String -Width 180 | Write-Host
     }
@@ -9319,6 +9555,7 @@ function Invoke-WindowsAdminToolkit {
         throw 'Windows Admin Toolkit runs only on Windows.'
     }
 
+    Assert-AdminPrivilegedSourceTrust
     $interactivePolicyProfile = $null
     $Script:State.PolicyProfile = $null
     if (Test-AdminParameterBound -Parameters $Script:InvocationParameters -Name 'PolicyPath') {
@@ -9351,7 +9588,7 @@ function Invoke-WindowsAdminToolkit {
         throw $configurationError
     }
 
-    [void](Initialize-AdminLog -RequestedPath $LogFile)
+    [void](Initialize-AdminLog -RequestedPath $LogFile -AppendTrusted:$AppendTrustedLog)
     Write-AdminBanner
     Write-AdminLog -Message "Windows Admin Toolkit $Script:ToolkitVersion started under PowerShell $($PSVersionTable.PSVersion)." -NoConsole
     if ($interactivePolicyProfile) {
@@ -9470,6 +9707,7 @@ function Invoke-WindowsAdminToolkit {
 }
 
 if (-not $Script:WasDotSourced) {
+    try {
     if ($Automation) {
         $ProgressPreference = 'SilentlyContinue'
         $VerbosePreference = 'SilentlyContinue'
@@ -9481,6 +9719,7 @@ if (-not $Script:WasDotSourced) {
         $isPlanRequest = @($planParameterNames | Where-Object { Test-AdminParameterBound -Parameters $Script:InvocationParameters -Name $_ }).Count -gt 0
 
         try {
+            Assert-AdminDistinctConfiguredPath -Parameters $Script:InvocationParameters
             $resolvedOutputPath = Resolve-AdminAutomationOutputPath -LiteralPath $JsonOutputPath
         }
         catch {
@@ -9615,4 +9854,6 @@ if (-not $Script:WasDotSourced) {
         Write-Error $_.Exception.Message
         exit 1
     }
+    }
+    finally { Close-AdminRunSink }
 }

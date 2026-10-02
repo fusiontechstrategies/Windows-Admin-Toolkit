@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Builds a new Windows Admin Toolkit release directory with integrity metadata.
 
@@ -394,6 +394,13 @@ if (-not ('WindowsAdminToolkit.Security.StorageSecurity' -as [type])) {
 }
 
 $resolvedOutput = [IO.Path]::GetFullPath($OutputDirectory)
+$canonicalSource = [IO.Path]::GetFullPath($sourceRoot).TrimEnd('\')
+$canonicalOutput = $resolvedOutput.TrimEnd('\')
+if ($canonicalOutput.Equals($canonicalSource, [StringComparison]::OrdinalIgnoreCase) -or
+    $canonicalOutput.StartsWith($canonicalSource + '\', [StringComparison]::OrdinalIgnoreCase) -or
+    $canonicalSource.StartsWith($canonicalOutput + '\', [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Release output and source directories must be disjoint.'
+}
 $outputParent = [IO.Path]::GetDirectoryName($resolvedOutput)
 if ([string]::IsNullOrWhiteSpace($outputParent) -or -not [IO.Directory]::Exists($outputParent)) {
     throw "The release output parent directory must already exist: $outputParent"

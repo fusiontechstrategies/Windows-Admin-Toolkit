@@ -31,6 +31,14 @@ Reports will be acknowledged as soon as practical. Valid reports will be investi
 - Audit sinks are opt-in evidence destinations. They do not authorize an action or configure Windows security services.
 - Plan and checkpoint hashes are tamper-evident integrity fields, not signatures, identities, or substitutes for filesystem access control.
 
+## Loaded code and durable object boundaries
+
+- Elevated and alternate-credential target dispatch require administrator-owned protected initial source and ancestry. Current-user installs are for non-elevated use. Use a trusted engine with `-NoProfile`; see [INSTALL.md](INSTALL.md). Workers execute original loaded parser text without rereading a mutable toolkit file.
+- Native Windows/system directory APIs select executable helpers. Cleanup uses the current identity's known Local Application Data folder's fixed `Temp` child and the native Windows directory's fixed `Temp` child. `TEMP`, `LOCALAPPDATA` and `SystemRoot` do not authorize these paths. The signature helper is pinned under administrator ownership through invocation.
+- Log/audit files have protected current-identity DACLs, no-follow ancestry leases and retained no-write/no-delete object handles. Every write uses the same object. Existing logs require explicit `-AppendTrustedLog` and private ownership. Library callers keep sinks alive until `Close-AdminRunSink`; the CLI closes them after result delivery and final audit revision. This protects a run, not indefinite retention against historical privileged authority.
+- Selected target identity replaces remote `ComputerName` claims. Terminal-dot aliases are refused before policy, counting, identity and dispatch. Terminal values render C0/C1 controls as visible literal escapes.
+- Configured log, audit, JSON, plan, approval and checkpoint paths must be distinct before sink creation or target work.
+
 ## Automation security
 
 Automation mode is noninteractive and fails closed when an action, target selector, action input, transport setting, output path, or authorization value is missing or invalid.

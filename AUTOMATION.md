@@ -74,6 +74,8 @@ The optional PsExec transport requires a Microsoft-signed Sysinternals PsExec 2.
 -PsExecConfirmationText 'USE PSEXEC'
 ```
 
+Caller-selected logs must be new. Explicit `-AppendTrustedLog` permits appending only a private existing current-identity file. Log and audit writers retain their original objects for the run. Configured input and output paths must be distinct before target work.
+
 ## Stable action catalog
 
 Action identifiers are case-insensitive on input and canonical in output. They are a public interface and are independent of menu position and display text.
@@ -126,7 +128,7 @@ Protocol byte reservations are divided across every possible retry attempt, incl
 
 PsExec action source is compressed inside its encoded payload, and command size is checked before launch. This preserves the standalone native cleanup helper within Windows' process command-line limit.
 
-Temporary cleanup does not follow reparse points. `MaximumFiles` bounds all discovered entries, including directories, and `EntriesExamined` reports that count. Each eligible file is inspected and deleted through one locked handle beneath its approved root. Multiple hard links, inaccessible entries, and traversal beyond 64 directory levels produce partial results.
+Temporary cleanup does not follow reparse points. Roots are the native Windows directory's `Temp` and the current identity's known Local Application Data directory's `Temp`; environment variables cannot select them. `MaximumFiles` bounds all discovered entries, including directories, and `EntriesExamined` reports that count. Each eligible file is inspected and deleted through one locked handle beneath its approved root. Multiple hard links, inaccessible entries, and traversal beyond 64 directory levels produce partial results.
 
 `-Preflight` also validates the complete request, including policy and action inputs, but executes only the built-in capability discovery script in the selected target context. It is mutually exclusive with `-WhatIf`. It does not require a missing state-change confirmation, although an incorrect supplied confirmation still fails closed.
 
