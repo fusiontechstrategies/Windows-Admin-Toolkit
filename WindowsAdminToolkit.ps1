@@ -6285,7 +6285,7 @@ function Resolve-AdminPolicyRequest {
                 $decision = ConvertTo-AdminPolicyDecision @decisionParameters -Decision Denied -ReasonCode ActionInputDenied -Reason 'An action input exceeds its policy maximum.'
                 return ConvertTo-AdminPolicyResolution -Allowed $false -PolicyDecision $decision -ExecutionSettings $executionSettings
             }
-            $inputItems = if ($inputValue -is [System.Array]) { @($inputValue) } else { @($inputValue) }
+            [object[]]$inputItems = @($inputValue)
             if ($null -ne $constraint.MaximumItems -and $inputItems.Count -gt [int]$constraint.MaximumItems) {
                 $decision = ConvertTo-AdminPolicyDecision @decisionParameters -Decision Denied -ReasonCode ActionInputDenied -Reason 'An action input contains more items than the policy permits.'
                 return ConvertTo-AdminPolicyResolution -Allowed $false -PolicyDecision $decision -ExecutionSettings $executionSettings
