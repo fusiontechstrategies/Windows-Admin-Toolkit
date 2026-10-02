@@ -120,7 +120,11 @@ Actual state-changing execution retains both safeguards:
 
 The preview applies to read-only actions and service queries too. It returns `WhatIf` target records with empty action data and starts no target execution audit event. A policy that constrains Windows Update `IncludeKB` requires a nonempty list containing only approved KBs.
 
-WinRM applies quotas before result collection. Per-target ceilings are 8 MiB and 4,096 projection items, including nested values. A run reserves at most 64 MiB and 32,768 projection items across its workers; many-target runs receive smaller per-target slices. An output-limit failure returns bounded error evidence and is never retried.
+WinRM applies quotas before result collection. Per-target ceilings are 8 MiB and 4,096 projection items, including nested values, warning/information streams, and failure evidence. Auxiliary streams are charged and discarded. A run reserves at most 64 MiB and 32,768 projection items across its workers; many-target runs receive smaller per-target slices. Retries consume the remaining reservation. An output-limit failure returns bounded error evidence and is never retried.
+
+Protocol byte reservations are divided across every possible retry attempt, including progress and control traffic. Progress is discarded in the receiving scope before the background-job host can retain it. Selecting retries therefore reduces each attempt's wire allowance while preserving the aggregate ceiling.
+
+PsExec action source is compressed inside its encoded payload, and command size is checked before launch. This preserves the standalone native cleanup helper within Windows' process command-line limit.
 
 Temporary cleanup does not follow reparse points. `MaximumFiles` bounds all discovered entries, including directories, and `EntriesExamined` reports that count. Each eligible file is inspected and deleted through one locked handle beneath its approved root. Multiple hard links, inaccessible entries, and traversal beyond 64 directory levels produce partial results.
 

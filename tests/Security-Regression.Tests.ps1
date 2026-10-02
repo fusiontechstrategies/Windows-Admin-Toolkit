@@ -124,6 +124,7 @@ try {
             param($OpenTimeout, $OperationTimeout, $CancelTimeout, $MaximumReceivedObjectSize, $MaximumReceivedDataSizePerCommand)
             $null = $PSBoundParameters
             $Script:ObservedWinRmQuota = [int]$MaximumReceivedDataSizePerCommand
+            if ($null -ne $Script:WireQuotaReservations) { $Script:WireQuotaReservations.Add([int]$MaximumReceivedDataSizePerCommand) | Out-Null }
             return [pscustomobject]@{ MaximumReceivedObjectSize = $MaximumReceivedObjectSize }
         }
         Set-Item Function:\Invoke-Command -Value {
@@ -132,11 +133,21 @@ try {
             $null = $PSBoundParameters
             for ($record = 0; $record -lt $Script:RemoteRecordLimit; $record++) {
                 $Script:RemoteProduced++
+                if ($Script:RemoteAuxiliaryMode -eq 'Warning') { Write-Warning ('w' * 4096); throw 'Synthetic connection failure after warning.' }
+                if ($Script:RemoteAuxiliaryMode -eq 'Information') { Write-Information ('i' * 4096); throw 'Synthetic connection failure after information.' }
+                if ($Script:RemoteAuxiliaryMode -eq 'Error') { throw ('Synthetic connection failure ' + ('e' * 4096)) }
+                if ($Script:RemoteAuxiliaryMode -eq 'Progress') {
+                    $Script:ProgressWasSuppressed = $ProgressPreference -ceq 'SilentlyContinue'
+                    Write-Progress -Activity 'Synthetic progress' -Status ('p' * 1000) -PercentComplete 50
+                    throw 'Synthetic connection failure after progress.'
+                }
                 if ($Script:RemoteLargeString) { 'x' * 100000 } else { 'record' }
             }
         }
         $Script:RemoteProduced = 0
         $Script:RemoteRecordLimit = 1000
+        $Script:RemoteAuxiliaryMode = ''
+        $Script:WireQuotaReservations = $null
         $Script:RemoteLargeString = $false
         $limitedRemote = Invoke-AdminWinRmTarget -ComputerName 'server01.example.com' -ActionText "'unused'" -MaximumOutputItems 10 -MaximumOutputBytes 10000
         Test-ToolkitAssertion -Condition (-not $limitedRemote.Success -and $limitedRemote.ErrorCategory -ceq 'OutputLimit' -and @($limitedRemote.Data).Count -eq 0 -and $Script:RemoteProduced -eq 11) -Name 'WinRM item limit stops producer immediately and returns bounded failure'
@@ -149,6 +160,23 @@ try {
         $Script:RemoteLargeString = $false
         $noOutputRetry = Invoke-AdminTargetWithRetry -Transport WinRM -ComputerName 'server01.example.com' -ActionText "'unused'" -RetryCount 3 -MaximumOutputItems 2
         Test-ToolkitAssertion -Condition ($noOutputRetry.Attempts -eq 1 -and $Script:RemoteProduced -eq 3) -Name 'Output-limit failures are never retried'
+        foreach ($auxiliaryMode in @('Warning', 'Information', 'Error')) {
+            $Script:RemoteProduced = 0
+            $Script:RemoteAuxiliaryMode = $auxiliaryMode
+            $auxiliaryResult = Invoke-AdminTargetWithRetry -Transport WinRM -ComputerName 'server01.example.com' -ActionText "'unused'" -RetryCount 3 -RetryDelaySeconds 1 -MaximumOutputBytes 10000
+            Test-ToolkitAssertion -Condition (-not $auxiliaryResult.Success -and $auxiliaryResult.ErrorCategory -ceq 'OutputLimit' -and $auxiliaryResult.Attempts -eq 1 -and $Script:RemoteProduced -eq 1) -Name "$auxiliaryMode output is charged before retention and stops retry amplification"
+        }
+        $Script:RemoteAuxiliaryMode = ''
+
+        $Script:RemoteAuxiliaryMode = 'Progress'
+        $Script:WireQuotaReservations = New-Object 'System.Collections.Generic.List[int]'
+        $Script:ProgressWasSuppressed = $false
+        $Script:RemoteProduced = 0
+        $progressResult = Invoke-AdminTargetWithRetry -Transport WinRM -ComputerName 'server01.example.com' -ActionText "'unused'" -RetryCount 3 -RetryDelaySeconds 1 -MaximumOutputBytes 10000
+        $reservedWireBytes = ($Script:WireQuotaReservations | Measure-Object -Sum).Sum
+        Test-ToolkitAssertion -Condition (-not $progressResult.Success -and $Script:ProgressWasSuppressed -and $progressResult.Attempts -eq 4 -and $reservedWireBytes -le 10000 -and $Script:WireQuotaReservations.Count -eq 4) -Name 'Progress is discarded before job retention and all retry wire quotas share one target reservation'
+        $Script:RemoteAuxiliaryMode = ''
+        $Script:WireQuotaReservations = $null
 
         $Script:RemoteRecordLimit = 1
         $Script:WorkerReservations = New-Object 'System.Collections.Generic.List[object]'
@@ -205,6 +233,30 @@ try {
     $recoveredLease = Open-AdminCheckpointLease -LiteralPath $leasePath
     $recoveredLease.Dispose()
     Test-ToolkitAssertion -Condition $true -Name 'Released checkpoint lease can be explicitly resumed'
+
+    $cleanupActionText = $Script:ActionScripts.ClearTempFiles.ToString()
+    $cleanupPayload = ConvertTo-AdminEncodedPayload -ActionText $cleanupActionText -ArgumentList @(2, 100)
+    Test-ToolkitAssertion -Condition ($cleanupPayload.Length -lt 25000) -Name 'Native cleanup PsExec payload fits the Windows command-line limit'
+    $payloadUserTemp = Join-Path $securityRoot 'payload-user'
+    $payloadWindows = Join-Path $securityRoot 'payload-windows'
+    $payloadWindowsTemp = Join-Path $payloadWindows 'Temp'
+    [void][IO.Directory]::CreateDirectory($payloadUserTemp)
+    [void][IO.Directory]::CreateDirectory($payloadWindowsTemp)
+    foreach ($payloadRoot in @($payloadUserTemp, $payloadWindowsTemp)) {
+        $payloadMarker = Join-Path $payloadRoot 'old-fixture.txt'
+        [IO.File]::WriteAllText($payloadMarker, 'synthetic-marker')
+        [IO.File]::SetLastWriteTimeUtc($payloadMarker, [datetime]::UtcNow.AddDays(-10))
+    }
+    # Substitute only cleanup root expressions; the child retains its genuine
+    # SystemRoot so Windows PowerShell's Add-Type compiler resolves correctly.
+    $fixtureActionText = $cleanupActionText.Replace('$env:TEMP', "'$($payloadUserTemp.Replace("'", "''"))'").Replace('$env:SystemRoot', "'$($payloadWindows.Replace("'", "''"))'")
+    $fixturePayload = ConvertTo-AdminEncodedPayload -ActionText $fixtureActionText -ArgumentList @(2, 100)
+    $payloadBootstrap = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($fixturePayload))
+    $cleanupPayloadResult = Invoke-TestPowerShellCommandProcess -EnginePath $currentEnginePath -CommandText $payloadBootstrap
+    $cleanupPayloadMatch = [regex]::Match($cleanupPayloadResult.StdOut, '(?m)^ADMINRESULT:(?<Data>[A-Za-z0-9+/=]+)')
+    if (-not $cleanupPayloadMatch.Success) { throw 'Compressed cleanup payload did not return a result.' }
+    $cleanupPayloadEnvelope = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($cleanupPayloadMatch.Groups['Data'].Value)) | ConvertFrom-Json
+    Test-ToolkitAssertion -Condition ($cleanupPayloadResult.ExitCode -eq 0 -and $cleanupPayloadEnvelope.Success -and $cleanupPayloadEnvelope.Data[0].FilesDeleted -eq 2 -and [IO.Directory]::GetFiles($payloadUserTemp).Length -eq 0 -and [IO.Directory]::GetFiles($payloadWindowsTemp).Length -eq 0) -Name 'Compressed native helper round-trips through the encoded transport in isolated temp fixtures'
 
     # Run two actual Resume lifecycles. The action stub records one invocation and
     # waits while the second executor attempts to acquire the same checkpoint.

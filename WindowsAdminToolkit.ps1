@@ -2750,13 +2750,23 @@ function ConvertTo-AdminEncodedPayload {
     )
 
     $utf8 = New-Object System.Text.UTF8Encoding($false)
-    $actionBase64 = [Convert]::ToBase64String($utf8.GetBytes($ActionText))
+    $actionBytes = $utf8.GetBytes($ActionText)
+    $actionBuffer = New-Object System.IO.MemoryStream
+    $compressor = New-Object System.IO.Compression.DeflateStream($actionBuffer, [System.IO.Compression.CompressionMode]::Compress, $true)
+    try { $compressor.Write($actionBytes, 0, $actionBytes.Length) }
+    finally { $compressor.Dispose() }
+    try { $actionBase64 = [Convert]::ToBase64String($actionBuffer.ToArray()) }
+    finally { $actionBuffer.Dispose() }
     $argumentBase64 = ConvertTo-AdminArgumentEnvelope -ArgumentList $ArgumentList
 
     $payload = @"
 `$ErrorActionPreference = 'Stop'
 `$utf8 = New-Object System.Text.UTF8Encoding(`$false)
-`$actionText = `$utf8.GetString([Convert]::FromBase64String('$actionBase64'))
+`$actionBuffer = New-Object System.IO.MemoryStream(,([Convert]::FromBase64String('$actionBase64')))
+`$inflater = New-Object System.IO.Compression.DeflateStream(`$actionBuffer, [System.IO.Compression.CompressionMode]::Decompress)
+`$actionReader = New-Object System.IO.StreamReader(`$inflater, `$utf8)
+try { `$actionText = `$actionReader.ReadToEnd() }
+finally { `$actionReader.Dispose(); `$inflater.Dispose(); `$actionBuffer.Dispose() }
 `$argumentXml = `$utf8.GetString([Convert]::FromBase64String('$argumentBase64'))
 `$parsedArguments = [System.Management.Automation.PSSerializer]::Deserialize(`$argumentXml)
 if (`$null -eq `$parsedArguments) {
@@ -2957,6 +2967,9 @@ function Invoke-AdminPsExecTarget {
         $encodedPayload
     )
     $argumentString = $processArguments -join ' '
+    if ($argumentString.Length + $PsExecFullPath.Length + 4 -gt 32766) {
+        return ConvertTo-AdminFailureEnvelope -ComputerName $ComputerName -Transport 'PsExec' -Message 'The encoded action exceeds the Windows process command-line limit.' -ErrorCategory Validation
+    }
     $identifier = [guid]::NewGuid().ToString('N')
     $outputPath = Join-Path ([System.IO.Path]::GetTempPath()) "admin-psexec-$identifier.out"
     $errorPath = Join-Path ([System.IO.Path]::GetTempPath()) "admin-psexec-$identifier.err"
@@ -3097,6 +3110,10 @@ function Invoke-AdminWinRmTarget {
 
     try {
         $budget = if ($OutputBudget) { $OutputBudget } else { [pscustomobject]@{ RemainingItems = $MaximumOutputItems; RemainingBytes = $MaximumOutputBytes } }
+        # Progress has no redirectable PowerShell stream. Discard it in this
+        # receiving scope before the background-job host can retain records.
+        # Protocol quotas below still bound progress arriving over PSRP.
+        $ProgressPreference = 'SilentlyContinue'
         if ($budget.RemainingItems -lt 1 -or $budget.RemainingBytes -lt 1) { throw 'OutputLimit: retry output budget exhausted.' }
         $protocolBytes = [int][math]::Min($MaximumOutputBytes, $budget.RemainingBytes)
         $action = [scriptblock]::Create($ActionText)
@@ -3108,6 +3125,8 @@ function Invoke-AdminWinRmTarget {
             Authentication = $Authentication
             SessionOption = $sessionOption
             ErrorAction   = 'Stop'
+            WarningAction = 'Continue'
+            InformationAction = 'Continue'
         }
         if ($Credential) {
             $invokeParameters.Credential = $Credential
@@ -3119,9 +3138,15 @@ function Invoke-AdminWinRmTarget {
         $data = New-Object 'System.Collections.Generic.List[object]'
         # Throwing from the downstream pipeline stops synchronous Invoke-Command,
         # which cancels/disposes its remote pipeline. No full remote array is kept.
-        Invoke-Command @invokeParameters | ForEach-Object {
+        Invoke-Command @invokeParameters *>&1 | ForEach-Object {
+            if ($_ -is [System.Management.Automation.ErrorRecord]) {
+                [void](ConvertTo-AdminJsonSafeValue -Value ([string]$_.Exception.Message) -Budget $budget)
+                throw $_
+            }
             $safe = ConvertTo-AdminJsonSafeValue -Value $_ -Budget $budget
-            $data.Add($safe) | Out-Null
+            if ($_ -isnot [System.Management.Automation.InformationalRecord] -and $_ -isnot [System.Management.Automation.InformationRecord]) {
+                $data.Add($safe) | Out-Null
+            }
         }
         return [pscustomobject]@{
             ComputerName = $ComputerName
@@ -3134,8 +3159,13 @@ function Invoke-AdminWinRmTarget {
         }
     }
     catch {
-        $category = if ($_.Exception.Message -match '(?i:OutputLimit|maximum.*(size|quota)|exceed.*(size|quota))') { 'OutputLimit' } else { Get-AdminErrorCategory -Message $_.Exception.Message }
-        return ConvertTo-AdminFailureEnvelope -ComputerName $ComputerName -Transport 'WinRM' -Message $_.Exception.Message -ErrorCategory $category
+        $message = $_.Exception.Message
+        if ($message -notmatch '(?i:OutputLimit)' -and $budget) {
+            try { [void](ConvertTo-AdminJsonSafeValue -Value ([string]$message) -Budget $budget) }
+            catch { $message = 'OutputLimit: remote failure evidence exceeded the remaining output budget.' }
+        }
+        $category = if ($message -match '(?i:OutputLimit|maximum.*(size|quota)|exceed.*(size|quota))') { 'OutputLimit' } else { Get-AdminErrorCategory -Message $message }
+        return ConvertTo-AdminFailureEnvelope -ComputerName $ComputerName -Transport 'WinRM' -Message $message -ErrorCategory $category
     }
 }
 
@@ -3184,10 +3214,13 @@ function Invoke-AdminTargetWithRetry {
     )
 
     $outputBudget = [pscustomobject]@{ RemainingItems = $MaximumOutputItems; RemainingBytes = $MaximumOutputBytes }
+    # Reserve disjoint wire quotas for every possible retry epoch, including
+    # discarded progress/control records that projection cannot measure.
+    $attemptProtocolBytes = [int][math]::Max(1, [math]::Floor($MaximumOutputBytes / ($RetryCount + 1)))
     $lastResult = $null
     for ($attempt = 1; $attempt -le ($RetryCount + 1); $attempt++) {
         if ($Transport -eq 'WinRM') {
-            $lastResult = Invoke-AdminWinRmTarget -ComputerName $ComputerName -Credential $Credential -ActionText $ActionText -ArgumentList $ArgumentList -UseSsl $UseSsl -Authentication $Authentication -TimeoutSeconds $TimeoutSeconds -MaximumOutputBytes $MaximumOutputBytes -MaximumOutputItems $MaximumOutputItems -OutputBudget $outputBudget
+            $lastResult = Invoke-AdminWinRmTarget -ComputerName $ComputerName -Credential $Credential -ActionText $ActionText -ArgumentList $ArgumentList -UseSsl $UseSsl -Authentication $Authentication -TimeoutSeconds $TimeoutSeconds -MaximumOutputBytes $attemptProtocolBytes -MaximumOutputItems $MaximumOutputItems -OutputBudget $outputBudget
         }
         else {
             $lastResult = Invoke-AdminPsExecTarget -ComputerName $ComputerName -PsExecFullPath $PsExecFullPath -ActionText $ActionText -ArgumentList $ArgumentList -TimeoutSeconds $TimeoutSeconds

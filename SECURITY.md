@@ -41,7 +41,7 @@ Automation mode is noninteractive and fails closed when an action, target select
 - More than 25 targets require the exact `USE TARGET LIST` authorization, and the built-in target ceiling remains 500.
 - PsExec requires the exact `USE PSEXEC` authorization in addition to signer, product, and version validation.
 - PsExec is revalidated immediately before each launch while its file and every ancestor directory are held without write or delete sharing. Reparse points and ambiguous object identities are rejected.
-- WinRM has protocol quotas and incremental result projection. Each target receives at most 8 MiB and 4,096 projection items; workers reserve slices of a 64 MiB and 32,768 item run budget before starting. Nested values share the same budget. Output-limit failures are not retried.
+- WinRM has protocol quotas and incremental result projection. Each target receives at most 8 MiB and 4,096 projection items; workers reserve slices of a 64 MiB and 32,768 item run budget before starting. Nested values, auxiliary streams, failure evidence, and retries share the same budget. Auxiliary records are charged and discarded. Output-limit failures are not retried.
 - Temporary cleanup uses a lazy no-follow walk, inspects and deletes each file through the same handle, rejects multiple hard links, and bounds discovery across files and directories. The walk retains at most 64 directory levels. Junctions, symlinks, and inaccessible entries produce partial results.
 - Automation accepts alternate WinRM credentials only as in-memory `PSCredential` objects and rejects username strings before any credential prompt can open.
 - JSON output excludes credentials, secure strings, scriptblocks, raw exceptions, invocation details, and remoting metadata.
