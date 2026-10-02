@@ -1932,6 +1932,8 @@ finally {
     }
 }
 
+. (Join-Path $PSScriptRoot 'Security-Regression.Tests.ps1')
+
 Write-Host ''
 if ($Script:Failures.Count -gt 0) {
     Write-Host "$($Script:Failures.Count) of $Script:TestCount tests failed:" -ForegroundColor Red

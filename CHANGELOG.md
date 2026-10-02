@@ -6,6 +6,15 @@ The format follows Keep a Changelog principles, and the project uses Semantic Ve
 
 ## [Unreleased]
 
+### Fixed
+
+- Applied no-connection `WhatIf` previews to read-only actions and service queries.
+- Required explicit approved KB selections when Windows Update has a policy allow list.
+- Bounded WinRM collection and nested result projection before materialization.
+- Bound PsExec validation and approved policy consumption to locked file and ancestor identities.
+- Added lazy no-follow temporary cleanup with handle-based deletion and a discovery budget.
+- Serialized competing checkpoint executors and bounded orchestration reads before allocation.
+
 ## [3.0.1] - 2026-08-27
 
 ### Added

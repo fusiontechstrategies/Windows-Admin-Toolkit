@@ -40,6 +40,9 @@ Automation mode is noninteractive and fails closed when an action, target select
 - State-changing actions are never retried. Only read-only remote actions may use the bounded retry controls.
 - More than 25 targets require the exact `USE TARGET LIST` authorization, and the built-in target ceiling remains 500.
 - PsExec requires the exact `USE PSEXEC` authorization in addition to signer, product, and version validation.
+- PsExec is revalidated immediately before each launch while its file and every ancestor directory are held without write or delete sharing. Reparse points and ambiguous object identities are rejected.
+- WinRM has protocol quotas and incremental result projection. Each target receives at most 8 MiB and 4,096 projection items; workers reserve slices of a 64 MiB and 32,768 item run budget before starting. Nested values, auxiliary streams, failure evidence, and retries share the same budget. Auxiliary records are charged and discarded. Output-limit failures are not retried.
+- Temporary cleanup uses a lazy no-follow walk, inspects and deletes each file through the same handle, rejects multiple hard links, and bounds discovery across files and directories. The walk retains at most 64 directory levels. Junctions, symlinks, and inaccessible entries produce partial results.
 - Automation accepts alternate WinRM credentials only as in-memory `PSCredential` objects and rejects username strings before any credential prompt can open.
 - JSON output excludes credentials, secure strings, scriptblocks, raw exceptions, invocation details, and remoting metadata.
 - Logs contain action summaries but not credentials, custom source text, or custom-command output.
@@ -56,6 +59,7 @@ Policy profiles use strict schema version 1.0 parsing and fail closed. The toolk
 - Explicit deny rules are checked before broader allow rules.
 - Remote target rules accept only exact validated targets or one leading star-dot DNS suffix. They do not enumerate DNS or expand wildcards.
 - Explicit command-line runtime values above policy caps are denied. Omitted values are clamped to the tighter policy value.
+- An empty Windows Update `IncludeKB` selection means all applicable updates. A policy KB allow list requires an explicit nonempty selection containing only approved KBs.
 - Policy cannot weaken exact confirmations, `ShouldProcess`, protected processes, target-list authorization, PsExec validation, no-overwrite output, or zero retries for state changes.
 - In automation mode, a policy-denied action stops before target connection or execution. Known action, target-mode, and transport denials occur before avoidable target-list, custom-source, or PsExec file reads.
 - After target entry or literal list import, automation target-name and target-count denials occur before large-list authorization, PsExec validation, or custom-source reads.
@@ -86,6 +90,9 @@ Orchestration plan, checkpoint, and operation-result schemas are version 1.0. Pl
 - Plan creation validates the complete request without executing the requested action and writes a new pending artifact.
 - Approval requires the exact complete plan hash and writes a different new artifact with separately hashed review metadata.
 - Execute and Resume reject action, input, target, transport, policy, and runtime overrides, hold approved policy and PsExec files open without write or replacement sharing, and re-resolve the complete approved request before target work.
+- Reference locking covers every ancestor directory and rejects reparse points. Policy parsing consumes the locked stream, and execution uses that validated profile throughout the run.
+- Execute and Resume acquire an exclusive, non-reentrant checkpoint lease before checkpoint import, target claim, or invocation and hold it until all writes finish. A competing executor fails before claiming work. A crashed executor releases the kernel lease; interruption recovery still converts `InProgress` to `Unknown`.
+- Input size is checked on the opened file before allocation; bounded reads reject unexpected extra data. Protected input references require local absolute Windows paths and native handle support in a full PowerShell language session.
 - Version 1 plans use only the current Windows identity and exclude both unsandboxed custom-code actions.
 - Existing exact action, large-list, and PsExec confirmations remain required during execution and resume. `ShouldProcess`, `WhatIf`, policy caps, protected resources, and built-in limits remain active.
 - Checkpoints are atomically replaced before and after each one-target attempt. Resume processes only `Pending` targets and never automatically repeats a terminal target.

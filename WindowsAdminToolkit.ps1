@@ -191,7 +191,7 @@ Adds PowerShell Gallery metadata for the guarded 3.0.1 release candidate.
     Minimum age of files eligible for the ClearTempFiles automation action.
 
 .PARAMETER MaximumFiles
-    Maximum files examined by ClearTempFiles on each target.
+    Maximum filesystem entries discovered by ClearTempFiles on each target.
 
 .PARAMETER TaskPath
     Validated scheduled-task path prefix for the ScheduledTasks automation action.
@@ -524,54 +524,25 @@ function Test-AdminLiteralFilePathText {
 function Read-AdminBoundedUtf8File {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $true)]
-        [ValidateNotNullOrEmpty()]
-        [string]$LiteralPath,
-
-        [Parameter()]
-        [ValidateRange(1, 16777216)]
-        [int]$MaximumBytes = 1048576
+        [Parameter(Mandatory = $true)][string]$LiteralPath,
+        [Parameter()][ValidateRange(1, 16777216)][int]$MaximumBytes = 1048576,
+        [Parameter()][switch]$RejectBom,
+        [Parameter()][AllowNull()]$Lease
     )
-
-    if (-not (Test-Path -LiteralPath $LiteralPath -PathType Leaf)) {
-        throw "Input file not found: $LiteralPath"
-    }
-
-    $stream = $null
+    $ownsLease = $null -eq $Lease
     try {
-        $stream = [System.IO.File]::Open($LiteralPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
-        $fileLength = $stream.Length
-        if ($fileLength -gt $MaximumBytes) {
-            throw "The input file exceeds the $MaximumBytes byte limit."
-        }
-
-        $bytes = New-Object 'byte[]' ([int]$fileLength)
+        if ($ownsLease) { $Lease = Open-AdminSafePath -LiteralPath $LiteralPath }
+        $bytes = $Lease.ReadBytes($MaximumBytes)
         $offset = 0
-        while ($offset -lt $bytes.Length) {
-            $readCount = $stream.Read($bytes, $offset, $bytes.Length - $offset)
-            if ($readCount -le 0) {
-                throw 'The input file ended before it could be read completely.'
-            }
-            $offset += $readCount
+        if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+            if ($RejectBom) { throw 'The input file must use UTF-8 without a byte-order mark.' }
+            $offset = 3
         }
-    }
-    finally {
-        if ($stream) {
-            $stream.Dispose()
-        }
-    }
-
-    $textOffset = 0
-    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
-        $textOffset = 3
-    }
-    try {
         $strictUtf8 = New-Object System.Text.UTF8Encoding($false, $true)
-        return $strictUtf8.GetString($bytes, $textOffset, $bytes.Length - $textOffset)
+        return $strictUtf8.GetString($bytes, $offset, $bytes.Length - $offset)
     }
-    catch [System.Text.DecoderFallbackException] {
-        throw 'The input file must contain valid UTF-8 text.'
-    }
+    catch [System.Text.DecoderFallbackException] { throw 'The input file must contain valid UTF-8 text.' }
+    finally { if ($ownsLease -and $Lease) { $Lease.Dispose() } }
 }
 
 function Get-AdminRuntimeConfigurationError {
@@ -1183,6 +1154,209 @@ function Export-AdminResult {
     return $savedPath
 }
 
+$Script:NativeFileSource = @'
+using System;
+using System.IO;
+using System.Text;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using Microsoft.Win32.SafeHandles;
+
+namespace WindowsAdminToolkit.Security {
+    // Each ancestor is held without write/delete sharing until the leaf is consumed.
+    // OPEN_REPARSE_POINT makes both the initial walk and later object inspection no-follow.
+    public sealed class PathLease : IDisposable {
+        [StructLayout(LayoutKind.Sequential)] struct Info {
+            public uint Attributes; public System.Runtime.InteropServices.ComTypes.FILETIME Creation;
+            public System.Runtime.InteropServices.ComTypes.FILETIME Access;
+            public System.Runtime.InteropServices.ComTypes.FILETIME Write;
+            public uint Volume, SizeHigh, SizeLow, Links, IndexHigh, IndexLow;
+        }
+        [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+        static extern SafeFileHandle CreateFile(string path, uint access, uint share, IntPtr security, uint mode, uint flags, IntPtr template);
+        [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetFileInformationByHandle(SafeFileHandle handle, out Info info);
+        [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+        static extern uint GetFinalPathNameByHandle(SafeFileHandle handle, StringBuilder name, uint size, uint flags);
+        [DllImport("kernel32.dll", SetLastError=true)]
+        static extern bool SetFileInformationByHandle(SafeFileHandle handle, int kind, ref int delete, uint size);
+        readonly List<SafeFileHandle> handles = new List<SafeFileHandle>();
+        FileStream stream; SafeFileHandle leaf; Info info; bool disposed;
+        public string Path { get; private set; }
+        public bool IsDirectory { get { return (info.Attributes & 16) != 0; } }
+        public long Length { get { return ((long)info.SizeHigh << 32) | info.SizeLow; } }
+        public DateTime LastWriteUtc { get { return DateTime.FromFileTimeUtc(((long)info.Write.dwHighDateTime << 32) | (uint)info.Write.dwLowDateTime); } }
+
+        public static PathLease Open(string path, bool directory, bool deleteAccess) {
+            string full = System.IO.Path.GetFullPath(path).TrimEnd('\\');
+            if (full.Length < 3 || full[1] != ':' || full[2] != '\\')
+                throw new IOException("Protected references must use a local absolute Windows path.");
+            PathLease lease = new PathLease(); lease.Path = full;
+            try {
+                string root = System.IO.Path.GetPathRoot(full);
+                string current = root;
+                lease.Add(current, true, false);
+                string[] parts = full.Substring(root.Length).Split('\\');
+                for (int i = 0; i < parts.Length; i++) {
+                    if (parts[i].Length == 0) continue;
+                    current = System.IO.Path.Combine(current, parts[i]);
+                    bool isLeaf = i == parts.Length - 1;
+                    lease.Add(current, !isLeaf || directory, isLeaf && deleteAccess);
+                }
+                return lease;
+            } catch { lease.Dispose(); throw; }
+        }
+        void Add(string path, bool directory, bool deleteAccess) {
+            uint access = directory ? 0x80u : 0x80000000u;
+            if (deleteAccess) access |= 0x10000u;
+            SafeFileHandle handle = CreateFile(path, access, 1, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero);
+            if (handle.IsInvalid) { int error = Marshal.GetLastWin32Error(); handle.Dispose(); throw new Win32Exception(error, "Cannot lock protected path component: " + path); }
+            handles.Add(handle);
+            Info opened;
+            if (!GetFileInformationByHandle(handle, out opened)) throw new Win32Exception(Marshal.GetLastWin32Error());
+            if ((opened.Attributes & 0x400) != 0) throw new IOException("Reparse points are forbidden in protected paths: " + path);
+            if (((opened.Attributes & 16) != 0) != directory) throw new IOException("Protected path component has an unexpected type.");
+            StringBuilder resolved = new StringBuilder(32768);
+            uint count = GetFinalPathNameByHandle(handle, resolved, (uint)resolved.Capacity, 0);
+            if (count == 0 || count >= resolved.Capacity) throw new IOException("Cannot prove the protected path identity.");
+            string actual = resolved.ToString();
+            if (!actual.Equals("\\\\?\\" + System.IO.Path.GetFullPath(path).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase) &&
+                !actual.TrimEnd('\\').Equals("\\\\?\\" + System.IO.Path.GetFullPath(path).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
+                throw new IOException("Protected path identity changed during opening.");
+            leaf = handle; info = opened;
+        }
+        FileStream Reader() {
+            if (disposed || IsDirectory) throw new IOException("A locked file is required.");
+            if (stream == null) stream = new FileStream(leaf, FileAccess.Read);
+            stream.Position = 0; return stream;
+        }
+        public byte[] ReadBytes(int maximum) {
+            FileStream input = Reader();
+            if (input.Length > maximum) throw new IOException("The input file exceeds the " + maximum + " byte limit.");
+            byte[] bytes = new byte[(int)input.Length]; int offset = 0;
+            while (offset < bytes.Length) {
+                int read = input.Read(bytes, offset, bytes.Length - offset);
+                if (read == 0) throw new IOException("The input file ended before it could be read completely.");
+                offset += read;
+            }
+            if (input.ReadByte() != -1) throw new IOException("The input file grew during reading.");
+            return bytes;
+        }
+        public string Sha256() {
+            using (SHA256 hash = SHA256.Create()) return BitConverter.ToString(hash.ComputeHash(Reader())).Replace("-", "").ToLowerInvariant();
+        }
+        public void DeleteUnder(string root) {
+            string approved = System.IO.Path.GetFullPath(root).TrimEnd('\\') + "\\";
+            if (!Path.StartsWith(approved, StringComparison.OrdinalIgnoreCase) || IsDirectory || info.Links != 1)
+                throw new IOException("Deletion is outside the approved root or the file has multiple links.");
+            int delete = 1;
+            if (!SetFileInformationByHandle(leaf, 4, ref delete, 4)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+        public void Dispose() {
+            if (disposed) return; disposed = true;
+            if (stream != null) stream.Dispose();
+            for (int i = handles.Count - 1; i >= 0; i--) handles[i].Dispose();
+        }
+    }
+    public sealed class CheckpointLease : IDisposable {
+        static readonly HashSet<string> active = new HashSet<string>(StringComparer.Ordinal);
+        readonly System.Threading.Mutex mutex; readonly string key; bool disposed;
+        CheckpointLease(System.Threading.Mutex mutex, string key) { this.mutex = mutex; this.key = key; }
+        public static CheckpointLease Open(string key) {
+            lock (active) { if (!active.Add(key)) throw new IOException("The checkpoint is already leased in this process."); }
+            System.Threading.Mutex mutex = null;
+            try {
+                mutex = new System.Threading.Mutex(false, "Global\\WindowsAdminToolkit-Checkpoint-" + key);
+                bool acquired;
+                try { acquired = mutex.WaitOne(0); }
+                catch (System.Threading.AbandonedMutexException) { acquired = true; }
+                if (!acquired) throw new IOException("The checkpoint is already leased by another execution.");
+                return new CheckpointLease(mutex, key);
+            } catch { if (mutex != null) mutex.Dispose(); lock (active) { active.Remove(key); } throw; }
+        }
+        public void Dispose() {
+            if (disposed) return; disposed = true;
+            try { mutex.ReleaseMutex(); } finally { mutex.Dispose(); lock (active) { active.Remove(key); } }
+        }
+    }
+    public sealed class CleanupResult {
+        public int FilesExamined, EntriesExamined, FilesDeleted, ErrorCount;
+        public double SpaceFreedMB; public bool LimitReached; public string Status;
+    }
+    public static class TempCleanup {
+        public static CleanupResult Run(string[] roots, DateTime cutoff, int maximum) {
+            CleanupResult result = new CleanupResult(); long bytes = 0;
+            foreach (string root in roots) {
+                if (result.LimitReached) break;
+                if (!Directory.Exists(root)) continue;
+                Stack<IEnumerator<string>> walk = new Stack<IEnumerator<string>>();
+                Stack<PathLease> locks = new Stack<PathLease>();
+                try {
+                    locks.Push(PathLease.Open(root, true, false));
+                    walk.Push(Directory.EnumerateFileSystemEntries(root).GetEnumerator());
+                    while (walk.Count > 0) {
+                        bool more;
+                        try { more = walk.Peek().MoveNext(); }
+                        catch (IOException) { result.ErrorCount++; more = false; }
+                        catch (UnauthorizedAccessException) { result.ErrorCount++; more = false; }
+                        if (!more) { walk.Pop().Dispose(); locks.Pop().Dispose(); continue; }
+                        if (result.EntriesExamined >= maximum) { result.LimitReached = true; break; }
+                        result.EntriesExamined++;
+                        string path = walk.Peek().Current;
+                        try {
+                            FileAttributes attributes = File.GetAttributes(path);
+                            if ((attributes & FileAttributes.ReparsePoint) != 0) { result.ErrorCount++; continue; }
+                            if ((attributes & FileAttributes.Directory) != 0) {
+                                // Depth and total entries share the discovery budget.
+                                if (walk.Count >= 64) { result.ErrorCount++; continue; }
+                                PathLease next = PathLease.Open(path, true, false);
+                                try { walk.Push(Directory.EnumerateFileSystemEntries(path).GetEnumerator()); locks.Push(next); }
+                                catch { next.Dispose(); throw; }
+                            } else {
+                                result.FilesExamined++;
+                                using (PathLease file = PathLease.Open(path, false, true)) {
+                                    if (file.LastWriteUtc >= cutoff) continue;
+                                    long length = file.Length; file.DeleteUnder(root);
+                                    result.FilesDeleted++; bytes += length;
+                                }
+                            }
+                        } catch (IOException) { result.ErrorCount++; }
+                        catch (UnauthorizedAccessException) { result.ErrorCount++; }
+                        catch (Win32Exception) { result.ErrorCount++; }
+                    }
+                } catch (IOException) { result.ErrorCount++; }
+                catch (UnauthorizedAccessException) { result.ErrorCount++; }
+                catch (Win32Exception) { result.ErrorCount++; }
+                finally { while (walk.Count > 0) walk.Pop().Dispose(); while (locks.Count > 0) locks.Pop().Dispose(); }
+            }
+            result.SpaceFreedMB = Math.Round((double)bytes / 1048576, 2);
+            result.Status = result.LimitReached || result.ErrorCount > 0 ? "Partial" : "Success";
+            return result;
+        }
+    }
+}
+'@
+
+function Initialize-AdminSafeFileType {
+    [CmdletBinding()]
+    param()
+    if (-not ('WindowsAdminToolkit.Security.PathLease' -as [type])) {
+        Add-Type -TypeDefinition $Script:NativeFileSource -ErrorAction Stop
+    }
+}
+
+function Open-AdminSafePath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$LiteralPath,
+        [Parameter()][switch]$Directory
+    )
+    if (-not (Test-AdminLiteralFilePathText -LiteralPath $LiteralPath)) { throw 'Unsafe protected file path.' }
+    Initialize-AdminSafeFileType
+    return [WindowsAdminToolkit.Security.PathLease]::Open([IO.Path]::GetFullPath($LiteralPath), [bool]$Directory, $false)
+}
+
 $Script:ActionScripts = [ordered]@{}
 
 $Script:ActionScripts.SystemInfo = {
@@ -1629,73 +1803,30 @@ $Script:ActionScripts.TerminateProcess = {
     }
 }
 
-$Script:ActionScripts.ClearTempFiles = {
-    param(
-        [ValidateRange(1, 30)]
-        [int]$MinimumAgeDays = 2,
-
-        [ValidateRange(100, 100000)]
-        [int]$MaximumFiles = 50000
-    )
-
-    $roots = @($env:TEMP, (Join-Path $env:SystemRoot 'Temp')) |
-        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
-        Sort-Object -Unique
-    $cutoff = (Get-Date).ToUniversalTime().AddDays(-$MinimumAgeDays)
-    $deleted = 0
-    $freedBytes = [int64]0
-    $errorCount = 0
-    $examined = 0
-    $limitReached = $false
-
-    foreach ($root in $roots) {
-        if (-not (Test-Path -LiteralPath $root -PathType Container)) {
-            continue
-        }
-
-        $enumerationErrors = @()
-        $files = @(Get-ChildItem -LiteralPath $root -File -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable enumerationErrors)
-        $errorCount += $enumerationErrors.Count
-
-        foreach ($file in $files) {
-            $examined++
-            if ($examined -gt $MaximumFiles) {
-                $limitReached = $true
-                break
-            }
-            if (($file.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-                continue
-            }
-            if ($file.LastWriteTimeUtc -ge $cutoff) {
-                continue
-            }
-
-            try {
-                $length = [int64]$file.Length
-                Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop
-                $deleted++
-                $freedBytes += $length
-            }
-            catch {
-                $errorCount++
-            }
-        }
-
-        if ($limitReached) {
-            break
-        }
-    }
-
-    [pscustomobject]@{
-        ComputerName = $env:COMPUTERNAME
-        FilesExamined = [math]::Min($examined, $MaximumFiles)
-        FilesDeleted = $deleted
-        SpaceFreedMB = [math]::Round([double]$freedBytes / 1MB, 2)
-        ErrorCount   = $errorCount
-        LimitReached = $limitReached
-        Status       = if ($limitReached) { 'Partial' } else { 'Success' }
-    }
+$Script:ActionScripts.ClearTempFiles = [scriptblock]::Create(@'
+param(
+    [ValidateRange(1, 30)][int]$MinimumAgeDays = 2,
+    [ValidateRange(100, 100000)][int]$MaximumFiles = 50000
+)
+if (-not ('WindowsAdminToolkit.Security.PathLease' -as [type])) {
+    Add-Type -TypeDefinition @"
+__NATIVE_FILE_SOURCE__
+"@ -ErrorAction Stop
 }
+$roots = [string[]]@(@($env:TEMP, (Join-Path $env:SystemRoot 'Temp')) |
+    Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)
+$result = [WindowsAdminToolkit.Security.TempCleanup]::Run($roots, [datetime]::UtcNow.AddDays(-$MinimumAgeDays), $MaximumFiles)
+[pscustomobject]@{
+    ComputerName = $env:COMPUTERNAME
+    FilesExamined = $result.FilesExamined
+    EntriesExamined = $result.EntriesExamined
+    FilesDeleted = $result.FilesDeleted
+    SpaceFreedMB = $result.SpaceFreedMB
+    ErrorCount = $result.ErrorCount
+    LimitReached = $result.LimitReached
+    Status = $result.Status
+}
+'@.Replace('__NATIVE_FILE_SOURCE__', $Script:NativeFileSource))
 
 $Script:ActionScripts.ScheduledTasks = {
     param(
@@ -2170,7 +2301,7 @@ $Script:ActionCapabilityRequirements = [ordered]@{
     PendingReboot     = [pscustomobject]@{ Commands = @('Get-ItemProperty', 'Test-Path'); Executables = @(); ComObjects = @(); RequiresAdministrator = $false }
     ServiceManagement = [pscustomobject]@{ Commands = @('Get-Service'); Executables = @(); ComObjects = @(); RequiresAdministrator = $false }
     TerminateProcess  = [pscustomobject]@{ Commands = @('Get-Process', 'Stop-Process'); Executables = @(); ComObjects = @(); RequiresAdministrator = $true }
-    ClearTempFiles    = [pscustomobject]@{ Commands = @('Get-ChildItem', 'Remove-Item'); Executables = @(); ComObjects = @(); RequiresAdministrator = $true }
+    ClearTempFiles    = [pscustomobject]@{ Commands = @('Add-Type'); Executables = @(); ComObjects = @(); RequiresAdministrator = $true }
     ScheduledTasks    = [pscustomobject]@{ Commands = @('Get-ScheduledTask', 'Get-ScheduledTaskInfo'); Executables = @(); ComObjects = @(); RequiresAdministrator = $false }
     FirewallStatus    = [pscustomobject]@{ Commands = @('Get-NetFirewallProfile'); Executables = @(); ComObjects = @(); RequiresAdministrator = $false }
     EventLogQuery     = [pscustomobject]@{ Commands = @('Get-WinEvent'); Executables = @(); ComObjects = @(); RequiresAdministrator = $false }
@@ -2381,7 +2512,7 @@ function Get-AdminAutomationActionDescriptor {
         'ClearTempFiles' {
             $inputs = @(
                 ConvertTo-AdminAutomationInputDescriptor -Name 'MinimumAgeDays' -Type 'integer' -DefaultValue 2 -Minimum 1 -Maximum 30 -Description 'Minimum age of files eligible for deletion.'
-                ConvertTo-AdminAutomationInputDescriptor -Name 'MaximumFiles' -Type 'integer' -DefaultValue 50000 -Minimum 100 -Maximum 100000 -Description 'Maximum files examined per target.'
+                ConvertTo-AdminAutomationInputDescriptor -Name 'MaximumFiles' -Type 'integer' -DefaultValue 50000 -Minimum 100 -Maximum 100000 -Description 'Maximum files and directories discovered per target.'
             )
         }
         'ScheduledTasks' {
@@ -2583,6 +2714,8 @@ function Resolve-AdminPsExec {
         throw "PsExec was not found: $Path"
     }
 
+    $lease = Open-AdminSafePath -LiteralPath $resolvedPath
+    try {
     $item = Get-Item -LiteralPath $resolvedPath -ErrorAction Stop
     $signature = Get-AdminAuthenticodeSignatureInfo -LiteralPath $resolvedPath
     if ($signature.Status -ne 'Valid') {
@@ -2601,6 +2734,8 @@ function Resolve-AdminPsExec {
     }
 
     return $resolvedPath
+    }
+    finally { $lease.Dispose() }
 }
 
 function ConvertTo-AdminEncodedPayload {
@@ -2615,13 +2750,23 @@ function ConvertTo-AdminEncodedPayload {
     )
 
     $utf8 = New-Object System.Text.UTF8Encoding($false)
-    $actionBase64 = [Convert]::ToBase64String($utf8.GetBytes($ActionText))
+    $actionBytes = $utf8.GetBytes($ActionText)
+    $actionBuffer = New-Object System.IO.MemoryStream
+    $compressor = New-Object System.IO.Compression.DeflateStream($actionBuffer, [System.IO.Compression.CompressionMode]::Compress, $true)
+    try { $compressor.Write($actionBytes, 0, $actionBytes.Length) }
+    finally { $compressor.Dispose() }
+    try { $actionBase64 = [Convert]::ToBase64String($actionBuffer.ToArray()) }
+    finally { $actionBuffer.Dispose() }
     $argumentBase64 = ConvertTo-AdminArgumentEnvelope -ArgumentList $ArgumentList
 
     $payload = @"
 `$ErrorActionPreference = 'Stop'
 `$utf8 = New-Object System.Text.UTF8Encoding(`$false)
-`$actionText = `$utf8.GetString([Convert]::FromBase64String('$actionBase64'))
+`$actionBuffer = New-Object System.IO.MemoryStream(,([Convert]::FromBase64String('$actionBase64')))
+`$inflater = New-Object System.IO.Compression.DeflateStream(`$actionBuffer, [System.IO.Compression.CompressionMode]::Decompress)
+`$actionReader = New-Object System.IO.StreamReader(`$inflater, `$utf8)
+try { `$actionText = `$actionReader.ReadToEnd() }
+finally { `$actionReader.Dispose(); `$inflater.Dispose(); `$actionBuffer.Dispose() }
 `$argumentXml = `$utf8.GetString([Convert]::FromBase64String('$argumentBase64'))
 `$parsedArguments = [System.Management.Automation.PSSerializer]::Deserialize(`$argumentXml)
 if (`$null -eq `$parsedArguments) {
@@ -2822,15 +2967,22 @@ function Invoke-AdminPsExecTarget {
         $encodedPayload
     )
     $argumentString = $processArguments -join ' '
+    if ($argumentString.Length + $PsExecFullPath.Length + 4 -gt 32766) {
+        return ConvertTo-AdminFailureEnvelope -ComputerName $ComputerName -Transport 'PsExec' -Message 'The encoded action exceeds the Windows process command-line limit.' -ErrorCategory Validation
+    }
     $identifier = [guid]::NewGuid().ToString('N')
     $outputPath = Join-Path ([System.IO.Path]::GetTempPath()) "admin-psexec-$identifier.out"
     $errorPath = Join-Path ([System.IO.Path]::GetTempPath()) "admin-psexec-$identifier.err"
     $process = $null
+    $psExecLease = $null
     $timedOut = $false
     $outputExceeded = $false
 
     try {
-        $process = Start-Process -FilePath $PsExecFullPath -ArgumentList $argumentString -WindowStyle Hidden -PassThru -RedirectStandardOutput $outputPath -RedirectStandardError $errorPath -ErrorAction Stop
+        $psExecLease = Open-AdminSafePath -LiteralPath $PsExecFullPath
+        $verifiedPath = Resolve-AdminPsExec -Path $PsExecFullPath
+        if (-not $verifiedPath.Equals($psExecLease.Path, [StringComparison]::OrdinalIgnoreCase)) { throw 'PsExec launch identity changed.' }
+        $process = Start-Process -FilePath $verifiedPath -ArgumentList $argumentString -WindowStyle Hidden -PassThru -RedirectStandardOutput $outputPath -RedirectStandardError $errorPath -ErrorAction Stop
         $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
 
         while (-not $process.HasExited) {
@@ -2909,6 +3061,7 @@ function Invoke-AdminPsExecTarget {
         return ConvertTo-AdminFailureEnvelope -ComputerName $ComputerName -Transport 'PsExec' -Message $_.Exception.Message
     }
     finally {
+        if ($psExecLease) { $psExecLease.Dispose() }
         foreach ($path in @($outputPath, $errorPath)) {
             if (Test-Path -LiteralPath $path) {
                 Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
@@ -2944,7 +3097,11 @@ function Invoke-AdminWinRmTarget {
 
         [Parameter()]
         [ValidateRange(1, 10800)]
-        [int]$TimeoutSeconds = 1800
+        [int]$TimeoutSeconds = 1800,
+
+        [Parameter()][ValidateRange(1, 8388608)][int]$MaximumOutputBytes = 8388608,
+        [Parameter()][ValidateRange(1, 4096)][int]$MaximumOutputItems = 4096,
+        [Parameter()][AllowNull()][psobject]$OutputBudget
     )
 
     if (-not (Test-AdminHostname -ComputerName $ComputerName)) {
@@ -2952,8 +3109,15 @@ function Invoke-AdminWinRmTarget {
     }
 
     try {
+        $budget = if ($OutputBudget) { $OutputBudget } else { [pscustomobject]@{ RemainingItems = $MaximumOutputItems; RemainingBytes = $MaximumOutputBytes } }
+        # Progress has no redirectable PowerShell stream. Discard it in this
+        # receiving scope before the background-job host can retain records.
+        # Protocol quotas below still bound progress arriving over PSRP.
+        $ProgressPreference = 'SilentlyContinue'
+        if ($budget.RemainingItems -lt 1 -or $budget.RemainingBytes -lt 1) { throw 'OutputLimit: retry output budget exhausted.' }
+        $protocolBytes = [int][math]::Min($MaximumOutputBytes, $budget.RemainingBytes)
         $action = [scriptblock]::Create($ActionText)
-        $sessionOption = New-PSSessionOption -OpenTimeout ([math]::Min(60000, $TimeoutSeconds * 1000)) -OperationTimeout ($TimeoutSeconds * 1000) -CancelTimeout 5000
+        $sessionOption = New-PSSessionOption -OpenTimeout ([math]::Min(60000, $TimeoutSeconds * 1000)) -OperationTimeout ($TimeoutSeconds * 1000) -CancelTimeout 5000 -MaximumReceivedObjectSize $protocolBytes -MaximumReceivedDataSizePerCommand $protocolBytes
         $invokeParameters = @{
             ComputerName  = $ComputerName
             ScriptBlock   = $action
@@ -2961,6 +3125,8 @@ function Invoke-AdminWinRmTarget {
             Authentication = $Authentication
             SessionOption = $sessionOption
             ErrorAction   = 'Stop'
+            WarningAction = 'Continue'
+            InformationAction = 'Continue'
         }
         if ($Credential) {
             $invokeParameters.Credential = $Credential
@@ -2969,19 +3135,37 @@ function Invoke-AdminWinRmTarget {
             $invokeParameters.UseSSL = $true
         }
 
-        $data = @(Invoke-Command @invokeParameters)
+        $data = New-Object 'System.Collections.Generic.List[object]'
+        # Throwing from the downstream pipeline stops synchronous Invoke-Command,
+        # which cancels/disposes its remote pipeline. No full remote array is kept.
+        Invoke-Command @invokeParameters *>&1 | ForEach-Object {
+            if ($_ -is [System.Management.Automation.ErrorRecord]) {
+                [void](ConvertTo-AdminJsonSafeValue -Value ([string]$_.Exception.Message) -Budget $budget)
+                throw $_
+            }
+            $safe = ConvertTo-AdminJsonSafeValue -Value $_ -Budget $budget
+            if ($_ -isnot [System.Management.Automation.InformationalRecord] -and $_ -isnot [System.Management.Automation.InformationRecord]) {
+                $data.Add($safe) | Out-Null
+            }
+        }
         return [pscustomobject]@{
             ComputerName = $ComputerName
             Transport    = 'WinRM'
             Attempts     = 1
             Success      = $true
-            Data         = @($data)
+            Data         = $data.ToArray()
             ErrorCategory = $null
             ErrorMessage = $null
         }
     }
     catch {
-        return ConvertTo-AdminFailureEnvelope -ComputerName $ComputerName -Transport 'WinRM' -Message $_.Exception.Message
+        $message = $_.Exception.Message
+        if ($message -notmatch '(?i:OutputLimit)' -and $budget) {
+            try { [void](ConvertTo-AdminJsonSafeValue -Value ([string]$message) -Budget $budget) }
+            catch { $message = 'OutputLimit: remote failure evidence exceeded the remaining output budget.' }
+        }
+        $category = if ($message -match '(?i:OutputLimit|maximum.*(size|quota)|exceed.*(size|quota|allowed maximum))') { 'OutputLimit' } else { Get-AdminErrorCategory -Message $message }
+        return ConvertTo-AdminFailureEnvelope -ComputerName $ComputerName -Transport 'WinRM' -Message $message -ErrorCategory $category
     }
 }
 
@@ -3024,20 +3208,27 @@ function Invoke-AdminTargetWithRetry {
 
         [Parameter()]
         [ValidateRange(1, 10800)]
-        [int]$TimeoutSeconds = 1800
+        [int]$TimeoutSeconds = 1800,
+        [Parameter()][ValidateRange(1, 8388608)][int]$MaximumOutputBytes = 8388608,
+        [Parameter()][ValidateRange(1, 4096)][int]$MaximumOutputItems = 4096
     )
 
+    $outputBudget = [pscustomobject]@{ RemainingItems = $MaximumOutputItems; RemainingBytes = $MaximumOutputBytes }
+    # Reserve disjoint wire quotas for every possible retry epoch, including
+    # discarded progress/control records that projection cannot measure.
+    $maximumAttempts = [int][math]::Min($RetryCount + 1, $MaximumOutputBytes)
+    $attemptProtocolBytes = [int][math]::Floor($MaximumOutputBytes / $maximumAttempts)
     $lastResult = $null
-    for ($attempt = 1; $attempt -le ($RetryCount + 1); $attempt++) {
+    for ($attempt = 1; $attempt -le $maximumAttempts; $attempt++) {
         if ($Transport -eq 'WinRM') {
-            $lastResult = Invoke-AdminWinRmTarget -ComputerName $ComputerName -Credential $Credential -ActionText $ActionText -ArgumentList $ArgumentList -UseSsl $UseSsl -Authentication $Authentication -TimeoutSeconds $TimeoutSeconds
+            $lastResult = Invoke-AdminWinRmTarget -ComputerName $ComputerName -Credential $Credential -ActionText $ActionText -ArgumentList $ArgumentList -UseSsl $UseSsl -Authentication $Authentication -TimeoutSeconds $TimeoutSeconds -MaximumOutputBytes $attemptProtocolBytes -MaximumOutputItems $MaximumOutputItems -OutputBudget $outputBudget
         }
         else {
             $lastResult = Invoke-AdminPsExecTarget -ComputerName $ComputerName -PsExecFullPath $PsExecFullPath -ActionText $ActionText -ArgumentList $ArgumentList -TimeoutSeconds $TimeoutSeconds
         }
 
         $lastResult.Attempts = $attempt
-        if ($lastResult.Success) {
+        if ($lastResult.Success -or $lastResult.ErrorCategory -eq 'OutputLimit') {
             return $lastResult
         }
         if ($attempt -le $RetryCount) {
@@ -3296,6 +3487,8 @@ function Invoke-AdminTargetDetailed {
         return $targetResults.ToArray()
     }
 
+    $perTargetOutputBytes = [int][math]::Min(8388608, [math]::Floor(67108864 / $Computers.Count))
+    $perTargetOutputItems = [int][math]::Min(4096, [math]::Floor(32768 / $Computers.Count))
     $actionText = $actionBlock.ToString()
     $argumentEnvelope = ConvertTo-AdminArgumentEnvelope -ArgumentList $ArgumentList
     $effectiveRetryCount = if ($ReadOnly) { $RetryCount } else { 0 }
@@ -3327,12 +3520,14 @@ function Invoke-AdminTargetDetailed {
                         $RemoteAuthentication,
                         $RemoteRetryCount,
                         $RemoteRetryDelay,
-                        $RemoteTimeoutSeconds
+                        $RemoteTimeoutSeconds,
+                        $RemoteOutputBytes,
+                        $RemoteOutputItems
                     )
 
                     . $ToolkitPath
                     $remoteArguments = @(ConvertFrom-AdminArgumentEnvelope -EncodedEnvelope $RemoteArgumentEnvelope)
-                    Invoke-AdminTargetWithRetry -Transport $SelectedTransport -ComputerName $TargetComputer -Credential $RemoteCredential -ActionText $RemoteActionText -ArgumentList $remoteArguments -PsExecFullPath $RemotePsExecPath -UseSsl ([bool]$RemoteUseSsl) -Authentication $RemoteAuthentication -RetryCount $RemoteRetryCount -RetryDelaySeconds $RemoteRetryDelay -TimeoutSeconds $RemoteTimeoutSeconds
+                    Invoke-AdminTargetWithRetry -Transport $SelectedTransport -ComputerName $TargetComputer -Credential $RemoteCredential -ActionText $RemoteActionText -ArgumentList $remoteArguments -PsExecFullPath $RemotePsExecPath -UseSsl ([bool]$RemoteUseSsl) -Authentication $RemoteAuthentication -RetryCount $RemoteRetryCount -RetryDelaySeconds $RemoteRetryDelay -TimeoutSeconds $RemoteTimeoutSeconds -MaximumOutputBytes $RemoteOutputBytes -MaximumOutputItems $RemoteOutputItems
                 } -ArgumentList @(
                     $Script:ToolkitPath,
                     $Script:State.Transport,
@@ -3345,7 +3540,9 @@ function Invoke-AdminTargetDetailed {
                     $Script:State.Authentication,
                     $effectiveRetryCount,
                     $RetryDelaySeconds,
-                    $timeoutSeconds
+                    $timeoutSeconds,
+                    $perTargetOutputBytes,
+                    $perTargetOutputItems
                 ) -ErrorAction Stop
 
                 $startedJobs.Add($job) | Out-Null
@@ -3901,7 +4098,7 @@ function Get-AdminActionRequest {
         }
         14 {
             $age = Read-AdminInteger -Prompt 'Minimum file age in days' -Default 2 -Minimum 1 -Maximum 30
-            $maximum = Read-AdminInteger -Prompt 'Maximum files examined per target' -Default 50000 -Minimum 100 -Maximum 100000
+            $maximum = Read-AdminInteger -Prompt 'Maximum files and directories discovered per target' -Default 50000 -Minimum 100 -Maximum 100000
             $arguments = @($age, $maximum)
             $token = 'DELETE TEMP FILES'
             $warning = 'This deletes old files only from the user and Windows temp folders. Prefetch is never touched.'
@@ -4541,9 +4738,15 @@ function ConvertTo-AdminJsonSafeValue {
 
         [Parameter()]
         [ValidateRange(1, 20)]
-        [int]$MaximumDepth = 10
+        [int]$MaximumDepth = 10,
+
+        [Parameter()][AllowNull()][psobject]$Budget
     )
 
+    if ($null -eq $Budget) { $Budget = [pscustomobject]@{ RemainingItems = 65536; RemainingBytes = 8388608 } }
+    $Budget.RemainingItems--
+    $Budget.RemainingBytes -= 32
+    if ($Budget.RemainingItems -lt 0 -or $Budget.RemainingBytes -lt 0) { throw 'OutputLimit: result projection budget exceeded.' }
     if ($null -eq $Value) {
         return $null
     }
@@ -4569,11 +4772,11 @@ function ConvertTo-AdminJsonSafeValue {
     if (@($Value.PSObject.TypeNames) -contains 'Deserialized.System.Enum') {
         $deserializedEnumValue = $Value.PSObject.Properties['Value']
         if ($null -ne $deserializedEnumValue -and -not [string]::IsNullOrWhiteSpace([string]$deserializedEnumValue.Value)) {
-            return [string]$deserializedEnumValue.Value
+            return ConvertTo-AdminJsonSafeValue -Value ([string]$deserializedEnumValue.Value) -Depth $Depth -MaximumDepth $MaximumDepth -Budget $Budget
         }
     }
     if ($Value -is [guid] -or $Value -is [version] -or $Value -is [uri] -or $Value.GetType().IsEnum) {
-        return [string]$Value
+        return ConvertTo-AdminJsonSafeValue -Value ([string]$Value) -Depth $Depth -MaximumDepth $MaximumDepth -Budget $Budget
     }
     if ($Value -is [single] -or $Value -is [double]) {
         $floatingPointValue = [double]$Value
@@ -4588,7 +4791,12 @@ function ConvertTo-AdminJsonSafeValue {
         }
         return $(if ($Value -is [single]) { [single]$Value } else { [double]$Value })
     }
-    if ($Value -is [string]) { return [string]$Value }
+    if ($Value -is [string]) {
+        $charge = [int64]$Value.Length * 6 + 2
+        if ($charge -gt $Budget.RemainingBytes) { throw 'OutputLimit: encoded string budget exceeded.' }
+        $Budget.RemainingBytes -= $charge
+        return [string]$Value
+    }
     if ($Value -is [char]) { return [char]$Value }
     if ($Value -is [bool]) { return [bool]$Value }
     if ($Value -is [byte]) { return [byte]$Value }
@@ -4622,6 +4830,9 @@ function ConvertTo-AdminJsonSafeValue {
                 }
             }
 
+            $Budget.RemainingItems--
+            $Budget.RemainingBytes -= ([int64]$dictionaryKeyText.Length * 6 + 32)
+            if ($Budget.RemainingItems -lt 0 -or $Budget.RemainingBytes -lt 0) { throw 'OutputLimit: dictionary budget exceeded.' }
             $dictionaryEntries.Add([pscustomobject]@{
                     KeyText = $dictionaryKeyText
                     SortKey = ('{0}{1}{2}{1}{3:D10}' -f $dictionaryKeyText, ([char]0), $dictionaryKeyType, $dictionaryIndex)
@@ -4650,7 +4861,7 @@ function ConvertTo-AdminJsonSafeValue {
                 $outputKey = '{0}#{1}' -f $dictionaryKeyText, $outputKeySuffix
                 $outputKeySuffix++
             }
-            $safeDictionary[$outputKey] = ConvertTo-AdminJsonSafeValue -Value $dictionaryEntry.Value -Depth ($Depth + 1) -MaximumDepth $MaximumDepth
+            $safeDictionary[$outputKey] = ConvertTo-AdminJsonSafeValue -Value $dictionaryEntry.Value -Depth ($Depth + 1) -MaximumDepth $MaximumDepth -Budget $Budget
         }
         return [pscustomobject]$safeDictionary
     }
@@ -4658,7 +4869,7 @@ function ConvertTo-AdminJsonSafeValue {
     if ($Value -is [System.Collections.IEnumerable]) {
         $safeItems = New-Object 'System.Collections.Generic.List[object]'
         foreach ($item in $Value) {
-            $safeItems.Add((ConvertTo-AdminJsonSafeValue -Value $item -Depth ($Depth + 1) -MaximumDepth $MaximumDepth)) | Out-Null
+            $safeItems.Add((ConvertTo-AdminJsonSafeValue -Value $item -Depth ($Depth + 1) -MaximumDepth $MaximumDepth -Budget $Budget)) | Out-Null
         }
         return , $safeItems.ToArray()
     }
@@ -4669,6 +4880,9 @@ function ConvertTo-AdminJsonSafeValue {
     $propertyIndex = 0
     foreach ($property in $Value.PSObject.Properties) {
         $propertyName = [string]$property.Name
+        $Budget.RemainingItems--
+        $Budget.RemainingBytes -= ([int64]$propertyName.Length * 6 + 32)
+        if ($Budget.RemainingItems -lt 0 -or $Budget.RemainingBytes -lt 0) { throw 'OutputLimit: property budget exceeded.' }
         $propertyEntries.Add([pscustomobject]@{
                 Name     = $propertyName
                 SortKey  = ('{0}{1}{2:D10}' -f $propertyName, ([char]0), $propertyIndex)
@@ -4695,15 +4909,16 @@ function ConvertTo-AdminJsonSafeValue {
             $outputKeySuffix++
         }
         try {
-            $safeObject[$outputKey] = ConvertTo-AdminJsonSafeValue -Value $propertyEntry.Property.Value -Depth ($Depth + 1) -MaximumDepth $MaximumDepth
+            $safeObject[$outputKey] = ConvertTo-AdminJsonSafeValue -Value $propertyEntry.Property.Value -Depth ($Depth + 1) -MaximumDepth $MaximumDepth -Budget $Budget
         }
         catch {
+            if ($_.Exception.Message -match 'OutputLimit:') { throw }
             $safeObject[$outputKey] = $null
         }
     }
 
     if ($safeObject.Count -eq 0) {
-        return [string]$Value
+        return ConvertTo-AdminJsonSafeValue -Value ([string]$Value) -Depth $Depth -MaximumDepth $MaximumDepth -Budget $Budget
     }
     return [pscustomobject]$safeObject
 }
@@ -5649,11 +5864,13 @@ function Import-AdminPolicyProfile {
     param(
         [Parameter(Mandatory = $true)]
         [ValidateNotNullOrEmpty()]
-        [string]$LiteralPath
+        [string]$LiteralPath,
+
+        [Parameter()][AllowNull()][string]$ValidatedJsonText
     )
 
     $resolvedPath = Resolve-AdminAutomationInputFile -LiteralPath $LiteralPath -RequiredExtension '.json'
-    $jsonText = Read-AdminBoundedUtf8File -LiteralPath $resolvedPath -MaximumBytes 1048576
+    $jsonText = if ($PSBoundParameters.ContainsKey('ValidatedJsonText')) { $ValidatedJsonText } else { Read-AdminBoundedUtf8File -LiteralPath $resolvedPath -MaximumBytes 1048576 }
     if (Test-AdminJsonHasDuplicateProperty -JsonText $jsonText) {
         throw 'The policy profile contains duplicate or case-conflicting property names.'
     }
@@ -6102,7 +6319,7 @@ function Resolve-AdminPolicyRequest {
                 $decision = ConvertTo-AdminPolicyDecision @decisionParameters -Decision Denied -ReasonCode ActionInputDenied -Reason 'An action input exceeds its policy maximum.'
                 return ConvertTo-AdminPolicyResolution -Allowed $false -PolicyDecision $decision -ExecutionSettings $executionSettings
             }
-            $inputItems = if ($inputValue -is [System.Array]) { @($inputValue) } else { @($inputValue) }
+            [object[]]$inputItems = @($inputValue)
             if ($null -ne $constraint.MaximumItems -and $inputItems.Count -gt [int]$constraint.MaximumItems) {
                 $decision = ConvertTo-AdminPolicyDecision @decisionParameters -Decision Denied -ReasonCode ActionInputDenied -Reason 'An action input contains more items than the policy permits.'
                 return ConvertTo-AdminPolicyResolution -Allowed $false -PolicyDecision $decision -ExecutionSettings $executionSettings
@@ -6112,6 +6329,10 @@ function Resolve-AdminPolicyRequest {
                 return ConvertTo-AdminPolicyResolution -Allowed $false -PolicyDecision $decision -ExecutionSettings $executionSettings
             }
             if (@($constraint.AllowedValues).Count -gt 0) {
+                if ($ActionId -ceq 'WindowsUpdate' -and $inputName -ceq 'IncludeKB' -and $inputItems.Count -eq 0) {
+                    $decision = ConvertTo-AdminPolicyDecision @decisionParameters -Decision Denied -ReasonCode ActionInputDenied -Reason 'All updates cannot satisfy a policy KB allow list. Supply explicit approved KB identifiers.'
+                    return ConvertTo-AdminPolicyResolution -Allowed $false -PolicyDecision $decision -ExecutionSettings $executionSettings
+                }
                 foreach ($inputItem in $inputItems) {
                     if ([string]$inputItem -notin @($constraint.AllowedValues)) {
                         $decision = ConvertTo-AdminPolicyDecision @decisionParameters -Decision Denied -ReasonCode ActionInputDenied -Reason 'An action input is not present in its policy allow list.'
@@ -6294,7 +6515,7 @@ function Resolve-AdminAutomationRequest {
             return Get-AdminAutomationResolutionFailure -Category Validation -Message 'PolicyPath cannot be empty when supplied.' -PolicyDecision $invalidPolicyDecision
         }
         try {
-            $Script:State.PolicyProfile = Import-AdminPolicyProfile -LiteralPath $requestedPolicyPath
+            $Script:State.PolicyProfile = if ($Parameters.Contains('_ValidatedPolicyProfile')) { $Parameters['_ValidatedPolicyProfile'] } else { Import-AdminPolicyProfile -LiteralPath $requestedPolicyPath }
         }
         catch {
             $invalidPolicyDecision = ConvertTo-AdminPolicyDecision -Applied $true -Decision Invalid -ReasonCode PolicyInvalid -Reason 'The supplied policy profile could not be loaded or validated.'
@@ -6916,20 +7137,20 @@ function Invoke-AdminAutomationCore {
         return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -ActionId $request.ActionId -ActionName $request.ActionName -ReadOnly $request.ReadOnly -Preflight $request.Preflight -PolicyDecision $request.PolicyDecision -TargetMode $request.TargetMode -Transport $transportName -Authentication $transportAuthentication -UseSsl $transportUseSsl -Status ValidationFailed -Outcome ValidationFailure -ExitCode $Script:AutomationExitCodes.ValidationFailure -RequestedTargetCount $request.Computers.Count -Errors @([pscustomobject]@{ Category = 'Validation'; Message = "Unable to initialize the log: $($_.Exception.Message)" }) -ReportPaths $reportPaths
     }
 
-    if (-not $request.ReadOnly -and -not $request.Preflight) {
-        $whatIfRequested = (Test-AdminParameterBound -Parameters $Parameters -Name 'WhatIf') -and [bool]$Parameters['WhatIf']
-        if ($whatIfRequested) {
-            $previewResults = New-Object 'System.Collections.Generic.List[object]'
-            for ($index = 0; $index -lt $request.Computers.Count; $index++) {
-                $previewTime = [datetime]::UtcNow
-                $previewResults.Add((ConvertTo-AdminDetailedTargetResult -Index $index -ComputerName $request.Computers[$index] -Transport $transportName -StartedAtUtc $previewTime -FinishedAtUtc $previewTime -Status WhatIf -Data @())) | Out-Null
-            }
-            $warnings = @($request.Warnings) + @('WhatIf preview completed. No target operation was started.')
-            $finishedAtUtc = [datetime]::UtcNow
-            Write-AdminLog -Message ("Automation run {0} completed as a WhatIf preview." -f $runId) -NoConsole
-            return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -ActionId $request.ActionId -ActionName $request.ActionName -ReadOnly $request.ReadOnly -PolicyDecision $request.PolicyDecision -TargetMode $request.TargetMode -Transport $transportName -Authentication $transportAuthentication -UseSsl $transportUseSsl -Status WhatIf -Outcome CompleteSuccess -ExitCode $Script:AutomationExitCodes.CompleteSuccess -RequestedTargetCount $request.Computers.Count -TargetResults $previewResults.ToArray() -Warnings $warnings -ReportPaths $reportPaths
+    $whatIfRequested = (Test-AdminParameterBound -Parameters $Parameters -Name 'WhatIf') -and [bool]$Parameters['WhatIf']
+    if ($whatIfRequested) {
+        $previewResults = New-Object 'System.Collections.Generic.List[object]'
+        for ($index = 0; $index -lt $request.Computers.Count; $index++) {
+            $previewTime = [datetime]::UtcNow
+            $previewResults.Add((ConvertTo-AdminDetailedTargetResult -Index $index -ComputerName $request.Computers[$index] -Transport $transportName -StartedAtUtc $previewTime -FinishedAtUtc $previewTime -Status WhatIf -Data @())) | Out-Null
         }
+        $warnings = @($request.Warnings) + @('WhatIf preview completed. No target operation was started.')
+        $finishedAtUtc = [datetime]::UtcNow
+        Write-AdminLog -Message ("Automation run {0} completed as a WhatIf preview." -f $runId) -NoConsole
+        return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -ActionId $request.ActionId -ActionName $request.ActionName -ReadOnly $request.ReadOnly -PolicyDecision $request.PolicyDecision -TargetMode $request.TargetMode -Transport $transportName -Authentication $transportAuthentication -UseSsl $transportUseSsl -Status WhatIf -Outcome CompleteSuccess -ExitCode $Script:AutomationExitCodes.CompleteSuccess -RequestedTargetCount $request.Computers.Count -TargetResults $previewResults.ToArray() -Warnings $warnings -ReportPaths $reportPaths
+    }
 
+    if (-not $request.ReadOnly -and -not $request.Preflight) {
         $targetDescription = if ($request.TargetMode -eq 'Local') { "local computer $env:COMPUTERNAME" } else { "$($request.Computers.Count) remote target(s)" }
         $shouldProcess = $PSCmdlet.ShouldProcess($targetDescription, $request.ActionName)
         if (-not $shouldProcess) {
@@ -7272,20 +7493,7 @@ function Read-AdminStrictOrchestrationJson {
         [string]$ArtifactName
     )
 
-    $bytes = [System.IO.File]::ReadAllBytes($LiteralPath)
-    if ($bytes.Length -gt $MaximumBytes) {
-        throw "The $ArtifactName exceeds the $MaximumBytes byte limit."
-    }
-    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
-        throw "The $ArtifactName must use UTF-8 without a byte-order mark."
-    }
-    try {
-        $strictUtf8 = New-Object System.Text.UTF8Encoding($false, $true)
-        $jsonText = $strictUtf8.GetString($bytes)
-    }
-    catch [System.Text.DecoderFallbackException] {
-        throw "The $ArtifactName must contain valid UTF-8 text."
-    }
+    $jsonText = Read-AdminBoundedUtf8File -LiteralPath $LiteralPath -MaximumBytes $MaximumBytes -RejectBom
     if (Test-AdminJsonHasDuplicateProperty -JsonText $jsonText) {
         throw "The $ArtifactName contains duplicate or case-conflicting property names."
     }
@@ -8087,25 +8295,39 @@ function Test-AdminPlanExternalReference {
 
 function Open-AdminPlanExternalReferenceLock {
     [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [psobject]$Plan
-    )
-
-    $referencePaths = New-Object 'System.Collections.Generic.List[string]'
-    if ($Plan.request.policy.applied) { $referencePaths.Add([string]$Plan.request.policy.path) | Out-Null }
-    if ([string]$Plan.request.transport.name -ceq 'PsExec') { $referencePaths.Add([string]$Plan.request.transport.psExecPath) | Out-Null }
-    $streams = New-Object 'System.Collections.Generic.List[System.IO.FileStream]'
+    param([Parameter(Mandatory = $true)][psobject]$Plan)
+    $leases = New-Object 'System.Collections.Generic.List[object]'
+    $policyProfile = $null
     try {
-        foreach ($referencePath in $referencePaths) {
-            $streams.Add([System.IO.File]::Open($referencePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)) | Out-Null
+        if ($Plan.request.policy.applied) {
+            $path = [string]$Plan.request.policy.path
+            $lease = Open-AdminSafePath -LiteralPath $path
+            $leases.Add($lease) | Out-Null
+            if ($lease.Sha256() -cne [string]$Plan.request.policy.fileSha256) { throw 'The approved policy file no longer matches the plan hash.' }
+            $json = Read-AdminBoundedUtf8File -LiteralPath $path -MaximumBytes 1048576 -Lease $lease
+            $policyProfile = Import-AdminPolicyProfile -LiteralPath $path -ValidatedJsonText $json
+            if ($policyProfile.SchemaVersion -cne $Plan.request.policy.schemaVersion -or $policyProfile.ProfileName -cne $Plan.request.policy.profileName) { throw 'The approved policy metadata no longer matches the plan.' }
         }
-        return $streams.ToArray()
+        if ([string]$Plan.request.transport.name -ceq 'PsExec') {
+            $path = [string]$Plan.request.transport.psExecPath
+            $lease = Open-AdminSafePath -LiteralPath $path
+            $leases.Add($lease) | Out-Null
+            if ($lease.Sha256() -cne [string]$Plan.request.transport.psExecSha256) { throw 'The approved PsExec executable no longer matches the plan hash.' }
+            [void](Resolve-AdminPsExec -Path $path)
+        }
+        return [pscustomobject]@{ Leases = $leases.ToArray(); PolicyProfile = $policyProfile }
     }
-    catch {
-        foreach ($stream in $streams) { $stream.Dispose() }
-        throw
-    }
+    catch { foreach ($lease in $leases) { $lease.Dispose() }; throw }
+}
+
+function Open-AdminCheckpointLease {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$LiteralPath)
+    # Hash the canonical path into a named kernel object, so leases survive atomic
+    # checkpoint replacement and a competitor cannot unlink a sidecar lock file.
+    $identity = [IO.Path]::GetFullPath($LiteralPath).ToUpperInvariant()
+    Initialize-AdminSafeFileType
+    return [WindowsAdminToolkit.Security.CheckpointLease]::Open((Get-AdminSha256Hex -Text $identity))
 }
 
 function Invoke-AdminPlanCreate {
@@ -8395,7 +8617,9 @@ function ConvertTo-AdminPlanExecutionParameter {
 
         [Parameter()]
         [AllowNull()]
-        [string]$SingleTarget
+        [string]$SingleTarget,
+
+        [Parameter()][AllowNull()][psobject]$ValidatedPolicyProfile
     )
 
     $request = $Plan.request
@@ -8413,7 +8637,10 @@ function ConvertTo-AdminPlanExecutionParameter {
     foreach ($planInput in @($request.inputs)) {
         $parameters[[string]$planInput.name] = $planInput.value
     }
-    if ($request.policy.applied) { $parameters.PolicyPath = [string]$request.policy.path }
+    if ($request.policy.applied) {
+        $parameters.PolicyPath = [string]$request.policy.path
+        if ($ValidatedPolicyProfile) { $parameters['_ValidatedPolicyProfile'] = $ValidatedPolicyProfile }
+    }
     if ($request.safety.preflight) { $parameters.Preflight = $true }
     if ($request.safety.whatIf) { $parameters.WhatIf = $true }
     if (-not $request.readOnly) { $parameters.ConfirmationText = [string]$OperationParameter['ConfirmationText'] }
@@ -8467,10 +8694,11 @@ function Test-AdminPlanExecutionContract {
         [psobject]$Plan,
 
         [Parameter(Mandatory = $true)]
-        [System.Collections.IDictionary]$OperationParameter
+        [System.Collections.IDictionary]$OperationParameter,
+
+        [Parameter()][AllowNull()][psobject]$ValidatedPolicyProfile
     )
 
-    [void](Test-AdminPlanExternalReference -Plan $Plan)
     if ([string]$Plan.request.targetMode -ceq 'Local') {
         $localTarget = [string]@($Plan.request.targets)[0].name
         if (-not $localTarget.Equals([string]$env:COMPUTERNAME, [System.StringComparison]::OrdinalIgnoreCase)) {
@@ -8478,7 +8706,7 @@ function Test-AdminPlanExecutionContract {
         }
     }
     Use-AdminPlanRuntimeState -Plan $Plan
-    $validationParameters = ConvertTo-AdminPlanExecutionParameter -Plan $Plan -OperationParameter $OperationParameter
+    $validationParameters = ConvertTo-AdminPlanExecutionParameter -Plan $Plan -OperationParameter $OperationParameter -ValidatedPolicyProfile $ValidatedPolicyProfile
     $resolution = Resolve-AdminAutomationRequest -Parameters $validationParameters
     if (-not $resolution.Success) {
         throw "The approved execution contract no longer validates: $($resolution.Message)"
@@ -8632,9 +8860,11 @@ function Invoke-AdminPlanExecution {
     }
     if (-not $plan.request.safety.psExecConfirmationRequired -and (Test-AdminParameterBound -Parameters $Parameters -Name 'PsExecConfirmationText')) { throw 'PsExecConfirmationText is not valid for this approved plan.' }
 
-    $planExternalReferenceStreams = @(Open-AdminPlanExternalReferenceLock -Plan $plan)
+    $checkpointLease = Open-AdminCheckpointLease -LiteralPath $resolvedCheckpointPath
+    $planReferences = $null
     try {
-    [void](Test-AdminPlanExecutionContract -Plan $plan -OperationParameter $Parameters)
+    $planReferences = Open-AdminPlanExternalReferenceLock -Plan $plan
+    [void](Test-AdminPlanExecutionContract -Plan $plan -OperationParameter $Parameters -ValidatedPolicyProfile $planReferences.PolicyProfile)
     $checkpoint = if ($Operation -eq 'Execute') {
         $newCheckpoint = ConvertTo-AdminInitialCheckpoint -Plan $plan -RunId $RunId
         Write-AdminCheckpoint -LiteralPath $resolvedCheckpointPath -Checkpoint $newCheckpoint -Create
@@ -8673,7 +8903,7 @@ function Invoke-AdminPlanExecution {
             $attemptStarted = $true
             [void](Write-AdminCheckpoint -LiteralPath $resolvedCheckpointPath -Checkpoint $checkpoint)
             Use-AdminPlanRuntimeState -Plan $plan
-            $targetParameters = ConvertTo-AdminPlanExecutionParameter -Plan $plan -OperationParameter $Parameters -SingleTarget ([string]$target.target)
+            $targetParameters = ConvertTo-AdminPlanExecutionParameter -Plan $plan -OperationParameter $Parameters -SingleTarget ([string]$target.target) -ValidatedPolicyProfile $planReferences.PolicyProfile
             $invokeParameters = @{
                 Parameters         = $targetParameters
                 ResolvedOutputPath = '-'
@@ -8717,7 +8947,8 @@ function Invoke-AdminPlanExecution {
     return ConvertTo-AdminOrchestrationResult -Operation $Operation -RunId $RunId -StartedAtUtc $StartedAtUtc -FinishedAtUtc ([datetime]::UtcNow) -PlanId $plan.planId -PlanHash $plan.planHash.value -CheckpointPath $resolvedCheckpointPath -CheckpointHash $checkpoint.checkpointHash.value -Status $executionOutcome.Status -Outcome $executionOutcome.Outcome -ExitCode $executionOutcome.ExitCode -Target @($checkpoint.targets) -Warning $warning.ToArray() -ReportPath @($resolvedCheckpointPath)
     }
     finally {
-        foreach ($planExternalReferenceStream in $planExternalReferenceStreams) { $planExternalReferenceStream.Dispose() }
+        if ($planReferences) { foreach ($lease in $planReferences.Leases) { $lease.Dispose() } }
+        $checkpointLease.Dispose()
     }
 }
 

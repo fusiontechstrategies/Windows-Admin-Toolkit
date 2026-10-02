@@ -69,6 +69,10 @@ $hash = $approved.planHash.value
 
 State-changing plans still require their existing exact `-ConfirmationText` at both `Execute` and `Resume`. Plans over 25 targets still require `-TargetListConfirmationText 'USE TARGET LIST'`, and PsExec plans still require `-PsExecConfirmationText 'USE PSEXEC'`. `ShouldProcess`, `WhatIf`, protected-process rules, path safeguards, built-in limits, policy restrictions, and the no-retry rule for state changes all remain active.
 
+Execute and Resume hold one exclusive checkpoint lease across import, every target claim, invocation, and checkpoint write. A competing operation fails before selecting pending work. The lease rejects reentry in the same process, survives atomic checkpoint replacement, and is released by the operating system after a process crash. An interrupted `InProgress` target still becomes `Unknown` during explicit recovery.
+
+Approved external references use no-follow file handles and locked ancestor directories. Policy execution uses the profile parsed from the exact opened stream. PsExec is revalidated immediately before launch while the same path identity is locked. Protected input files require local absolute Windows paths and native handle support in a full PowerShell language session.
+
 Targets are checkpointed one at a time in deterministic plan order. Version 1 intentionally favors exact recovery semantics over concurrent execution: a checkpoint is atomically updated before a target starts and after its terminal result is known.
 
 ## Resume safely

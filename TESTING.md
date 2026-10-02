@@ -2,6 +2,12 @@
 
 Windows Admin Toolkit uses a dependency-free test harness so the same checks run under Windows PowerShell 5.1 and PowerShell 7.x without a test-framework bootstrap.
 
+## Current source security regressions
+
+The main harness also runs `tests/Security-Regression.Tests.ps1` on both editions. It uses unique synthetic filesystem fixtures, mocked WinRM producers, and test-created child processes. Coverage includes junction rejection, locked leaf and ancestor replacement, immutable orchestration policy consumption, bounded discovery and 128 MiB input rejection, read-only previews, explicit policy KB selection, incremental output limits, aggregate worker budgets, concurrent Resume with exactly one target invocation, and checkpoint lease recovery after a helper crash.
+
+These tests do not connect to live administrative targets. The existing release builder checks still verify unsigned candidate payload hashes, manifest and SPDX coverage, source-byte preservation, and no-overwrite output; they do not publish or sign a release.
+
 ## Final 3.0.0 qualification
 
 The final 3.0.0 controlled-orchestration repository tree was qualified on August 24, 2026. The final host and CI suite contains 649 checks. The clean virtual-machine runs completed the preceding 647-check suite before two release-certificate regression checks were added; the application script did not change between those runs and the final signing fix.
