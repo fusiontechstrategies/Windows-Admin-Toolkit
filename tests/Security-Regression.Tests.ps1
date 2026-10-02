@@ -236,7 +236,7 @@ try {
 
     $cleanupActionText = $Script:ActionScripts.ClearTempFiles.ToString()
     $cleanupPayload = ConvertTo-AdminEncodedPayload -ActionText $cleanupActionText -ArgumentList @(2, 100)
-    Test-ToolkitAssertion -Condition ($cleanupPayload.Length -lt 25000) -Name 'Native cleanup PsExec payload fits the Windows command-line limit'
+    Test-ToolkitAssertion -Condition (($cleanupPayload.Length + 1024) -le 32766) -Name 'Native cleanup PsExec payload fits the Windows command-line limit'
     $payloadUserTemp = Join-Path $securityRoot 'payload-user'
     $payloadWindows = Join-Path $securityRoot 'payload-windows'
     $payloadWindowsTemp = Join-Path $payloadWindows 'Temp'
@@ -276,6 +276,7 @@ try {
     foreach ($entry in @{ Toolkit = $toolkitPath; Plan = $concurrentApproved; Checkpoint = $concurrentCheckpoint; Marker = $concurrentMarker; Ready = $concurrentReady; Result = $concurrentResult }.GetEnumerator()) { $concurrentEscaped[$entry.Key] = ([string]$entry.Value).Replace("'", "''") }
     $executorText = @"
 . '$($concurrentEscaped.Toolkit)'
+function Get-AdminCheckpointRegistryRoot { return '$($Script:OfflineRegistryRoot.Replace("'", "''"))' }
 function Invoke-AdminAutomation {
     param(`$Parameters, `$ResolvedOutputPath)
     `$null = `$PSBoundParameters

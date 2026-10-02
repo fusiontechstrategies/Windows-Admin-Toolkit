@@ -107,3 +107,9 @@ The release builder copies an explicit source allowlist into a new destination, 
 The JSON schemas and stable exit codes are documented in [AUTOMATION.md](AUTOMATION.md) and [ORCHESTRATION.md](ORCHESTRATION.md). Treat changes to action IDs, classifications, confirmation phrases, result schema version 1.2, policy schema version 1.0, audit schema version 1.0, orchestration schema version 1.0, canonicalization identifiers, lifecycle meanings, or exit-code meanings as security-sensitive public-interface changes.
 
 See [RESPONSIBLE_USE.md](RESPONSIBLE_USE.md) for operational guidance.
+
+## PsExec publisher and output boundaries
+
+PsExec requires trusted Authenticode status, the exact reviewed Microsoft certificate subject and DER SHA-256, and the existing product and version checks. The approved certificate was inspected from official PsTools 2.43. Certificate rotation requires a reviewed source update; a generic trusted signer or a subject containing Microsoft's name is insufficient.
+
+Native stdout and stderr share one bounded pipe budget before retention. The remote producer projects output incrementally, and per-target item and byte quotas are forwarded across retry attempts. Fast process exit does not enable an unbounded final file read. Oversized output fails with `OutputLimit`; the toolkit does not automatically retry that failure.

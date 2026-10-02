@@ -9,6 +9,8 @@
 param()
 
 $ErrorActionPreference = 'Stop'
+# Load this engine's standard cmdlets rather than an inherited other-edition module.
+Import-Module (Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Utility/Microsoft.PowerShell.Utility.psd1') -ErrorAction Stop
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $toolkitPath = Join-Path $projectRoot 'WindowsAdminToolkit.ps1'
 
@@ -18,6 +20,30 @@ if (-not (Test-Path -LiteralPath $toolkitPath -PathType Leaf)) {
 
 . $toolkitPath
 Set-StrictMode -Version 2.0
+
+# Every artifact and durable execution ledger belongs to this private fixture.
+# Child processes use the real entry block after dot-sourcing, with only the
+# registry root function replaced; no real user application state is touched.
+Initialize-AdminSafeFileType
+$offlineFixtureParent = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+$offlineFixtureRoot = Join-Path $offlineFixtureParent ('wat-offline-' + [guid]::NewGuid().ToString('N'))
+[WindowsAdminToolkit.Security.StorageSecurity]::CreatePrivateDirectory($offlineFixtureRoot)
+$originalTestTemp = $env:TEMP
+$originalTestTmp = $env:TMP
+$env:TEMP = $offlineFixtureRoot
+$env:TMP = $offlineFixtureRoot
+$Script:OfflineRegistryRoot = Join-Path $offlineFixtureRoot 'checkpoint-ledger'
+function Get-AdminCheckpointRegistryRoot { return $Script:OfflineRegistryRoot }
+$testEntryTokens = $null; $testEntryErrors = $null
+$testEntryAst = [Management.Automation.Language.Parser]::ParseFile($toolkitPath, [ref]$testEntryTokens, [ref]$testEntryErrors)
+$testEntryNode = $testEntryAst.Find({ param($node)
+    $node -is [Management.Automation.Language.IfStatementAst] -and $node.Clauses[0].Item1.Extent.Text -ceq '-not $Script:WasDotSourced'
+}, $false)
+if ($null -eq $testEntryNode) { throw 'The toolkit entry point was not found.' }
+$testEntryBlock = $testEntryNode.Clauses[0].Item2.Extent.Text
+$Script:OfflineEntryText = $testEntryBlock.Substring(1, $testEntryBlock.Length - 2)
+
+try {
 
 $Script:TestCount = 0
 $Script:Failures = New-Object 'System.Collections.Generic.List[string]'
@@ -93,7 +119,15 @@ function Invoke-ToolkitChildProcess {
 `$VerbosePreference = 'SilentlyContinue'
 `$DebugPreference = 'SilentlyContinue'
 `$InformationPreference = 'SilentlyContinue'
-& '$escapedToolkitPath' $InvocationText
+. '$escapedToolkitPath' $InvocationText
+function Get-AdminCheckpointRegistryRoot { return '$($Script:OfflineRegistryRoot.Replace("'", "''"))' }
+`$entryTokens = `$null; `$entryErrors = `$null
+`$entryAst = [Management.Automation.Language.Parser]::ParseFile('$escapedToolkitPath', [ref]`$entryTokens, [ref]`$entryErrors)
+`$entryNode = `$entryAst.Find({ param(`$node)
+    `$node -is [Management.Automation.Language.IfStatementAst] -and `$node.Clauses[0].Item1.Extent.Text -ceq '-not `$Script:WasDotSourced'
+}, `$false)
+`$entryText = `$entryNode.Clauses[0].Item2.Extent.Text
+. ([scriptblock]::Create(`$entryText.Substring(1, `$entryText.Length - 2)))
 exit `$LASTEXITCODE
 "@
     }
@@ -1650,6 +1684,28 @@ $childArguments = @(
         $releaseOtherEkuRsa.Dispose()
     }
 
+    # The build requires a protected source ancestry. A developer checkout may
+    # intentionally inherit collaborative access, so copy the exact fixture
+    # bytes into a new private source tree without changing checkout ACLs.
+    $trustedReleaseSourceRoot = Join-Path $resolvedTemporaryRoot 'release-source'
+    [WindowsAdminToolkit.Security.StorageSecurity]::CreatePrivateDirectory($trustedReleaseSourceRoot)
+    $fixtureFiles = @(Get-ChildItem -LiteralPath $projectRoot -File)
+    foreach ($fixtureDirectory in @('schemas', 'examples', 'tests', 'tools', '.github/assets')) {
+        $fixtureFiles += @(Get-ChildItem -LiteralPath (Join-Path $projectRoot $fixtureDirectory) -File -Recurse)
+    }
+    foreach ($fixtureFile in $fixtureFiles) {
+        $fixtureRelative = $fixtureFile.FullName.Substring($projectRoot.Length + 1)
+        $fixtureDestination = Join-Path $trustedReleaseSourceRoot $fixtureRelative
+        $fixtureParent = [IO.Path]::GetDirectoryName($fixtureDestination)
+        $fixtureParents = New-Object 'System.Collections.Generic.Stack[string]'
+        while (-not [IO.Directory]::Exists($fixtureParent)) {
+            $fixtureParents.Push($fixtureParent)
+            $fixtureParent = [IO.Path]::GetDirectoryName($fixtureParent)
+        }
+        while ($fixtureParents.Count -gt 0) { [WindowsAdminToolkit.Security.StorageSecurity]::CreatePrivateDirectory($fixtureParents.Pop()) }
+        [WindowsAdminToolkit.Security.StorageSecurity]::AppendPrivateFile($fixtureDestination, [IO.File]::ReadAllBytes($fixtureFile.FullName), $true, 16777216)
+    }
+    $releaseBuilderPath = Join-Path $trustedReleaseSourceRoot 'tools\New-ReleaseArtifacts.ps1'
     $releaseOutputPath = Join-Path $resolvedTemporaryRoot 'release-candidate'
     $toolkitHashBeforeReleaseBuild = (Get-FileHash -LiteralPath $toolkitPath -Algorithm SHA256).Hash
     $releaseBuildResult = & $releaseBuilderPath -OutputDirectory $releaseOutputPath
@@ -1933,6 +1989,7 @@ finally {
 }
 
 . (Join-Path $PSScriptRoot 'Security-Regression.Tests.ps1')
+. (Join-Path $PSScriptRoot 'Final-Cloud-Regression.Tests.ps1')
 
 Write-Host ''
 if ($Script:Failures.Count -gt 0) {
@@ -1945,3 +2002,12 @@ if ($Script:Failures.Count -gt 0) {
 
 Write-Host "All $Script:TestCount tests passed under PowerShell $($PSVersionTable.PSVersion)." -ForegroundColor Green
 exit 0
+}
+finally {
+    $env:TEMP = $originalTestTemp
+    $env:TMP = $originalTestTmp
+    $fixturePrefix = [IO.Path]::GetFullPath($offlineFixtureParent).TrimEnd('\') + '\wat-offline-'
+    if ([IO.Path]::GetFullPath($offlineFixtureRoot).StartsWith($fixturePrefix, [StringComparison]::OrdinalIgnoreCase) -and [IO.Directory]::Exists($offlineFixtureRoot)) {
+        [IO.Directory]::Delete($offlineFixtureRoot, $true)
+    }
+}
