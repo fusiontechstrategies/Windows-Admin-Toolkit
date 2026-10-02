@@ -93,7 +93,7 @@ Action identifiers are case-insensitive on input and canonical in output. They a
 | `PendingReboot` | Read-only | None | None |
 | `ServiceManagement` | Conditional | Required `ServiceName`; `ServiceAction` is Query, Start, Stop, or Restart, default Query | `CHANGE SERVICE` for Start, Stop, or Restart |
 | `TerminateProcess` | State-changing | Required exact `ProcessName`; protected Windows processes remain blocked | `TERMINATE PROCESS` |
-| `ClearTempFiles` | State-changing | `MinimumAgeDays` 1 through 30, default 2; `MaximumFiles` 100 through 100000, default 50000 | `DELETE TEMP FILES` |
+| `ClearTempFiles` | State-changing | `MinimumAgeDays` 1 through 30, default 2; `MaximumFiles` bounds discovered files and directories from 100 through 100000, default 50000 | `DELETE TEMP FILES` |
 | `ScheduledTasks` | Read-only | `TaskPath`, default `\`; `MaximumTasks` 1 through 500, default 50 | None |
 | `FirewallStatus` | Read-only | None | None |
 | `EventLogQuery` | Read-only | `EventLogName`, default System; `EntryCount` 1 through 1000, default 20; `EventLevel` values Critical, Error, Warning, Information, or Verbose | None |
@@ -117,6 +117,12 @@ Actual state-changing execution retains both safeguards:
 2. `-ConfirmationText` must match the action-specific value exactly, including case and spaces.
 
 `-WhatIf` validates the complete request and returns a successful preview without connecting to or changing a target. Confirmation text is not required for a preview; if supplied, it must be exact. State-changing actions always use zero automatic retries.
+
+The preview applies to read-only actions and service queries too. It returns `WhatIf` target records with empty action data and starts no target execution audit event. A policy that constrains Windows Update `IncludeKB` requires a nonempty list containing only approved KBs.
+
+WinRM applies quotas before result collection. Per-target ceilings are 8 MiB and 4,096 projection items, including nested values. A run reserves at most 64 MiB and 32,768 projection items across its workers; many-target runs receive smaller per-target slices. An output-limit failure returns bounded error evidence and is never retried.
+
+Temporary cleanup does not follow reparse points. `MaximumFiles` bounds all discovered entries, including directories, and `EntriesExamined` reports that count. Each eligible file is inspected and deleted through one locked handle beneath its approved root. Multiple hard links, inaccessible entries, and traversal beyond 64 directory levels produce partial results.
 
 `-Preflight` also validates the complete request, including policy and action inputs, but executes only the built-in capability discovery script in the selected target context. It is mutually exclusive with `-WhatIf`. It does not require a missing state-change confirmation, although an incorrect supplied confirmation still fails closed.
 
