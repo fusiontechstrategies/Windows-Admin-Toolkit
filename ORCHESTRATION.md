@@ -71,6 +71,10 @@ State-changing plans still require their existing exact `-ConfirmationText` at b
 
 Execute and Resume hold one exclusive checkpoint lease across import, every target claim, invocation, and checkpoint write. A competing operation fails before selecting pending work. The lease rejects reentry in the same process, survives atomic checkpoint replacement, and is released by the operating system after a process crash. An interrupted `InProgress` target still becomes `Unknown` during explicit recovery.
 
+Checkpoint IDs also have an exclusive identity lease and a private durable ledger under the executing identity's Windows Local Application Data directory (`WindowsAdminToolkit-CheckpointLedger-v1`). Each record binds the ID to one canonical checkpoint path, approved plan hash, revision, and checkpoint hash. Copies, hard-link aliases, foreign-identity checkpoints, and stale snapshots cannot establish another execution authority. The ledger is flushed before the checkpoint is published. Interrupted ledger or artifact writes fail closed and require manual reconciliation.
+
+Resume must use the original Windows identity, checkpoint path, and matching ledger. Earlier checkpoints without a ledger are not automatically adopted. Retain the ledger with recovery evidence; deleting or restoring only the checkpoint does not authorize a retry. Inspect affected targets and create a newly reviewed plan when further work is needed. The ledger has a 16 MiB limit per checkpoint ID and is not automatically discarded.
+
 Approved external references use no-follow file handles and locked ancestor directories. Policy execution uses the profile parsed from the exact opened stream. PsExec is revalidated immediately before launch while the same path identity is locked. Protected input files require local absolute Windows paths and native handle support in a full PowerShell language session.
 
 Targets are checkpointed one at a time in deterministic plan order. Version 1 intentionally favors exact recovery semantics over concurrent execution: a checkpoint is atomically updated before a target starts and after its terminal result is known.

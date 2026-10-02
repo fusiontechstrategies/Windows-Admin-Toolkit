@@ -1184,11 +1184,16 @@ namespace WindowsAdminToolkit.Security {
         readonly List<SafeFileHandle> handles = new List<SafeFileHandle>();
         FileStream stream; SafeFileHandle leaf; Info info; bool disposed;
         public string Path { get; private set; }
+        public string Identity { get { return info.Volume.ToString("X8") + ":" + info.IndexHigh.ToString("X8") + info.IndexLow.ToString("X8"); } }
+        public uint LinkCount { get { return info.Links; } }
         public bool IsDirectory { get { return (info.Attributes & 16) != 0; } }
         public long Length { get { return ((long)info.SizeHigh << 32) | info.SizeLow; } }
         public DateTime LastWriteUtc { get { return DateTime.FromFileTimeUtc(((long)info.Write.dwHighDateTime << 32) | (uint)info.Write.dwLowDateTime); } }
 
         public static PathLease Open(string path, bool directory, bool deleteAccess) {
+            return OpenCore(path, directory, deleteAccess, false);
+        }
+        static PathLease OpenCore(string path, bool directory, bool deleteAccess, bool allowWrite) {
             string full = System.IO.Path.GetFullPath(path).TrimEnd('\\');
             if (full.Length < 3 || full[1] != ':' || full[2] != '\\')
                 throw new IOException("Protected references must use a local absolute Windows path.");
@@ -1196,21 +1201,22 @@ namespace WindowsAdminToolkit.Security {
             try {
                 string root = System.IO.Path.GetPathRoot(full);
                 string current = root;
-                lease.Add(current, true, false);
+                lease.Add(current, true, false, false);
                 string[] parts = full.Substring(root.Length).Split('\\');
                 for (int i = 0; i < parts.Length; i++) {
                     if (parts[i].Length == 0) continue;
                     current = System.IO.Path.Combine(current, parts[i]);
                     bool isLeaf = i == parts.Length - 1;
-                    lease.Add(current, !isLeaf || directory, isLeaf && deleteAccess);
+                    lease.Add(current, !isLeaf || directory, isLeaf && deleteAccess, isLeaf && allowWrite);
                 }
                 return lease;
             } catch { lease.Dispose(); throw; }
         }
-        void Add(string path, bool directory, bool deleteAccess) {
+        void Add(string path, bool directory, bool deleteAccess, bool allowWrite) {
             uint access = directory ? 0x80u : 0x80000000u;
             if (deleteAccess) access |= 0x10000u;
-            SafeFileHandle handle = CreateFile(path, access, 1, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero);
+            access |= 0x20000u; // READ_CONTROL permits read-only owner/DACL inspection.
+            SafeFileHandle handle = CreateFile(path, access, allowWrite ? 3u : 1u, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero);
             if (handle.IsInvalid) { int error = Marshal.GetLastWin32Error(); handle.Dispose(); throw new Win32Exception(error, "Cannot lock protected path component: " + path); }
             handles.Add(handle);
             Info opened;
@@ -1226,6 +1232,18 @@ namespace WindowsAdminToolkit.Security {
                 throw new IOException("Protected path identity changed during opening.");
             leaf = handle; info = opened;
         }
+        // HOST_TRUST_BEGIN: omitted from the isolated target cleanup helper.
+        public static PathLease OpenTrusted(string path, bool directory, bool allowWrite, bool privateLeaf) {
+            PathLease lease = OpenCore(path, directory, false, allowWrite);
+            try {
+                for (int i = 0; i < lease.handles.Count; i++)
+                    StorageSecurity.Validate(lease.handles[i], i == lease.handles.Count - 1 && privateLeaf,
+                        i != lease.handles.Count - 1 || directory);
+                if (!directory && lease.LinkCount != 1) throw new IOException("Private artifacts cannot have multiple hard links.");
+                return lease;
+            } catch (Exception error) { lease.Dispose(); throw new IOException("Protected storage trust check failed for " + path + ": " + error.Message, error); }
+        }
+        // HOST_TRUST_END
         FileStream Reader() {
             if (disposed || IsDirectory) throw new IOException("A locked file is required.");
             if (stream == null) stream = new FileStream(leaf, FileAccess.Read);
@@ -1278,6 +1296,195 @@ namespace WindowsAdminToolkit.Security {
         public void Dispose() {
             if (disposed) return; disposed = true;
             try { mutex.ReleaseMutex(); } finally { mutex.Dispose(); lock (active) { active.Remove(key); } }
+        }
+    }
+    public static class StorageSecurity {
+        [StructLayout(LayoutKind.Sequential)] struct SecurityAttributes { public int Length; public IntPtr Descriptor; public int Inherit; }
+        [DllImport("advapi32.dll", SetLastError=true)] static extern uint GetSecurityInfo(SafeFileHandle handle, int type, uint information, out IntPtr owner, IntPtr group, out IntPtr dacl, IntPtr sacl, out IntPtr descriptor);
+        [DllImport("advapi32.dll", SetLastError=true)] static extern uint GetSecurityDescriptorLength(IntPtr descriptor);
+        [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool ConvertStringSecurityDescriptorToSecurityDescriptor(string text, uint revision, out IntPtr descriptor, out uint size);
+        [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
+        [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool CreateDirectory(string path, ref SecurityAttributes attributes);
+        [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern SafeFileHandle CreateFile(string path, uint access, uint share, ref SecurityAttributes security, uint mode, uint flags, IntPtr template);
+        [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern uint GetFinalPathNameByHandle(SafeFileHandle handle, StringBuilder name, uint size, uint flags);
+        public static string CurrentSid { get { using (System.Security.Principal.WindowsIdentity identity = System.Security.Principal.WindowsIdentity.GetCurrent()) return identity.User.Value; } }
+        static bool Trusted(string sid, string user) {
+            return sid == user || sid == "S-1-5-18" || sid == "S-1-5-32-544" ||
+                sid == "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
+        }
+        public static void ValidateDescriptor(byte[] bytes, bool privateLeaf, bool directory, bool volumeRoot) {
+            System.Security.AccessControl.RawSecurityDescriptor descriptor = new System.Security.AccessControl.RawSecurityDescriptor(bytes, 0);
+            string user = CurrentSid;
+            if (descriptor.Owner == null || !Trusted(descriptor.Owner.Value, user) || (privateLeaf && descriptor.Owner.Value != user))
+                throw new IOException("Protected storage has an untrusted owner.");
+            if (descriptor.DiscretionaryAcl == null) throw new IOException("Protected storage has a NULL DACL.");
+            if (privateLeaf && (descriptor.ControlFlags & System.Security.AccessControl.ControlFlags.DiscretionaryAclProtected) == 0)
+                throw new IOException("Private storage must have a protected DACL.");
+            if (descriptor.DiscretionaryAcl.Count > 4096) throw new IOException("Protected storage exceeds the ACL inspection budget.");
+            uint dangerous = 0x40u | 0x40000u | 0x80000u;
+            // A canonical volume anchor cannot be renamed and remains nonempty
+            // while its independently protected immediate child is retained.
+            if (!volumeRoot) dangerous |= 0x2u | 0x100u | 0x10000u;
+            if (privateLeaf || !directory) dangerous |= 0x2u | 0x4u | 0x10u | 0x100u | 0x10000u;
+            foreach (System.Security.AccessControl.GenericAce ace in descriptor.DiscretionaryAcl) {
+                if ((ace.AceFlags & System.Security.AccessControl.AceFlags.InheritOnly) != 0) continue;
+                System.Security.AccessControl.CommonAce common = ace as System.Security.AccessControl.CommonAce;
+                if (common == null || common.IsCallback) throw new IOException("Unsupported protected storage ACE.");
+                if (common.AceQualifier == System.Security.AccessControl.AceQualifier.AccessDenied) continue;
+                if (common.AceQualifier != System.Security.AccessControl.AceQualifier.AccessAllowed) throw new IOException("Unsupported protected storage ACE.");
+                uint mask = unchecked((uint)common.AccessMask);
+                if ((mask & 0x10000000u) != 0) mask |= 0x1f01ffu;
+                if ((mask & 0x40000000u) != 0) mask |= 0x120116u;
+                string sid = common.SecurityIdentifier.Value;
+                // OWNER RIGHTS belongs to the owner validated above.
+                if ((mask & dangerous) != 0 && !Trusted(sid, user) && sid != "S-1-3-4")
+                    throw new IOException("Protected storage can be changed by another principal.");
+            }
+        }
+        public static void Validate(SafeFileHandle handle, bool privateLeaf, bool directory) {
+            IntPtr owner, dacl, descriptor;
+            uint error = GetSecurityInfo(handle, 1, 5, out owner, IntPtr.Zero, out dacl, IntPtr.Zero, out descriptor);
+            if (error != 0) throw new Win32Exception((int)error);
+            try {
+                uint size = GetSecurityDescriptorLength(descriptor);
+                if (size == 0 || size > 1048576) throw new IOException("Invalid protected storage descriptor size.");
+                byte[] bytes = new byte[size]; Marshal.Copy(descriptor, bytes, 0, bytes.Length);
+                StringBuilder name = new StringBuilder(512);
+                uint count = GetFinalPathNameByHandle(handle, name, (uint)name.Capacity, 1);
+                bool root = directory && count > 0 && count < name.Capacity &&
+                    System.Text.RegularExpressions.Regex.IsMatch(name.ToString(), @"^\\\\\?\\Volume\{[0-9A-Fa-f-]{36}\}\\$");
+                ValidateDescriptor(bytes, privateLeaf, directory, root);
+            } finally { LocalFree(descriptor); }
+        }
+        public static void CreatePrivateDirectory(string path) {
+            string sid = CurrentSid;
+            IntPtr descriptor; uint size;
+            string sddl = "O:" + sid + "G:" + sid + "D:P(A;OICI;FA;;;" + sid + ")(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
+            if (!ConvertStringSecurityDescriptorToSecurityDescriptor(sddl, 1, out descriptor, out size)) throw new Win32Exception(Marshal.GetLastWin32Error());
+            try {
+                SecurityAttributes attributes = new SecurityAttributes(); attributes.Length = Marshal.SizeOf(typeof(SecurityAttributes)); attributes.Descriptor = descriptor;
+                if (!CreateDirectory(path, ref attributes)) throw new Win32Exception(Marshal.GetLastWin32Error(), "Cannot create private storage directory.");
+            } finally { LocalFree(descriptor); }
+        }
+        public static void AppendPrivateFile(string path, byte[] bytes, bool create, int maximum) {
+            string sid = CurrentSid; IntPtr descriptor; uint size;
+            string sddl = "O:" + sid + "G:" + sid + "D:P(A;;FA;;;" + sid + ")(A;;FA;;;SY)(A;;FA;;;BA)";
+            if (!ConvertStringSecurityDescriptorToSecurityDescriptor(sddl, 1, out descriptor, out size)) throw new Win32Exception(Marshal.GetLastWin32Error());
+            try {
+                SecurityAttributes attributes = new SecurityAttributes(); attributes.Length = Marshal.SizeOf(typeof(SecurityAttributes)); attributes.Descriptor = descriptor;
+                using (SafeFileHandle handle = CreateFile(path, 0xc0020000u, 1, ref attributes, create ? 1u : 3u, 0x00200000, IntPtr.Zero)) {
+                    if (handle.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error());
+                    Validate(handle, true, false);
+                    using (PathLease identity = PathLease.OpenTrusted(path, false, true, true)) {
+                        using (FileStream output = new FileStream(handle, FileAccess.ReadWrite)) {
+                            if (output.Length + bytes.Length > maximum) throw new IOException("Checkpoint ledger exceeds its durable storage budget.");
+                            output.Position = output.Length; output.Write(bytes, 0, bytes.Length); output.Flush(true);
+                        }
+                    }
+                }
+            } finally { LocalFree(descriptor); }
+        }
+    }
+    public sealed class CapturedProcess {
+        public byte[] Stdout, Stderr; public int ExitCode;
+        public bool TimedOut, OutputExceeded;
+    }
+    // Both pipes charge one quota before retention. A fast exit cannot bypass
+    // the limit, and no redirect file or unbounded line reader is used.
+    public static class ProcessCapture {
+        public static void CheckJsonBudget(string json, int maximumItems) {
+            int nodes = 0, depth = 0; bool quoted = false, escaped = false;
+            foreach (char c in json) {
+                if (quoted) { if (escaped) escaped = false; else if (c == '\\') escaped = true; else if (c == '"') quoted = false; continue; }
+                if (c == '"') { quoted = true; continue; }
+                if (c == '{' || c == '[') { depth++; nodes++; }
+                else if (c == '}' || c == ']') depth--;
+                else if (c == ',' || c == ':') nodes++;
+                if (depth > 12 || nodes > maximumItems + 16) throw new IOException("OutputLimit: JSON structure exceeds the target item/depth budget.");
+            }
+        }
+        [StructLayout(LayoutKind.Sequential)] struct BasicJob {
+            public long ProcessTime, JobTime; public uint Flags;
+            public UIntPtr MinWorking, MaxWorking; public uint ActiveProcesses;
+            public UIntPtr Affinity; public uint Priority, Scheduling;
+        }
+        [StructLayout(LayoutKind.Sequential)] struct IoCounters {
+            public ulong ReadOperations, WriteOperations, OtherOperations, ReadBytes, WriteBytes, OtherBytes;
+        }
+        [StructLayout(LayoutKind.Sequential)] struct ExtendedJob {
+            public BasicJob Basic; public IoCounters Io;
+            public UIntPtr ProcessMemory, JobMemory, PeakProcessMemory, PeakJobMemory;
+        }
+        [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr CreateJobObject(IntPtr security, string name);
+        [DllImport("kernel32.dll", SetLastError=true)] static extern bool SetInformationJobObject(IntPtr job, int kind, ref ExtendedJob info, uint size);
+        [DllImport("kernel32.dll", SetLastError=true)] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+        [DllImport("kernel32.dll", SetLastError=true)] static extern bool TerminateJobObject(IntPtr job, uint exitCode);
+        [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+        sealed class Quota {
+            internal readonly object Sync = new object(); internal int Used;
+            internal readonly int Maximum; internal bool Exceeded;
+            internal Quota(int maximum) { Maximum = maximum; }
+        }
+        static void ReadPipe(Stream input, MemoryStream output, Quota quota) {
+            byte[] buffer = new byte[4096];
+            try {
+                int read;
+                while ((read = input.Read(buffer, 0, buffer.Length)) != 0) {
+                    lock (quota.Sync) {
+                        if (quota.Exceeded) return;
+                        if (read > quota.Maximum - quota.Used) { quota.Exceeded = true; return; }
+                        quota.Used += read; output.Write(buffer, 0, read);
+                    }
+                }
+            } catch (IOException) { lock (quota.Sync) { quota.Exceeded = true; } }
+              catch (ObjectDisposedException) { lock (quota.Sync) { quota.Exceeded = true; } }
+        }
+        public static CapturedProcess Run(string path, string arguments, int timeoutSeconds, int maximum) {
+            if (maximum < 1 || maximum > 8388608 || timeoutSeconds < 1 || timeoutSeconds > 10800) throw new ArgumentOutOfRangeException();
+            CapturedProcess result = new CapturedProcess(); Quota quota = new Quota(maximum);
+            IntPtr job = CreateJobObject(IntPtr.Zero, null);
+            if (job == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+            using (System.Diagnostics.Process process = new System.Diagnostics.Process())
+            using (MemoryStream stdout = new MemoryStream())
+            using (MemoryStream stderr = new MemoryStream()) {
+                System.Threading.Thread outReader = null, errReader = null;
+                bool started = false;
+                try {
+                    ExtendedJob limits = new ExtendedJob(); limits.Basic.Flags = 0x2000; // KILL_ON_JOB_CLOSE
+                    if (!SetInformationJobObject(job, 9, ref limits, (uint)Marshal.SizeOf(typeof(ExtendedJob)))) throw new Win32Exception(Marshal.GetLastWin32Error());
+                    process.StartInfo = new System.Diagnostics.ProcessStartInfo(path, arguments) {
+                        UseShellExecute = false, CreateNoWindow = true,
+                        WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden,
+                        RedirectStandardOutput = true, RedirectStandardError = true,
+                        RedirectStandardInput = true
+                    };
+                    if (!process.Start()) throw new IOException("Could not start the approved child process.");
+                    started = true;
+                    if (!AssignProcessToJobObject(job, process.Handle)) throw new Win32Exception(Marshal.GetLastWin32Error(), "Cannot contain the approved child process.");
+                    process.StandardInput.Close();
+                    outReader = new System.Threading.Thread(() => ReadPipe(process.StandardOutput.BaseStream, stdout, quota));
+                    errReader = new System.Threading.Thread(() => ReadPipe(process.StandardError.BaseStream, stderr, quota));
+                    outReader.IsBackground = true; errReader.IsBackground = true;
+                    outReader.Start(); errReader.Start();
+                    System.Diagnostics.Stopwatch elapsed = System.Diagnostics.Stopwatch.StartNew();
+                    while (!process.WaitForExit(25)) {
+                        lock (quota.Sync) { if (quota.Exceeded) break; }
+                        if (elapsed.Elapsed.TotalSeconds >= timeoutSeconds) { result.TimedOut = true; break; }
+                    }
+                    // Closing/terminating the job also closes pipes retained by descendants.
+                    if (!TerminateJobObject(job, 1) && !process.HasExited) throw new Win32Exception(Marshal.GetLastWin32Error());
+                    if (!process.WaitForExit(5000)) throw new IOException("Approved child did not terminate.");
+                    if (!outReader.Join(5000) || !errReader.Join(5000)) throw new IOException("Approved child pipes did not close.");
+                    lock (quota.Sync) { result.OutputExceeded = quota.Exceeded; }
+                    result.Stdout = stdout.ToArray(); result.Stderr = stderr.ToArray(); result.ExitCode = process.ExitCode;
+                    return result;
+                } finally {
+                    TerminateJobObject(job, 1); CloseHandle(job);
+                    if (started && !process.HasExited) { try { process.Kill(); } catch (InvalidOperationException) {} }
+                    if (outReader != null && outReader.IsAlive) { process.StandardOutput.Close(); outReader.Join(5000); }
+                    if (errReader != null && errReader.IsAlive) { process.StandardError.Close(); errReader.Join(5000); }
+                }
+            }
         }
     }
     public sealed class CleanupResult {
@@ -1803,6 +2010,11 @@ $Script:ActionScripts.TerminateProcess = {
     }
 }
 
+# Remote cleanup needs only the path lease and cleanup implementation. Transport
+# capture and checkpoint coordination stay on the administrative host.
+$cleanupNativeSource = $Script:NativeFileSource.Substring(0, $Script:NativeFileSource.IndexOf('    public sealed class CheckpointLease')) +
+    $Script:NativeFileSource.Substring($Script:NativeFileSource.IndexOf('    public sealed class CleanupResult'))
+$cleanupNativeSource = [regex]::Replace($cleanupNativeSource, '(?s)        // HOST_TRUST_BEGIN.*?        // HOST_TRUST_END', '')
 $Script:ActionScripts.ClearTempFiles = [scriptblock]::Create(@'
 param(
     [ValidateRange(1, 30)][int]$MinimumAgeDays = 2,
@@ -1826,7 +2038,7 @@ $result = [WindowsAdminToolkit.Security.TempCleanup]::Run($roots, [datetime]::Ut
     LimitReached = $result.LimitReached
     Status = $result.Status
 }
-'@.Replace('__NATIVE_FILE_SOURCE__', $Script:NativeFileSource))
+'@.Replace('__NATIVE_FILE_SOURCE__', $cleanupNativeSource))
 
 $Script:ActionScripts.ScheduledTasks = {
     param(
@@ -2638,6 +2850,7 @@ function Get-AdminAuthenticodeSignatureInfo {
             Status        = [string]$signature.Status
             StatusMessage = [string]$signature.StatusMessage
             SignerSubject = if ($signature.SignerCertificate) { [string]$signature.SignerCertificate.Subject } else { $null }
+            SignerCertificateSha256 = if ($signature.SignerCertificate) { Get-AdminSha256Hex -Bytes $signature.SignerCertificate.RawData } else { $null }
         }
     }
 
@@ -2653,10 +2866,17 @@ param(
 )
 
 $signature = Get-AuthenticodeSignature -LiteralPath $LiteralPath -ErrorAction Stop
+$certificateHash = $null
+if ($signature.SignerCertificate) {
+    $hash = [Security.Cryptography.SHA256]::Create()
+    try { $certificateHash = [BitConverter]::ToString($hash.ComputeHash($signature.SignerCertificate.RawData)).Replace('-', '').ToLowerInvariant() }
+    finally { $hash.Dispose() }
+}
 [pscustomobject]@{
     Status = [string]$signature.Status
     StatusMessage = [string]$signature.StatusMessage
     SignerSubject = if ($signature.SignerCertificate) { [string]$signature.SignerCertificate.Subject } else { $null }
+    SignerCertificateSha256 = $certificateHash
 }
 '@
 
@@ -2685,6 +2905,19 @@ $signature = Get-AuthenticodeSignature -LiteralPath $LiteralPath -ErrorAction St
     }
 
     return $signatureData[0]
+}
+
+function Test-AdminPsExecPublisher {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][psobject]$Signature)
+    # Reviewed PsTools 2.43 signer, inspected from Microsoft's official download
+    # on 2026-10-02. Certificate rotation requires an explicit reviewed update.
+    $approvedSubject = 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US'
+    $approvedCertificate = 'aae358fd90d5500110ee8bf3bd2c668f834559710da7d75c266018bb9506f2f6'
+    $hashProperty = $Signature.PSObject.Properties['SignerCertificateSha256']
+    return $Signature.Status -ceq 'Valid' -and
+        [string]$Signature.SignerSubject -ceq $approvedSubject -and
+        $null -ne $hashProperty -and [string]$hashProperty.Value -ceq $approvedCertificate
 }
 
 function Resolve-AdminPsExec {
@@ -2721,8 +2954,8 @@ function Resolve-AdminPsExec {
     if ($signature.Status -ne 'Valid') {
         throw "PsExec does not have a valid Authenticode signature: $resolvedPath"
     }
-    if ([string]::IsNullOrWhiteSpace([string]$signature.SignerSubject) -or $signature.SignerSubject -notmatch 'O=Microsoft Corporation') {
-        throw "PsExec is not signed by Microsoft Corporation: $resolvedPath"
+    if (-not (Test-AdminPsExecPublisher -Signature $signature)) {
+        throw "PsExec is not signed by an explicitly approved Microsoft certificate: $resolvedPath"
     }
     if ($item.VersionInfo.ProductName -notmatch 'Sysinternals PsExec') {
         throw "The selected executable is not Sysinternals PsExec: $resolvedPath"
@@ -2746,7 +2979,9 @@ function ConvertTo-AdminEncodedPayload {
         [string]$ActionText,
 
         [Parameter()]
-        [object[]]$ArgumentList = @()
+        [object[]]$ArgumentList = @(),
+        [Parameter()][ValidateRange(1, 8388608)][int]$MaximumOutputBytes = 8388608,
+        [Parameter()][ValidateRange(1, 4096)][int]$MaximumOutputItems = 4096
     )
 
     $utf8 = New-Object System.Text.UTF8Encoding($false)
@@ -2758,9 +2993,13 @@ function ConvertTo-AdminEncodedPayload {
     try { $actionBase64 = [Convert]::ToBase64String($actionBuffer.ToArray()) }
     finally { $actionBuffer.Dispose() }
     $argumentBase64 = ConvertTo-AdminArgumentEnvelope -ArgumentList $ArgumentList
+    $projectionSource = 'function ConvertTo-AdminJsonSafeValue {' + (Get-Item Function:\ConvertTo-AdminJsonSafeValue).Definition + '}' + [Environment]::NewLine +
+        'function ConvertTo-AdminUtcTimestamp {' + (Get-Item Function:\ConvertTo-AdminUtcTimestamp).Definition + '}'
 
     $payload = @"
 `$ErrorActionPreference = 'Stop'
+`$ProgressPreference = 'SilentlyContinue'
+$projectionSource
 `$utf8 = New-Object System.Text.UTF8Encoding(`$false)
 `$actionBuffer = New-Object System.IO.MemoryStream(,([Convert]::FromBase64String('$actionBase64')))
 `$inflater = New-Object System.IO.Compression.DeflateStream(`$actionBuffer, [System.IO.Compression.CompressionMode]::Decompress)
@@ -2777,10 +3016,16 @@ else {
 }
 try {
     `$action = [scriptblock]::Create(`$actionText)
-    `$data = @(& `$action @arguments)
+    `$budget = [pscustomobject]@{ RemainingItems = $MaximumOutputItems; RemainingBytes = $MaximumOutputBytes }
+    `$data = New-Object 'System.Collections.Generic.List[object]'
+    & `$action @arguments *>&1 | ForEach-Object {
+        if (`$_ -is [Management.Automation.ErrorRecord]) { throw `$_ }
+        `$safe = ConvertTo-AdminJsonSafeValue -Value `$_ -Budget `$budget
+        if (`$_ -isnot [Management.Automation.InformationalRecord] -and `$_ -isnot [Management.Automation.InformationRecord]) { `$data.Add(`$safe) | Out-Null }
+    }
     `$envelope = [pscustomobject]@{
         Success = `$true
-        Data = @(`$data)
+        Data = `$data.ToArray()
         ErrorMessage = `$null
     }
     `$exitCode = 0
@@ -2789,7 +3034,7 @@ catch {
     `$envelope = [pscustomobject]@{
         Success = `$false
         Data = @()
-        ErrorMessage = `$_.Exception.Message
+        ErrorMessage = if (`$_.Exception.Message -match 'OutputLimit') { 'OutputLimit: target output exceeded its assigned budget.' } else { ([string]`$_.Exception.Message).Substring(0, [math]::Min(1024, ([string]`$_.Exception.Message).Length)) }
     }
     `$exitCode = 1
 }
@@ -2799,7 +3044,21 @@ catch {
 exit `$exitCode
 "@
 
-    return [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($payload))
+    # Compress the complete bootstrap so the bounded projector does not consume
+    # the Windows command-line limit for native cleanup or other large actions.
+    $buffer = New-Object IO.MemoryStream
+    $compress = New-Object IO.Compression.DeflateStream($buffer, [IO.Compression.CompressionMode]::Compress, $true)
+    $bytes = $utf8.GetBytes($payload)
+    try { $compress.Write($bytes, 0, $bytes.Length) } finally { $compress.Dispose() }
+    try { $bootstrapData = [Convert]::ToBase64String($buffer.ToArray()) } finally { $buffer.Dispose() }
+    $bootstrap = @"
+`$b = New-Object IO.MemoryStream(,([Convert]::FromBase64String('$bootstrapData')))
+`$z = New-Object IO.Compression.DeflateStream(`$b, [IO.Compression.CompressionMode]::Decompress)
+`$r = New-Object IO.StreamReader(`$z, (New-Object Text.UTF8Encoding(`$false)))
+try { `$s = `$r.ReadToEnd() } finally { `$r.Dispose(); `$z.Dispose(); `$b.Dispose() }
+& ([scriptblock]::Create(`$s))
+"@
+    return [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($bootstrap))
 }
 
 function ConvertTo-AdminArgumentEnvelope {
@@ -2922,155 +3181,81 @@ function ConvertTo-AdminFailureEnvelope {
     }
 }
 
+function Invoke-AdminCapturedProcess {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$LiteralPath,
+        [Parameter(Mandatory = $true)][string]$ArgumentText,
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds,
+        [Parameter(Mandatory = $true)][int]$MaximumBytes
+    )
+    Initialize-AdminSafeFileType
+    return [WindowsAdminToolkit.Security.ProcessCapture]::Run($LiteralPath, $ArgumentText, $TimeoutSeconds, $MaximumBytes)
+}
+
 function Invoke-AdminPsExecTarget {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$ComputerName,
-
-        [Parameter(Mandatory = $true)]
-        [string]$PsExecFullPath,
-
-        [Parameter(Mandatory = $true)]
-        [string]$ActionText,
-
-        [Parameter()]
-        [object[]]$ArgumentList = @(),
-
-        [Parameter()]
-        [ValidateRange(1, 10800)]
-        [int]$TimeoutSeconds = 1800,
-
-        [Parameter()]
-        [ValidateRange(1048576, 16777216)]
-        [int]$MaximumOutputBytes = 8388608
+        [Parameter(Mandatory = $true)][string]$ComputerName,
+        [Parameter(Mandatory = $true)][string]$PsExecFullPath,
+        [Parameter(Mandatory = $true)][string]$ActionText,
+        [Parameter()][object[]]$ArgumentList = @(),
+        [Parameter()][ValidateRange(1, 10800)][int]$TimeoutSeconds = 1800,
+        [Parameter()][ValidateRange(1, 8388608)][int]$MaximumOutputBytes = 8388608,
+        [Parameter()][ValidateRange(1, 4096)][int]$MaximumOutputItems = 4096,
+        [Parameter()][AllowNull()][psobject]$OutputBudget
     )
-
     if (-not (Test-AdminHostname -ComputerName $ComputerName)) {
-        return ConvertTo-AdminFailureEnvelope -ComputerName $ComputerName -Transport 'PsExec' -Message 'The target computer name is invalid.' -ErrorCategory Validation
+        return ConvertTo-AdminFailureEnvelope -ComputerName $ComputerName -Transport PsExec -Message 'The target computer name is invalid.' -ErrorCategory Validation
     }
-
-    $encodedPayload = ConvertTo-AdminEncodedPayload -ActionText $ActionText -ArgumentList $ArgumentList
-    $connectionTimeout = [math]::Max(1, [math]::Min(60, $Script:State.ConnectivityTimeoutSeconds))
-    $processArguments = @(
-        "\\$ComputerName",
-        '-accepteula',
-        '-nobanner',
-        '-h',
-        '-n',
-        [string]$connectionTimeout,
-        'powershell.exe',
-        '-NoLogo',
-        '-NoProfile',
-        '-NonInteractive',
-        '-EncodedCommand',
-        $encodedPayload
-    )
-    $argumentString = $processArguments -join ' '
-    if ($argumentString.Length + $PsExecFullPath.Length + 4 -gt 32766) {
-        return ConvertTo-AdminFailureEnvelope -ComputerName $ComputerName -Transport 'PsExec' -Message 'The encoded action exceeds the Windows process command-line limit.' -ErrorCategory Validation
-    }
-    $identifier = [guid]::NewGuid().ToString('N')
-    $outputPath = Join-Path ([System.IO.Path]::GetTempPath()) "admin-psexec-$identifier.out"
-    $errorPath = Join-Path ([System.IO.Path]::GetTempPath()) "admin-psexec-$identifier.err"
-    $process = $null
-    $psExecLease = $null
-    $timedOut = $false
-    $outputExceeded = $false
-
+    $lease = $null
     try {
-        $psExecLease = Open-AdminSafePath -LiteralPath $PsExecFullPath
-        $verifiedPath = Resolve-AdminPsExec -Path $PsExecFullPath
-        if (-not $verifiedPath.Equals($psExecLease.Path, [StringComparison]::OrdinalIgnoreCase)) { throw 'PsExec launch identity changed.' }
-        $process = Start-Process -FilePath $verifiedPath -ArgumentList $argumentString -WindowStyle Hidden -PassThru -RedirectStandardOutput $outputPath -RedirectStandardError $errorPath -ErrorAction Stop
-        $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-
-        while (-not $process.HasExited) {
-            if ((Get-Date) -ge $deadline) {
-                $timedOut = $true
-                break
-            }
-
-            foreach ($path in @($outputPath, $errorPath)) {
-                if (Test-Path -LiteralPath $path) {
-                    $length = (Get-Item -LiteralPath $path -ErrorAction SilentlyContinue).Length
-                    if ($length -gt $MaximumOutputBytes) {
-                        $outputExceeded = $true
-                        break
-                    }
-                }
-            }
-
-            if ($outputExceeded) {
-                break
-            }
-
-            Start-Sleep -Milliseconds 250
-            $process.Refresh()
-        }
-
-        if ($timedOut -or $outputExceeded) {
-            try {
-                $taskKill = Join-Path $env:SystemRoot 'System32\taskkill.exe'
-                & $taskKill '/PID' ([string]$process.Id) '/T' '/F' 2>&1 | Out-Null
-            }
-            catch {
-                try { $process.Kill() } catch { Write-Verbose $_.Exception.Message }
-            }
-        }
-        else {
-            $process.WaitForExit()
-        }
-
-        if ($timedOut) {
-            return ConvertTo-AdminFailureEnvelope -ComputerName $ComputerName -Transport 'PsExec' -Message "Operation timed out after $TimeoutSeconds seconds." -ErrorCategory Timeout
-        }
-        if ($outputExceeded) {
-            return ConvertTo-AdminFailureEnvelope -ComputerName $ComputerName -Transport 'PsExec' -Message "Operation output exceeded the $MaximumOutputBytes byte limit." -ErrorCategory OutputLimit
-        }
-
-        $output = if (Test-Path -LiteralPath $outputPath) { [System.IO.File]::ReadAllText($outputPath) } else { '' }
+        $budget = if ($OutputBudget) { $OutputBudget } else { [pscustomobject]@{ RemainingItems = $MaximumOutputItems; RemainingBytes = $MaximumOutputBytes } }
+        $wireBytes = [int][math]::Min($MaximumOutputBytes, $budget.RemainingBytes)
+        if ($wireBytes -lt 512 -or $budget.RemainingItems -lt 1) { throw 'OutputLimit: retry output budget exhausted.' }
+        # Reserve Base64/envelope framing overhead before the remote action runs.
+        $remoteBytes = [int][math]::Floor(($wireBytes - 256) * 3 / 4)
+        $encodedPayload = ConvertTo-AdminEncodedPayload -ActionText $ActionText -ArgumentList $ArgumentList -MaximumOutputBytes $remoteBytes -MaximumOutputItems ([int][math]::Min($MaximumOutputItems, $budget.RemainingItems))
+        $connectionTimeout = [math]::Max(1, [math]::Min(60, $Script:State.ConnectivityTimeoutSeconds))
+        $arguments = @("\\$ComputerName", '-accepteula', '-nobanner', '-h', '-n', [string]$connectionTimeout, 'powershell.exe', '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', $encodedPayload) -join ' '
+        if ($arguments.Length + $PsExecFullPath.Length + 4 -gt 32766) { throw 'The encoded action exceeds the Windows process command-line limit.' }
+        $lease = Open-AdminSafePath -LiteralPath $PsExecFullPath
+        $verified = Resolve-AdminPsExec -Path $PsExecFullPath
+        if (-not $verified.Equals($lease.Path, [StringComparison]::OrdinalIgnoreCase)) { throw 'PsExec launch identity changed.' }
+        $captured = Invoke-AdminCapturedProcess -LiteralPath $verified -ArgumentText $arguments -TimeoutSeconds $TimeoutSeconds -MaximumBytes $wireBytes
+        if ($captured.TimedOut) { return ConvertTo-AdminFailureEnvelope -ComputerName $ComputerName -Transport PsExec -Message "Operation timed out after $TimeoutSeconds seconds." -ErrorCategory Timeout }
+        if ($captured.OutputExceeded) { throw 'OutputLimit: shared stdout/stderr byte quota exceeded.' }
+        $utf8 = New-Object Text.UTF8Encoding($false, $true)
+        $output = $utf8.GetString($captured.Stdout)
         $resultMatches = [regex]::Matches($output, '(?m)^ADMINRESULT:(?<Data>[A-Za-z0-9+/=]+)\s*$')
-        if ($resultMatches.Count -eq 0) {
-            $errorText = if (Test-Path -LiteralPath $errorPath) { [System.IO.File]::ReadAllText($errorPath) } else { '' }
-            if ($errorText.Length -gt 2048) {
-                $errorText = $errorText.Substring(0, 2048)
-            }
-            if ([string]::IsNullOrWhiteSpace($errorText)) {
-                $errorText = "PsExec exited with code $($process.ExitCode) without a valid result envelope."
-            }
-            return ConvertTo-AdminFailureEnvelope -ComputerName $ComputerName -Transport 'PsExec' -Message $errorText.Trim()
+        if ($resultMatches.Count -ne 1) {
+            $errorText = $utf8.GetString($captured.Stderr)
+            if ($errorText.Length -gt 2048) { $errorText = $errorText.Substring(0, 2048) }
+            if ([string]::IsNullOrWhiteSpace($errorText)) { $errorText = "PsExec exited with code $($captured.ExitCode) without exactly one result envelope." }
+            [void](ConvertTo-AdminJsonSafeValue -Value $errorText -Budget $budget)
+            return ConvertTo-AdminFailureEnvelope -ComputerName $ComputerName -Transport PsExec -Message $errorText
         }
-
-        $encodedResult = $resultMatches[$resultMatches.Count - 1].Groups['Data'].Value
-        $utf8 = New-Object System.Text.UTF8Encoding($false)
-        $json = $utf8.GetString([Convert]::FromBase64String($encodedResult))
-        $remoteEnvelope = ConvertFrom-Json -InputObject $json -ErrorAction Stop
-
+        $json = $utf8.GetString([Convert]::FromBase64String($resultMatches[0].Groups['Data'].Value))
+        # Bound structure before ConvertFrom-Json can allocate a large object graph.
+        [WindowsAdminToolkit.Security.ProcessCapture]::CheckJsonBudget($json, [int]$budget.RemainingItems)
+        $remote = ConvertFrom-Json -InputObject $json -ErrorAction Stop
+        if ($remote.Success -isnot [bool] -or $remote.Data -isnot [array]) { throw 'Invalid PsExec result envelope.' }
+        $data = New-Object 'System.Collections.Generic.List[object]'
+        foreach ($item in $remote.Data) { $data.Add((ConvertTo-AdminJsonSafeValue -Value $item -Budget $budget)) | Out-Null }
+        if (-not $remote.Success) { [void](ConvertTo-AdminJsonSafeValue -Value ([string]$remote.ErrorMessage) -Budget $budget) }
+        $category = if ($remote.Success) { $null } elseif ([string]$remote.ErrorMessage -match 'OutputLimit') { 'OutputLimit' } else { Get-AdminErrorCategory -Message $remote.ErrorMessage }
         return [pscustomobject]@{
-            ComputerName = $ComputerName
-            Transport    = 'PsExec'
-            Attempts     = 1
-            Success      = [bool]$remoteEnvelope.Success
-            Data         = @($remoteEnvelope.Data)
-            ErrorCategory = if ([bool]$remoteEnvelope.Success) { $null } else { Get-AdminErrorCategory -Message $remoteEnvelope.ErrorMessage }
-            ErrorMessage = if ([bool]$remoteEnvelope.Success) { $null } else { ConvertTo-AdminSafeErrorMessage -Message $remoteEnvelope.ErrorMessage }
+            ComputerName = $ComputerName; Transport = 'PsExec'; Attempts = 1
+            Success = [bool]$remote.Success; Data = $data.ToArray()
+            ErrorCategory = $category
+            ErrorMessage = if ($remote.Success) { $null } else { ConvertTo-AdminSafeErrorMessage -Message $remote.ErrorMessage }
         }
     }
     catch {
-        return ConvertTo-AdminFailureEnvelope -ComputerName $ComputerName -Transport 'PsExec' -Message $_.Exception.Message
+        $category = if ($_.Exception.Message -match 'OutputLimit') { 'OutputLimit' } else { Get-AdminErrorCategory -Message $_.Exception.Message }
+        return ConvertTo-AdminFailureEnvelope -ComputerName $ComputerName -Transport PsExec -Message $_.Exception.Message -ErrorCategory $category
     }
-    finally {
-        if ($psExecLease) { $psExecLease.Dispose() }
-        foreach ($path in @($outputPath, $errorPath)) {
-            if (Test-Path -LiteralPath $path) {
-                Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
-            }
-        }
-        if ($process) {
-            $process.Dispose()
-        }
-    }
+    finally { if ($lease) { $lease.Dispose() } }
 }
 
 function Invoke-AdminWinRmTarget {
@@ -3224,7 +3409,7 @@ function Invoke-AdminTargetWithRetry {
             $lastResult = Invoke-AdminWinRmTarget -ComputerName $ComputerName -Credential $Credential -ActionText $ActionText -ArgumentList $ArgumentList -UseSsl $UseSsl -Authentication $Authentication -TimeoutSeconds $TimeoutSeconds -MaximumOutputBytes $attemptProtocolBytes -MaximumOutputItems $MaximumOutputItems -OutputBudget $outputBudget
         }
         else {
-            $lastResult = Invoke-AdminPsExecTarget -ComputerName $ComputerName -PsExecFullPath $PsExecFullPath -ActionText $ActionText -ArgumentList $ArgumentList -TimeoutSeconds $TimeoutSeconds
+            $lastResult = Invoke-AdminPsExecTarget -ComputerName $ComputerName -PsExecFullPath $PsExecFullPath -ActionText $ActionText -ArgumentList $ArgumentList -TimeoutSeconds $TimeoutSeconds -MaximumOutputBytes $attemptProtocolBytes -MaximumOutputItems $MaximumOutputItems -OutputBudget $outputBudget
         }
 
         $lastResult.Attempts = $attempt
@@ -4416,17 +4601,20 @@ function ConvertTo-AdminCanonicalJson {
 }
 
 function Get-AdminSha256Hex {
-    [CmdletBinding()]
+    [CmdletBinding(DefaultParameterSetName = 'Text')]
     param(
-        [Parameter(Mandatory = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'Text')]
         [AllowEmptyString()]
-        [string]$Text
+        [string]$Text,
+        [Parameter(Mandatory = $true, ParameterSetName = 'Bytes')]
+        [byte[]]$Bytes
     )
 
     $sha256 = [System.Security.Cryptography.SHA256]::Create()
     try {
         $encoding = New-Object System.Text.UTF8Encoding($false, $true)
-        $hashBytes = $sha256.ComputeHash($encoding.GetBytes($Text))
+        $inputBytes = if ($PSCmdlet.ParameterSetName -eq 'Bytes') { $Bytes } else { $encoding.GetBytes($Text) }
+        $hashBytes = $sha256.ComputeHash([byte[]]$inputBytes)
         return ([System.BitConverter]::ToString($hashBytes)).Replace('-', '').ToLowerInvariant()
     }
     finally {
@@ -7672,6 +7860,84 @@ function ConvertTo-AdminHashedCheckpoint {
     return $Checkpoint
 }
 
+function Get-AdminCheckpointRegistryRoot {
+    [CmdletBinding()]
+    param()
+    # Resolve the operating system profile, not a caller-controlled environment variable.
+    return Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)) 'WindowsAdminToolkit-CheckpointLedger-v1'
+}
+
+function Open-AdminCheckpointRegistry {
+    [CmdletBinding()]
+    param()
+    Initialize-AdminSafeFileType
+    $root = [IO.Path]::GetFullPath((Get-AdminCheckpointRegistryRoot))
+    $parentLease = [WindowsAdminToolkit.Security.PathLease]::OpenTrusted([IO.Path]::GetDirectoryName($root), $true, $false, $false)
+    try {
+        if (-not [IO.Directory]::Exists($root)) {
+            try { [WindowsAdminToolkit.Security.StorageSecurity]::CreatePrivateDirectory($root) }
+            catch { if (-not [IO.Directory]::Exists($root)) { throw } }
+        }
+        return [WindowsAdminToolkit.Security.PathLease]::OpenTrusted($root, $true, $false, $true)
+    }
+    finally { $parentLease.Dispose() }
+}
+
+function Get-AdminCheckpointLedgerRecord {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$LiteralPath)
+    $lease = [WindowsAdminToolkit.Security.PathLease]::OpenTrusted($LiteralPath, $false, $false, $true)
+    try { $bytes = $lease.ReadBytes(16777216) }
+    finally { $lease.Dispose() }
+    $text = (New-Object Text.UTF8Encoding($false, $true)).GetString($bytes)
+    if (-not $text.EndsWith("`n") -or $text.Length -lt 3) { throw 'The durable checkpoint ledger is incomplete. Reconcile manually before further execution.' }
+    $line = $text.TrimEnd([char]10).Split([char]10)[-1]
+    if ($line.Length -gt 4096) { throw 'The durable checkpoint ledger record exceeds its inspection budget.' }
+    $record = ConvertFrom-Json -InputObject $line -ErrorAction Stop
+    $propertyError = Get-AdminPolicyPropertyError -InputObject $record -AllowedProperties @('checkpointId', 'path', 'planHash', 'revision', 'hash') -RequiredProperties @('checkpointId', 'path', 'planHash', 'revision', 'hash') -Context 'The durable checkpoint record'
+    if ($propertyError) { throw $propertyError }
+    return $record
+}
+
+function Test-AdminCheckpointLedger {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$LiteralPath, [Parameter(Mandatory = $true)][psobject]$Checkpoint)
+    $registry = Open-AdminCheckpointRegistry
+    try {
+        $ledgerPath = Join-Path $registry.Path ($Checkpoint.checkpointId + '.jsonl')
+        if (-not [IO.File]::Exists($ledgerPath)) { throw 'This checkpoint ID has no durable execution ledger for the current Windows identity. Legacy, copied, or foreign checkpoints require manual reconciliation.' }
+        $record = Get-AdminCheckpointLedgerRecord -LiteralPath $ledgerPath
+        if ([string]$record.checkpointId -cne [string]$Checkpoint.checkpointId -or
+            -not ([string]$record.path).Equals([IO.Path]::GetFullPath($LiteralPath), [StringComparison]::OrdinalIgnoreCase) -or
+            [string]$record.planHash -cne [string]$Checkpoint.planHash -or
+            [int]$record.revision -ne [int]$Checkpoint.revision -or
+            [string]$record.hash -cne [string]$Checkpoint.checkpointHash.value) {
+            throw 'The checkpoint path or revision differs from its durable execution ledger. Copies, aliases, and stale snapshots cannot resume.'
+        }
+    }
+    finally { $registry.Dispose() }
+}
+
+function Write-AdminCheckpointLedger {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$LiteralPath, [Parameter(Mandatory = $true)][psobject]$Checkpoint, [Parameter()][switch]$Create)
+    $registry = Open-AdminCheckpointRegistry
+    try {
+        $ledgerPath = Join-Path $registry.Path ($Checkpoint.checkpointId + '.jsonl')
+        if (-not $Create) {
+            $previous = Get-AdminCheckpointLedgerRecord -LiteralPath $ledgerPath
+            if (-not ([string]$previous.path).Equals([IO.Path]::GetFullPath($LiteralPath), [StringComparison]::OrdinalIgnoreCase) -or
+                [string]$previous.planHash -cne [string]$Checkpoint.planHash -or [int]$previous.revision -ne ([int]$Checkpoint.revision - 1)) {
+                throw 'The durable checkpoint ledger cannot move backwards or change its approved path or plan.'
+            }
+        }
+        $record = [ordered]@{ checkpointId = [string]$Checkpoint.checkpointId; path = [IO.Path]::GetFullPath($LiteralPath); planHash = [string]$Checkpoint.planHash; revision = [int]$Checkpoint.revision; hash = [string]$Checkpoint.checkpointHash.value }
+        $bytes = [Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $record -Compress) + "`n")
+        [WindowsAdminToolkit.Security.StorageSecurity]::AppendPrivateFile($ledgerPath, $bytes, [bool]$Create, 16777216)
+    }
+    finally { $registry.Dispose() }
+}
+
 function Write-AdminCheckpoint {
     [CmdletBinding()]
     param(
@@ -7696,6 +7962,9 @@ function Write-AdminCheckpoint {
     if ($bytes.Length -gt $Script:CheckpointMaximumBytes) {
         throw "The checkpoint exceeds the $Script:CheckpointMaximumBytes byte limit."
     }
+    # Flush the private, append-only identity ledger before publishing the claim.
+    # An interrupted append or artifact update refuses subsequent automatic action.
+    [void](Write-AdminCheckpointLedger -LiteralPath $fullPath -Checkpoint $Checkpoint -Create:$Create)
 
     $parent = Split-Path -Parent $fullPath
     if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
@@ -8861,17 +9130,16 @@ function Invoke-AdminPlanExecution {
     if (-not $plan.request.safety.psExecConfirmationRequired -and (Test-AdminParameterBound -Parameters $Parameters -Name 'PsExecConfirmationText')) { throw 'PsExecConfirmationText is not valid for this approved plan.' }
 
     $checkpointLease = Open-AdminCheckpointLease -LiteralPath $resolvedCheckpointPath
+    $checkpointIdentityLease = $null
     $planReferences = $null
     try {
     $planReferences = Open-AdminPlanExternalReferenceLock -Plan $plan
     [void](Test-AdminPlanExecutionContract -Plan $plan -OperationParameter $Parameters -ValidatedPolicyProfile $planReferences.PolicyProfile)
-    $checkpoint = if ($Operation -eq 'Execute') {
-        $newCheckpoint = ConvertTo-AdminInitialCheckpoint -Plan $plan -RunId $RunId
-        Write-AdminCheckpoint -LiteralPath $resolvedCheckpointPath -Checkpoint $newCheckpoint -Create
-    }
-    else {
-        Import-AdminOrchestrationCheckpoint -LiteralPath $resolvedCheckpointPath -Plan $plan
-    }
+    $checkpoint = if ($Operation -eq 'Execute') { ConvertTo-AdminInitialCheckpoint -Plan $plan -RunId $RunId }
+        else { Import-AdminOrchestrationCheckpoint -LiteralPath $resolvedCheckpointPath -Plan $plan }
+    $checkpointIdentityLease = [WindowsAdminToolkit.Security.CheckpointLease]::Open((Get-AdminSha256Hex -Text ('ID:' + [string]$checkpoint.checkpointId)))
+    if ($Operation -eq 'Execute') { [void](Write-AdminCheckpoint -LiteralPath $resolvedCheckpointPath -Checkpoint $checkpoint -Create) }
+    else { [void](Test-AdminCheckpointLedger -LiteralPath $resolvedCheckpointPath -Checkpoint $checkpoint) }
     $checkpoint.lastRunId = $RunId.ToString('D')
     $interruptedTargets = @($checkpoint.targets | Where-Object { [string]$_.state -ceq 'InProgress' })
     if ($Operation -eq 'Resume') {
@@ -8948,6 +9216,7 @@ function Invoke-AdminPlanExecution {
     }
     finally {
         if ($planReferences) { foreach ($lease in $planReferences.Leases) { $lease.Dispose() } }
+        if ($checkpointIdentityLease) { $checkpointIdentityLease.Dispose() }
         $checkpointLease.Dispose()
     }
 }

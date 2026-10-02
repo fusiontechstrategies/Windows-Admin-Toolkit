@@ -25,6 +25,10 @@ The release builder copies an explicit allowlist of source, documentation, schem
   -OutputDirectory 'C:\ReleaseStaging\WindowsAdminToolkit-3.0.1'
 ```
 
+The source tree and destination ancestors must have trusted ownership and must not grant other principals mutation or deletion authority. Use a reviewed source copy in protected build storage when a developer checkout inherits collaborative write access. The builder refuses unsafe existing permissions; it does not rewrite them. It creates staging with a protected DACL, pins source and artifact handles, and verifies copied bytes before signing.
+
+After signing, executable bytes must still match the approved unsigned source exactly. Only an appended Authenticode signature block is permitted, followed by final signature, timestamp, hash, and manifest verification. A successfully signed substitute is still rejected.
+
 An unsigned candidate is useful for reproducibility review, testing, and environments that apply signatures in a separate protected build service. It is not represented as a signed official artifact.
 
 ## Build and Authenticode-sign a candidate
