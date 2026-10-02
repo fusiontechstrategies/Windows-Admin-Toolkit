@@ -3164,7 +3164,7 @@ function Invoke-AdminWinRmTarget {
             try { [void](ConvertTo-AdminJsonSafeValue -Value ([string]$message) -Budget $budget) }
             catch { $message = 'OutputLimit: remote failure evidence exceeded the remaining output budget.' }
         }
-        $category = if ($message -match '(?i:OutputLimit|maximum.*(size|quota)|exceed.*(size|quota))') { 'OutputLimit' } else { Get-AdminErrorCategory -Message $message }
+        $category = if ($message -match '(?i:OutputLimit|maximum.*(size|quota)|exceed.*(size|quota|allowed maximum))') { 'OutputLimit' } else { Get-AdminErrorCategory -Message $message }
         return ConvertTo-AdminFailureEnvelope -ComputerName $ComputerName -Transport 'WinRM' -Message $message -ErrorCategory $category
     }
 }
@@ -3216,9 +3216,10 @@ function Invoke-AdminTargetWithRetry {
     $outputBudget = [pscustomobject]@{ RemainingItems = $MaximumOutputItems; RemainingBytes = $MaximumOutputBytes }
     # Reserve disjoint wire quotas for every possible retry epoch, including
     # discarded progress/control records that projection cannot measure.
-    $attemptProtocolBytes = [int][math]::Max(1, [math]::Floor($MaximumOutputBytes / ($RetryCount + 1)))
+    $maximumAttempts = [int][math]::Min($RetryCount + 1, $MaximumOutputBytes)
+    $attemptProtocolBytes = [int][math]::Floor($MaximumOutputBytes / $maximumAttempts)
     $lastResult = $null
-    for ($attempt = 1; $attempt -le ($RetryCount + 1); $attempt++) {
+    for ($attempt = 1; $attempt -le $maximumAttempts; $attempt++) {
         if ($Transport -eq 'WinRM') {
             $lastResult = Invoke-AdminWinRmTarget -ComputerName $ComputerName -Credential $Credential -ActionText $ActionText -ArgumentList $ArgumentList -UseSsl $UseSsl -Authentication $Authentication -TimeoutSeconds $TimeoutSeconds -MaximumOutputBytes $attemptProtocolBytes -MaximumOutputItems $MaximumOutputItems -OutputBudget $outputBudget
         }
