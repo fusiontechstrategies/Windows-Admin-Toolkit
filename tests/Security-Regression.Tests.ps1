@@ -1,4 +1,4 @@
-﻿# Dependency-free security regressions. The main harness supplies assertions.
+# Dependency-free security regressions. The main harness supplies assertions.
 # All filesystem effects are limited to this unique synthetic fixture directory.
 
 $securityRoot = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) ('wat-security-' + [guid]::NewGuid().ToString('N'))))
@@ -84,9 +84,8 @@ try {
     try {
         Test-ToolkitThrow -Action { [IO.File]::WriteAllText($kbPolicyPath, '{}') } -Name 'Approved orchestration policy remains locked throughout consumption'
         function Import-AdminPolicyProfile { throw 'Validated profile was reopened through a path.' }
-        $snapshotRuntimeParameters = ConvertTo-AdminPlanExecutionParameter -Plan $snapshotPlan -OperationParameter @{} -ValidatedPolicyProfile $snapshotReferences.PolicyProfile
-        $snapshotResolution = Resolve-AdminAutomationRequest -Parameters $snapshotRuntimeParameters
-        Test-ToolkitAssertion -Condition ($snapshotResolution.Success -and [object]::ReferenceEquals($Script:State.PolicyProfile, $snapshotReferences.PolicyProfile)) -Name 'Orchestration resolution uses the exact validated policy object without reopening'
+        $snapshotContractValid = Test-AdminPlanExecutionContract -Plan $snapshotPlan -OperationParameter @{} -ValidatedPolicyProfile $snapshotReferences.PolicyProfile
+        Test-ToolkitAssertion -Condition ($snapshotContractValid -and [object]::ReferenceEquals($Script:State.PolicyProfile, $snapshotReferences.PolicyProfile)) -Name 'Verified plan contract uses the exact retained policy object without reopening'
     }
     finally {
         Set-Item Function:\Import-AdminPolicyProfile -Value $originalPolicyImporter
@@ -117,6 +116,8 @@ try {
         Set-Item Function:\Write-AdminAuditExecutionStarted -Value $originalAuditStart
     }
 
+    $originalOfflineInvokeCommand = (Get-Item Function:\Invoke-Command).ScriptBlock
+    $originalOfflineDetailed = (Get-Item Function:\Invoke-AdminTargetDetailed).ScriptBlock
     # Stream a synthetic remote producer through the real WinRM collection path.
     # No WinRM connection or remote administrative action is made.
     try {
@@ -180,6 +181,7 @@ try {
 
         $Script:RemoteRecordLimit = 1
         $Script:WorkerReservations = New-Object 'System.Collections.Generic.List[object]'
+        Set-Item Function:\Invoke-AdminTargetDetailed -Value $Script:OfflineOriginalTargetDetailed
         Set-Item Function:\Start-Job -Value {
             [CmdletBinding()]
             param($Name, $ScriptBlock, $ArgumentList)
@@ -228,7 +230,8 @@ try {
         }
     }
     finally {
-        Remove-Item Function:\Invoke-Command -ErrorAction SilentlyContinue
+        Set-Item Function:\Invoke-Command -Value $originalOfflineInvokeCommand
+        Set-Item Function:\Invoke-AdminTargetDetailed -Value $originalOfflineDetailed
         Remove-Item Function:\New-PSSessionOption -ErrorAction SilentlyContinue
     }
     Test-ToolkitThrow -Action { ConvertTo-AdminJsonSafeValue -Value @{ nested = @(1..1000) } -Budget ([pscustomobject]@{ RemainingItems = 20; RemainingBytes = 10000 }) | Out-Null } -Name 'Nested remote enumerable shares the projection item budget'

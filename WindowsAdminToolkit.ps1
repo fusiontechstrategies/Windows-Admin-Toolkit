@@ -456,6 +456,20 @@ $Script:ToolkitPath = $PSCommandPath
 $Script:ToolkitLoadedSource = $MyInvocation.MyCommand.ScriptBlock.Ast.Extent.Text
 $Script:MutableSinks = New-Object 'System.Collections.Generic.List[object]'
 $Script:CheckpointFiles = @{}
+$Script:PublicAutomationParameters = @{}
+foreach ($publicParameter in $MyInvocation.MyCommand.Parameters.Values) {
+    $canonicalName = if ($publicParameter.Name -ceq 'WinRmIdentity') { 'Credential' } else { $publicParameter.Name }
+    $Script:PublicAutomationParameters[$canonicalName] = $publicParameter
+}
+$declaredParameterNames = @($MyInvocation.MyCommand.ScriptBlock.Ast.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
+$Script:NonAuthorizingCommonParameterNames = @($MyInvocation.MyCommand.Parameters.Keys | Where-Object {
+    $_ -notin $declaredParameterNames -and $_ -notin @('WhatIf', 'Confirm')
+})
+# Owned maps contain canonical typed scalars and expose no mutable dictionary.
+$Script:OwnedParameterMaps = New-Object 'System.Runtime.CompilerServices.ConditionalWeakTable[object,object]'
+# Internal orchestration state is keyed by object identity, never public map keys.
+# This protects an embedding application's input map, not arbitrary PowerShell code.
+$Script:InternalPlanContexts = New-Object 'System.Runtime.CompilerServices.ConditionalWeakTable[object,object]'
 $Script:InvocationParameters = @{}
 foreach ($boundName in $PSBoundParameters.Keys) {
     $canonicalBoundName = if ($boundName -eq 'WinRmIdentity') { 'Credential' } else { $boundName }
@@ -1398,20 +1412,96 @@ namespace WindowsAdminToolkit.Security {
         }
     }
     public sealed class CheckpointLease : IDisposable {
+        [StructLayout(LayoutKind.Sequential)] struct SecurityAttributes { public int Length; public IntPtr Descriptor; public int Inherit; }
+        [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr CreateBoundaryDescriptor(string name, uint flags);
+        [DllImport("kernel32.dll", SetLastError=true)] static extern bool AddSIDToBoundaryDescriptor(ref IntPtr boundary, IntPtr sid);
+        [DllImport("kernel32.dll")] static extern void DeleteBoundaryDescriptor(IntPtr boundary);
+        [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr CreatePrivateNamespace(ref SecurityAttributes attributes, IntPtr boundary, string alias);
+        [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr OpenPrivateNamespace(IntPtr boundary, string alias);
+        [DllImport("kernel32.dll", SetLastError=true)] [return: MarshalAs(UnmanagedType.U1)] static extern bool ClosePrivateNamespace(IntPtr handle, uint flags);
+        [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr CreateMutex(ref SecurityAttributes attributes, bool initialOwner, string name);
+        [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool ConvertStringSecurityDescriptorToSecurityDescriptor(string text, uint revision, out IntPtr descriptor, out uint size);
+        [DllImport("advapi32.dll", SetLastError=true)] static extern uint GetSecurityInfo(IntPtr handle, int type, uint information, out IntPtr owner, IntPtr group, out IntPtr dacl, IntPtr sacl, out IntPtr descriptor);
+        [DllImport("advapi32.dll")] static extern uint GetSecurityDescriptorLength(IntPtr descriptor);
+        [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
         static readonly HashSet<string> active = new HashSet<string>(StringComparer.Ordinal);
+        static IntPtr namespaceHandle; static string namespaceSid;
+        const string namespaceAlias = "WindowsAdminToolkitCheckpointPrivate";
         readonly System.Threading.Mutex mutex; readonly string key; bool disposed;
         CheckpointLease(System.Threading.Mutex mutex, string key) { this.mutex = mutex; this.key = key; }
+        static IntPtr Descriptor(string sid) {
+            IntPtr descriptor; uint size;
+            if (!ConvertStringSecurityDescriptorToSecurityDescriptor("O:" + sid + "G:" + sid + "D:P(A;;GA;;;" + sid + ")(A;;GA;;;SY)(A;;GA;;;BA)", 1, out descriptor, out size)) throw new Win32Exception(Marshal.GetLastWin32Error());
+            return descriptor;
+        }
+        static void EnsureNamespace(string sid) {
+            lock (active) {
+                if (namespaceHandle != IntPtr.Zero) { if (namespaceSid != sid) throw new IOException("Checkpoint lease identity changed within this process."); return; }
+                IntPtr boundary = IntPtr.Zero, sidPointer = IntPtr.Zero, descriptor = IntPtr.Zero;
+                try {
+                    boundary = CreateBoundaryDescriptor("WindowsAdminToolkitCheckpointBoundary", 0);
+                    if (boundary == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+                    System.Security.Principal.SecurityIdentifier identity = new System.Security.Principal.SecurityIdentifier(sid);
+                    byte[] identityBytes = new byte[identity.BinaryLength]; identity.GetBinaryForm(identityBytes, 0); sidPointer = Marshal.AllocHGlobal(identityBytes.Length); Marshal.Copy(identityBytes, 0, sidPointer, identityBytes.Length);
+                    if (!AddSIDToBoundaryDescriptor(ref boundary, sidPointer)) throw new Win32Exception(Marshal.GetLastWin32Error());
+                    descriptor = Descriptor(sid);
+                    SecurityAttributes attributes = new SecurityAttributes(); attributes.Length = Marshal.SizeOf(typeof(SecurityAttributes)); attributes.Descriptor = descriptor;
+                    IntPtr created = CreatePrivateNamespace(ref attributes, boundary, namespaceAlias);
+                    if (created == IntPtr.Zero) {
+                        int error = Marshal.GetLastWin32Error();
+                        if (error != 183) throw new Win32Exception(error, "Cannot establish protected checkpoint namespace.");
+                        created = OpenPrivateNamespace(boundary, namespaceAlias);
+                        if (created == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error(), "Cannot open protected checkpoint namespace.");
+                    }
+                    try { ValidateMutex(created, sid); }
+                    catch { ClosePrivateNamespace(created, 0); throw; }
+                    namespaceSid = sid; namespaceHandle = created;
+                    AppDomain.CurrentDomain.ProcessExit += delegate { if (namespaceHandle != IntPtr.Zero) { ClosePrivateNamespace(namespaceHandle, 0); namespaceHandle = IntPtr.Zero; } };
+                } finally { if (descriptor != IntPtr.Zero) LocalFree(descriptor); if (sidPointer != IntPtr.Zero) Marshal.FreeHGlobal(sidPointer); if (boundary != IntPtr.Zero) DeleteBoundaryDescriptor(boundary); }
+            }
+        }
+        public static void ValidateMutexDescriptor(byte[] bytes, string sid) {
+            System.Security.AccessControl.RawSecurityDescriptor descriptor = new System.Security.AccessControl.RawSecurityDescriptor(bytes, 0);
+            if (descriptor.Owner == null || descriptor.Owner.Value != sid || descriptor.DiscretionaryAcl == null || (descriptor.ControlFlags & System.Security.AccessControl.ControlFlags.DiscretionaryAclProtected) == 0)
+                throw new IOException("Checkpoint mutex has an unexpected owner or DACL.");
+            if (descriptor.DiscretionaryAcl.Count > 32) throw new IOException("Checkpoint mutex ACL exceeds its inspection budget.");
+            foreach (System.Security.AccessControl.GenericAce ace in descriptor.DiscretionaryAcl) {
+                if ((ace.AceFlags & System.Security.AccessControl.AceFlags.InheritOnly) != 0) continue;
+                System.Security.AccessControl.CommonAce common = ace as System.Security.AccessControl.CommonAce;
+                if (common == null || common.IsCallback) throw new IOException("Unsupported checkpoint mutex ACE.");
+                if (common.AceQualifier == System.Security.AccessControl.AceQualifier.AccessDenied) continue;
+                if (common.AceQualifier != System.Security.AccessControl.AceQualifier.AccessAllowed) throw new IOException("Unsupported checkpoint mutex ACE.");
+                string principal = common.SecurityIdentifier.Value;
+                if (common.AccessMask != 0 && principal != sid && principal != "S-1-5-18" && principal != "S-1-5-32-544")
+                    throw new IOException("Checkpoint mutex grants another principal access.");
+            }
+        }
+        static void ValidateMutex(IntPtr handle, string sid) {
+            IntPtr owner, dacl, descriptor;
+            uint error = GetSecurityInfo(handle, 6, 5, out owner, IntPtr.Zero, out dacl, IntPtr.Zero, out descriptor);
+            if (error != 0) throw new Win32Exception((int)error);
+            try { uint length = GetSecurityDescriptorLength(descriptor); byte[] bytes = new byte[length]; Marshal.Copy(descriptor, bytes, 0, bytes.Length); ValidateMutexDescriptor(bytes, sid); }
+            finally { LocalFree(descriptor); }
+        }
         public static CheckpointLease Open(string key) {
+            if (!System.Text.RegularExpressions.Regex.IsMatch(key ?? "", @"\A[0-9a-f]{64}\z")) throw new IOException("Checkpoint lease key is invalid.");
+            string sid = StorageSecurity.CurrentSid; EnsureNamespace(sid);
             lock (active) { if (!active.Add(key)) throw new IOException("The checkpoint is already leased in this process."); }
-            System.Threading.Mutex mutex = null;
+            System.Threading.Mutex mutex = null; IntPtr descriptor = IntPtr.Zero;
             try {
-                mutex = new System.Threading.Mutex(false, "Global\\WindowsAdminToolkit-Checkpoint-" + key);
+                descriptor = Descriptor(sid); SecurityAttributes attributes = new SecurityAttributes(); attributes.Length = Marshal.SizeOf(typeof(SecurityAttributes)); attributes.Descriptor = descriptor;
+                IntPtr handle = CreateMutex(ref attributes, false, namespaceAlias + "\\Checkpoint-" + key);
+                if (handle == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error(), "Cannot open protected checkpoint mutex.");
+                mutex = new System.Threading.Mutex(false);
+                mutex.SafeWaitHandle = new Microsoft.Win32.SafeHandles.SafeWaitHandle(handle, true);
+                ValidateMutex(handle, sid);
                 bool acquired;
                 try { acquired = mutex.WaitOne(0); }
                 catch (System.Threading.AbandonedMutexException) { acquired = true; }
                 if (!acquired) throw new IOException("The checkpoint is already leased by another execution.");
                 return new CheckpointLease(mutex, key);
             } catch { if (mutex != null) mutex.Dispose(); lock (active) { active.Remove(key); } throw; }
+            finally { if (descriptor != IntPtr.Zero) LocalFree(descriptor); }
         }
         public void Dispose() {
             if (disposed) return; disposed = true;
@@ -4775,7 +4865,7 @@ function Test-AdminParameterBound {
         [string]$Name
     )
 
-    return $Parameters.Contains($Name)
+    return $Name -in $Parameters.Keys
 }
 
 function Get-AdminRequestedTargetSummary {
@@ -6128,10 +6218,22 @@ function Test-AdminJsonHasDuplicateProperty {
         [string]$JsonText
     )
 
+    if ($JsonText.Length -gt 4194304) { throw 'JSON pre-scan exceeds the input budget.' }
+    $tokenCount = 0; $containerCount = 0; $propertyCount = 0
     $frames = New-Object 'System.Collections.Generic.List[object]'
     $index = 0
     while ($index -lt $JsonText.Length) {
         $character = $JsonText[$index]
+        if ($character -in @('{', '[', '}', ']', ':', ',', '"')) {
+            $tokenCount++
+            if ($tokenCount -gt 32768) { throw 'JSON pre-scan exceeds the token budget.' }
+        }
+        if ($character -eq '{' -or $character -eq '[') {
+            # Check before allocating a frame or key set, including malformed JSON.
+            if ($frames.Count -ge 64) { throw 'JSON pre-scan exceeds the depth budget.' }
+            $containerCount++
+            if ($containerCount -gt 8192) { throw 'JSON pre-scan exceeds the container budget.' }
+        }
         if ($character -eq '{') {
             $frames.Add([pscustomobject]@{
                     Type = 'Object'
@@ -6185,6 +6287,8 @@ function Test-AdminJsonHasDuplicateProperty {
         if ($nextIndex -lt $JsonText.Length -and $JsonText[$nextIndex] -eq ':' -and $frames.Count -gt 0) {
             $frame = $frames[$frames.Count - 1]
             if ($frame.Type -eq 'Object') {
+                $propertyCount++
+                if ($propertyCount -gt 8192) { throw 'JSON pre-scan exceeds the property budget.' }
                 try {
                     $jsonString = $JsonText.Substring($stringStart, $stringEnd - $stringStart + 1)
                     $propertyName = [string](ConvertFrom-Json -InputObject $jsonString -ErrorAction Stop)
@@ -6785,9 +6889,9 @@ function Resolve-AdminPolicyRequest {
         $decision = ConvertTo-AdminPolicyDecision @decisionParameters -Decision Denied -ReasonCode ActionNotAllowed -Reason 'The requested action is not present in the policy allow list.'
         return ConvertTo-AdminPolicyResolution -Allowed $false -PolicyDecision $decision -ExecutionSettings $executionSettings
     }
-    $executionContextDecision = Get-AdminPolicyExecutionContextDecision -PolicyProfile $PolicyProfile -TargetMode $TargetMode -Transport $Transport
-    if ($executionContextDecision.decision -eq 'Denied') {
-        return ConvertTo-AdminPolicyResolution -Allowed $false -PolicyDecision $executionContextDecision -ExecutionSettings $executionSettings
+    $planExecutionContextDecision = Get-AdminPolicyExecutionContextDecision -PolicyProfile $PolicyProfile -TargetMode $TargetMode -Transport $Transport
+    if ($planExecutionContextDecision.decision -eq 'Denied') {
+        return ConvertTo-AdminPolicyResolution -Allowed $false -PolicyDecision $planExecutionContextDecision -ExecutionSettings $executionSettings
     }
 
     if ($TargetMode -eq 'Remote') {
@@ -6934,9 +7038,9 @@ function Resolve-AdminPolicyContext {
         SchemaVersion = $PolicyProfile.SchemaVersion
         ProfileName   = $PolicyProfile.ProfileName
     }
-    $executionContextDecision = Get-AdminPolicyExecutionContextDecision -PolicyProfile $PolicyProfile -TargetMode $TargetMode -Transport $Transport
-    if ($executionContextDecision.decision -eq 'Denied') {
-        return ConvertTo-AdminPolicyResolution -Allowed $false -PolicyDecision $executionContextDecision -ExecutionSettings $executionSettings
+    $planExecutionContextDecision = Get-AdminPolicyExecutionContextDecision -PolicyProfile $PolicyProfile -TargetMode $TargetMode -Transport $Transport
+    if ($planExecutionContextDecision.decision -eq 'Denied') {
+        return ConvertTo-AdminPolicyResolution -Allowed $false -PolicyDecision $planExecutionContextDecision -ExecutionSettings $executionSettings
     }
     if ($TargetMode -eq 'Remote') {
         foreach ($computer in $Computers) {
@@ -7025,6 +7129,79 @@ function ConvertTo-AdminActionInputMap {
     return $inputs
 }
 
+function ConvertTo-AdminOwnedParameterMap {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][System.Collections.IDictionary]$Parameters)
+    $ownedMarker = $null
+    if ($Script:OwnedParameterMaps.TryGetValue($Parameters, [ref]$ownedMarker)) { return ,$Parameters }
+    $copy = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::OrdinalIgnoreCase)
+    $enumerator = $Parameters.GetEnumerator()
+    $entryCount = 0
+    try {
+        while ($enumerator.MoveNext()) {
+            $entryCount++
+            if ($entryCount -gt $Script:PublicAutomationParameters.Count) { throw 'The automation parameter map exceeds its entry budget.' }
+            # Read one enumerator entry once. Never reread an external indexer.
+            $entry = $enumerator.Current
+            $key = $entry.Key
+            if ($key -isnot [string] -or -not $Script:PublicAutomationParameters.ContainsKey($key)) {
+                throw 'The automation parameter map contains an unsupported or reserved key.'
+            }
+            $metadata = $Script:PublicAutomationParameters[$key]
+            $canonicalName = if ($metadata.Name -ceq 'WinRmIdentity') { 'Credential' } else { $metadata.Name }
+            if ($copy.ContainsKey($canonicalName)) { throw 'The automation parameter map contains ambiguous duplicate names.' }
+            $value = $entry.Value
+            if ($canonicalName -ceq 'Credential') {
+                if ($null -ne $value -and $value -isnot [Management.Automation.PSCredential]) { throw 'Credential must be a PSCredential object.' }
+                $typedValue = $value
+            }
+            else {
+                if ($metadata.ParameterType.IsArray) {
+                    $maximumItems = if ($canonicalName -ceq 'IncludeKB') { 100 } else { 20 }
+                    $arrayBudgetMessage = if ($canonicalName -ceq 'IncludeKB') { 'IncludeKB accepts at most 100 KB identifiers.' } else { 'EventLevel input exceeds the supported size limit.' }
+                    if ($value -is [Collections.ICollection] -and $value.Count -gt $maximumItems) { throw $arrayBudgetMessage }
+                }
+                $typedValue = [Management.Automation.LanguagePrimitives]::ConvertTo($value, $metadata.ParameterType, [Globalization.CultureInfo]::InvariantCulture)
+                if ($typedValue -is [string] -and $typedValue.Length -gt 4194304) { throw 'The automation parameter value exceeds its character budget.' }
+                if ($metadata.ParameterType.IsArray) {
+                    if ($typedValue.Length -gt $maximumItems) { throw $arrayBudgetMessage }
+                    # Clone before wrapping: the caller cannot mutate retained array items.
+                    $typedValue = [Array]::AsReadOnly([string[]]$typedValue.Clone())
+                }
+            }
+            $copy.Add($canonicalName, $typedValue)
+        }
+    }
+    finally { if ($enumerator -is [IDisposable]) { $enumerator.Dispose() } }
+    $snapshot = New-Object 'System.Collections.ObjectModel.ReadOnlyDictionary[string,object]' ($copy)
+    $Script:OwnedParameterMaps.Add($snapshot, [pscustomobject]@{ Owned = $true })
+    return ,$snapshot
+}
+
+function ConvertTo-AdminExecutionParameterMap {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][System.Collections.IDictionary]$Parameters,
+        [Parameter()][bool]$Preview = $false
+    )
+    $snapshot = ConvertTo-AdminOwnedParameterMap -Parameters $Parameters
+    $planExecutionContext = $null
+    $hasContext = $Script:InternalPlanContexts.TryGetValue($snapshot, [ref]$planExecutionContext)
+    if ($hasContext -and $planExecutionContext.Purpose -cne 'ApprovedExecution') {
+        throw 'A plan validation context cannot execute an automation action.'
+    }
+    $mapPreview = (Test-AdminParameterBound -Parameters $snapshot -Name 'WhatIf') -and [bool]$snapshot['WhatIf']
+    if ($Preview -and -not $mapPreview) {
+        # Preview may only reduce authority. Never rewrite verified plan safety.
+        if ($hasContext) { throw 'The invocation preview differs from the approved plan safety.' }
+        $previewCopy = @{}
+        foreach ($key in $snapshot.Keys) { $previewCopy[$key] = $snapshot[$key] }
+        $previewCopy['WhatIf'] = $true
+        return ,(ConvertTo-AdminOwnedParameterMap -Parameters $previewCopy)
+    }
+    return ,$snapshot
+}
+
 function Resolve-AdminAutomationRequest {
     [CmdletBinding()]
     param(
@@ -7032,6 +7209,10 @@ function Resolve-AdminAutomationRequest {
         [System.Collections.IDictionary]$Parameters
     )
 
+    try { $Parameters = ConvertTo-AdminOwnedParameterMap -Parameters $Parameters }
+    catch { return Get-AdminAutomationResolutionFailure -Category Validation -Message $_.Exception.Message }
+    $internalPlanContext = $null
+    [void]$Script:InternalPlanContexts.TryGetValue($Parameters, [ref]$internalPlanContext)
     $Script:State.PolicyProfile = $null
     if (Test-AdminParameterBound -Parameters $Parameters -Name 'PolicyPath') {
         $requestedPolicyPath = ([string]$Parameters['PolicyPath']).Trim()
@@ -7040,7 +7221,16 @@ function Resolve-AdminAutomationRequest {
             return Get-AdminAutomationResolutionFailure -Category Validation -Message 'PolicyPath cannot be empty when supplied.' -PolicyDecision $invalidPolicyDecision
         }
         try {
-            $Script:State.PolicyProfile = if ($Parameters.Contains('_ValidatedPolicyProfile')) { $Parameters['_ValidatedPolicyProfile'] } else { Import-AdminPolicyProfile -LiteralPath $requestedPolicyPath }
+            if ($null -ne $internalPlanContext -and $null -ne $internalPlanContext.PolicyProfile) {
+                $retainedPolicySnapshot = $internalPlanContext.PolicyProfile
+                if ($internalPlanContext.Purpose -cnotin @('PlanContract', 'ApprovedExecution') -or $internalPlanContext.ValidationOnly -or
+                    [string]$internalPlanContext.PlanHash -cnotmatch '^[0-9a-f]{64}$' -or
+                    -not $requestedPolicyPath.Equals([string]$internalPlanContext.PolicyPath, [StringComparison]::OrdinalIgnoreCase) -or
+                    -not ([string]$retainedPolicySnapshot.SourcePath).Equals($requestedPolicyPath, [StringComparison]::OrdinalIgnoreCase) -or
+                    [string]$retainedPolicySnapshot.SourceSha256 -cne [string]$internalPlanContext.PolicySha256) { throw 'The retained policy snapshot is not bound to this verified plan reference.' }
+                $Script:State.PolicyProfile = $retainedPolicySnapshot
+            }
+            else { $Script:State.PolicyProfile = Import-AdminPolicyProfile -LiteralPath $requestedPolicyPath }
         }
         catch {
             $invalidPolicyDecision = ConvertTo-AdminPolicyDecision -Applied $true -Decision Invalid -ReasonCode PolicyInvalid -Reason 'The supplied policy profile could not be loaded or validated.'
@@ -7053,7 +7243,7 @@ function Resolve-AdminAutomationRequest {
     }
     $preflightRequested = (Test-AdminParameterBound -Parameters $Parameters -Name 'Preflight') -and [bool]$Parameters['Preflight']
     $whatIfRequested = (Test-AdminParameterBound -Parameters $Parameters -Name 'WhatIf') -and [bool]$Parameters['WhatIf']
-    $planValidation = (Test-AdminParameterBound -Parameters $Parameters -Name '_PlanValidation') -and [bool]$Parameters['_PlanValidation']
+    $planValidation = ($null -ne $internalPlanContext) -and [bool]$internalPlanContext.ValidationOnly
     if ($preflightRequested -and $whatIfRequested) {
         return Get-AdminAutomationResolutionFailure -Category Validation -Message 'Preflight cannot be combined with WhatIf.'
     }
@@ -7092,7 +7282,7 @@ function Resolve-AdminAutomationRequest {
     $localSelected = (Test-AdminParameterBound -Parameters $Parameters -Name 'Local') -and [bool]$Parameters['Local']
     $singleTarget = if (Test-AdminParameterBound -Parameters $Parameters -Name 'ComputerName') { ([string]$Parameters['ComputerName']).Trim() } else { '' }
     $listPath = if (Test-AdminParameterBound -Parameters $Parameters -Name 'ComputerListPath') { ([string]$Parameters['ComputerListPath']).Trim() } else { '' }
-    $planComputersSelected = Test-AdminParameterBound -Parameters $Parameters -Name '_PlanComputers'
+    $planComputersSelected = ($null -ne $internalPlanContext) -and ($null -ne $internalPlanContext.Computers)
     $selectorCount = 0
     if ($localSelected) { $selectorCount++ }
     if (-not [string]::IsNullOrWhiteSpace($singleTarget)) { $selectorCount++ }
@@ -7140,10 +7330,10 @@ function Resolve-AdminAutomationRequest {
         $computers = @($singleTarget)
     }
     elseif ($planComputersSelected) {
-        if ($Parameters['_PlanComputers'] -isnot [System.Array]) {
+        if ($internalPlanContext.Computers -isnot [System.Array]) {
             return Get-AdminAutomationResolutionFailure -Category Validation -Message 'The approved plan target collection is invalid.'
         }
-        $planComputerValues = @($Parameters['_PlanComputers'])
+        $planComputerValues = @($internalPlanContext.Computers)
         if ($planComputerValues.Count -lt 1 -or $planComputerValues.Count -gt 500) {
             return Get-AdminAutomationResolutionFailure -Category Validation -Message 'The approved plan must contain from 1 through 500 targets.'
         }
@@ -7471,6 +7661,8 @@ function Resolve-AdminAutomationRequest {
         Computers           = @($computers)
         Inputs              = $normalizedInputs
         Preflight           = $preflightRequested
+        WhatIf              = $whatIfRequested
+        ValidationOnly      = $planValidation
         PolicyProfile       = $Script:State.PolicyProfile
         PolicyDecision      = $policyResolution.PolicyDecision
         ExecutionSettings   = $policyResolution.ExecutionSettings
@@ -7546,6 +7738,8 @@ function Invoke-AdminAutomationCore {
         [Parameter(Mandatory = $true)]
         [datetime]$StartedAtUtc
     )
+    $Parameters = ConvertTo-AdminExecutionParameterMap -Parameters $Parameters -Preview ([bool]$WhatIfPreference)
+
 
     $requestedActionId = if (Test-AdminParameterBound -Parameters $Parameters -Name 'Action') { Get-AdminSafeActionId -ActionId ([string]$Parameters['Action']) } else { $null }
     $reportPaths = if ($ResolvedOutputPath -ceq '-') { @() } else { @($ResolvedOutputPath) }
@@ -7654,7 +7848,7 @@ function Invoke-AdminAutomationCore {
 
     $request = $resolution.Request
     try {
-        $trustPreview = (Test-AdminParameterBound -Parameters $Parameters -Name 'WhatIf') -and [bool]$Parameters['WhatIf']
+        $trustPreview = [bool]$request.WhatIf
         if (-not $trustPreview) { Assert-AdminPrivilegedSourceTrust }
     }
     catch {
@@ -7674,7 +7868,7 @@ function Invoke-AdminAutomationCore {
         return ConvertTo-AdminAutomationEnvelope -RunId $runId -StartedAtUtc $startedAtUtc -FinishedAtUtc $finishedAtUtc -ActionId $request.ActionId -ActionName $request.ActionName -ReadOnly $request.ReadOnly -Preflight $request.Preflight -PolicyDecision $request.PolicyDecision -TargetMode $request.TargetMode -Transport $transportName -Authentication $transportAuthentication -UseSsl $transportUseSsl -Status ValidationFailed -Outcome ValidationFailure -ExitCode $Script:AutomationExitCodes.ValidationFailure -RequestedTargetCount $request.Computers.Count -Errors @([pscustomobject]@{ Category = 'Validation'; Message = "Unable to initialize the log: $($_.Exception.Message)" }) -ReportPaths $reportPaths
     }
 
-    $whatIfRequested = (Test-AdminParameterBound -Parameters $Parameters -Name 'WhatIf') -and [bool]$Parameters['WhatIf']
+    $whatIfRequested = [bool]$request.WhatIf
     if ($whatIfRequested) {
         $previewResults = New-Object 'System.Collections.Generic.List[object]'
         for ($index = 0; $index -lt $request.Computers.Count; $index++) {
@@ -7835,6 +8029,8 @@ function Invoke-AdminAutomation {
         [ValidateNotNullOrEmpty()]
         [string]$ResolvedOutputPath
     )
+
+    $Parameters = ConvertTo-AdminExecutionParameterMap -Parameters $Parameters -Preview ([bool]$WhatIfPreference)
 
     $startedAtUtc = [datetime]::UtcNow
     $runId = [guid]::NewGuid()
@@ -8936,6 +9132,7 @@ function Invoke-AdminPlanCreate {
         [Parameter(Mandatory = $true)]
         [string]$ResolvedOutputPath
     )
+    $Parameters = ConvertTo-AdminOwnedParameterMap -Parameters $Parameters
 
     $planPath = if (Test-AdminParameterBound -Parameters $Parameters -Name 'PlanPath') { ([string]$Parameters['PlanPath']).Trim() } else { '' }
     if ([string]::IsNullOrWhiteSpace($planPath)) { throw 'PlanOperation Create requires -PlanPath.' }
@@ -8958,8 +9155,10 @@ function Invoke-AdminPlanCreate {
             $validationParameters[[string]$parameterName] = $Parameters[$parameterName]
         }
     }
-    $validationParameters['_PlanValidation'] = $true
-    $resolution = Resolve-AdminAutomationRequest -Parameters $validationParameters
+    $validationParameters = ConvertTo-AdminOwnedParameterMap -Parameters $validationParameters
+    $Script:InternalPlanContexts.Add($validationParameters, [pscustomobject]@{ Purpose = 'PlanPreview'; ValidationOnly = $true; Computers = $null; PolicyProfile = $null })
+    try { $resolution = Resolve-AdminAutomationRequest -Parameters $validationParameters }
+    finally { [void]$Script:InternalPlanContexts.Remove($validationParameters) }
     if (-not $resolution.Success) {
         $finishedAtUtc = [datetime]::UtcNow
         $outcome = if ($resolution.Category -eq 'Authorization') { 'AuthorizationFailure' } else { 'ValidationFailure' }
@@ -8989,8 +9188,9 @@ function Invoke-AdminPlanApprove {
         [Parameter(Mandatory = $true)]
         [string]$ResolvedOutputPath
     )
+    $Parameters = ConvertTo-AdminOwnedParameterMap -Parameters $Parameters
 
-    $allowedNames = @('Automation', 'PlanOperation', 'PlanPath', 'ApprovedPlanPath', 'ApprovedBy', 'ApprovalReference', 'PlanApprovalText', 'JsonOutputPath', 'LogFile', 'AppendTrustedLog', 'Quiet')
+    $allowedNames = @('Automation', 'PlanOperation', 'PlanPath', 'ApprovedPlanPath', 'ApprovedBy', 'ApprovalReference', 'PlanApprovalText', 'JsonOutputPath', 'LogFile', 'AppendTrustedLog', 'Quiet') + $Script:NonAuthorizingCommonParameterNames
     foreach ($parameterName in @($Parameters.Keys)) {
         if ([string]$parameterName -cnotin $allowedNames) {
             throw "Parameter -$parameterName cannot be combined with PlanOperation Approve."
@@ -9210,9 +9410,7 @@ function ConvertTo-AdminPlanExecutionParameter {
 
         [Parameter()]
         [AllowNull()]
-        [string]$SingleTarget,
-
-        [Parameter()][AllowNull()][psobject]$ValidatedPolicyProfile
+        [string]$SingleTarget
     )
 
     $request = $Plan.request
@@ -9221,7 +9419,7 @@ function ConvertTo-AdminPlanExecutionParameter {
         $parameters.Local = $true
     }
     elseif ([string]::IsNullOrWhiteSpace($SingleTarget)) {
-        $parameters['_PlanComputers'] = [string[]]@($request.targets | ForEach-Object { [string]$_.name })
+        # Full target collections are supplied through the internal plan context.
     }
     else {
         $parameters.ComputerName = [string]$SingleTarget
@@ -9232,7 +9430,7 @@ function ConvertTo-AdminPlanExecutionParameter {
     }
     if ($request.policy.applied) {
         $parameters.PolicyPath = [string]$request.policy.path
-        if ($ValidatedPolicyProfile) { $parameters['_ValidatedPolicyProfile'] = $ValidatedPolicyProfile }
+
     }
     if ($request.safety.preflight) { $parameters.Preflight = $true }
     if ($request.safety.whatIf) { $parameters.WhatIf = $true }
@@ -9293,6 +9491,7 @@ function Test-AdminPlanExecutionContract {
         [Parameter()][AllowNull()][psobject]$ValidatedPolicyProfile
     )
 
+    $OperationParameter = ConvertTo-AdminOwnedParameterMap -Parameters $OperationParameter
     if ([string]$Plan.request.targetMode -ceq 'Local') {
         $localTarget = [string]@($Plan.request.targets)[0].name
         if (-not $localTarget.Equals([string]$env:COMPUTERNAME, [System.StringComparison]::OrdinalIgnoreCase)) {
@@ -9300,8 +9499,11 @@ function Test-AdminPlanExecutionContract {
         }
     }
     Use-AdminPlanRuntimeState -Plan $Plan
-    $validationParameters = ConvertTo-AdminPlanExecutionParameter -Plan $Plan -OperationParameter $OperationParameter -ValidatedPolicyProfile $ValidatedPolicyProfile
-    $resolution = Resolve-AdminAutomationRequest -Parameters $validationParameters
+    $validationParameters = ConvertTo-AdminPlanExecutionParameter -Plan $Plan -OperationParameter $OperationParameter
+    $validationParameters = ConvertTo-AdminOwnedParameterMap -Parameters $validationParameters
+    $Script:InternalPlanContexts.Add($validationParameters, [pscustomobject]@{ Purpose = 'PlanContract'; ValidationOnly = $false; Computers = if ([string]$Plan.request.targetMode -ceq 'Remote') { [string[]]@($Plan.request.targets | ForEach-Object { [string]$_.name }) } else { $null }; PolicyProfile = $ValidatedPolicyProfile; PolicyPath = [string]$Plan.request.policy.path; PolicySha256 = [string]$Plan.request.policy.fileSha256; PlanHash = [string]$Plan.planHash.value })
+    try { $resolution = Resolve-AdminAutomationRequest -Parameters $validationParameters }
+    finally { [void]$Script:InternalPlanContexts.Remove($validationParameters) }
     if (-not $resolution.Success) {
         throw "The approved execution contract no longer validates: $($resolution.Message)"
     }
@@ -9416,13 +9618,14 @@ function Invoke-AdminPlanExecution {
         [Parameter(Mandatory = $true)]
         [string]$ResolvedOutputPath
     )
+    $Parameters = ConvertTo-AdminOwnedParameterMap -Parameters $Parameters
 
     foreach ($requiredName in @('PlanPath', 'CheckpointPath', 'PlanApprovalText')) {
         if (-not (Test-AdminParameterBound -Parameters $Parameters -Name $requiredName) -or [string]::IsNullOrWhiteSpace([string]$Parameters[$requiredName])) {
             throw "PlanOperation $Operation requires -$requiredName."
         }
     }
-    $allowedNames = @('Automation', 'PlanOperation', 'PlanPath', 'CheckpointPath', 'PlanApprovalText', 'ConfirmationText', 'TargetListConfirmationText', 'PsExecConfirmationText', 'JsonOutputPath', 'LogFile', 'AppendTrustedLog', 'Quiet')
+    $allowedNames = @('Automation', 'PlanOperation', 'PlanPath', 'CheckpointPath', 'PlanApprovalText', 'ConfirmationText', 'TargetListConfirmationText', 'PsExecConfirmationText', 'JsonOutputPath', 'LogFile', 'AppendTrustedLog', 'Quiet') + $Script:NonAuthorizingCommonParameterNames
     foreach ($parameterName in @($Parameters.Keys)) {
         if ([string]$parameterName -cnotin $allowedNames) {
             throw "Parameter -$parameterName cannot override an approved plan during $Operation."
@@ -9508,14 +9711,11 @@ function Invoke-AdminPlanExecution {
             $attemptStarted = $true
             [void](Write-AdminCheckpoint -LiteralPath $resolvedCheckpointPath -Checkpoint $checkpoint)
             Use-AdminPlanRuntimeState -Plan $plan
-            $targetParameters = ConvertTo-AdminPlanExecutionParameter -Plan $plan -OperationParameter $Parameters -SingleTarget ([string]$target.target) -ValidatedPolicyProfile $planReferences.PolicyProfile
-            $invokeParameters = @{
-                Parameters         = $targetParameters
-                ResolvedOutputPath = '-'
-                Confirm            = $false
-            }
-            if ($plan.request.safety.whatIf) { $invokeParameters.WhatIf = $true }
-            $targetEnvelope = Invoke-AdminAutomation @invokeParameters
+            $targetParameters = ConvertTo-AdminPlanExecutionParameter -Plan $plan -OperationParameter $Parameters -SingleTarget ([string]$target.target)
+            $targetParameters = ConvertTo-AdminOwnedParameterMap -Parameters $targetParameters
+            $Script:InternalPlanContexts.Add($targetParameters, [pscustomobject]@{ Purpose = 'ApprovedExecution'; ValidationOnly = $false; Computers = $null; PolicyProfile = $planReferences.PolicyProfile; PolicyPath = [string]$plan.request.policy.path; PolicySha256 = [string]$plan.request.policy.fileSha256; PlanHash = [string]$plan.planHash.value })
+            try { $targetEnvelope = Invoke-AdminAutomation -Parameters $targetParameters -ResolvedOutputPath '-' -Confirm:$false -WhatIf:([bool]$plan.request.safety.whatIf) }
+            finally { [void]$Script:InternalPlanContexts.Remove($targetParameters) }
             [void](ConvertTo-AdminCheckpointTargetTerminalState -Target $target -Envelope $targetEnvelope)
             [void](Write-AdminCheckpoint -LiteralPath $resolvedCheckpointPath -Checkpoint $checkpoint)
             if ([string]$target.state -ceq 'Unknown') {
@@ -9591,6 +9791,7 @@ function Invoke-AdminPlanOperation {
         [ValidateNotNullOrEmpty()]
         [string]$ResolvedOutputPath
     )
+    $Parameters = ConvertTo-AdminOwnedParameterMap -Parameters $Parameters
 
     $startedAtUtc = [datetime]::UtcNow
     $runId = [guid]::NewGuid()
@@ -9833,7 +10034,10 @@ if (-not $Script:WasDotSourced) {
         $planParameterNames = @('PlanOperation', 'PlanPath', 'ApprovedPlanPath', 'CheckpointPath', 'ApprovedBy', 'ApprovalReference', 'PlanApprovalText')
         $isPlanRequest = @($planParameterNames | Where-Object { Test-AdminParameterBound -Parameters $Script:InvocationParameters -Name $_ }).Count -gt 0
 
+        $parameterSnapshotFailed = $false
         try {
+            try { $Script:InvocationParameters = ConvertTo-AdminOwnedParameterMap -Parameters $Script:InvocationParameters }
+            catch { $parameterSnapshotFailed = $true; throw }
             Assert-AdminDistinctConfiguredPath -Parameters $Script:InvocationParameters
             $resolvedOutputPath = Resolve-AdminAutomationOutputPath -LiteralPath $JsonOutputPath
         }
@@ -9856,7 +10060,12 @@ if (-not $Script:WasDotSourced) {
             $failurePolicyDecision = if (Test-AdminParameterBound -Parameters $Script:InvocationParameters -Name 'PolicyPath') { ConvertTo-AdminPolicyDecision -Applied $true -Decision NotEvaluated -ReasonCode NotEvaluated -Reason 'The output request failed before the policy profile could be evaluated.' } else { ConvertTo-AdminPolicyDecision -Decision NotApplied -ReasonCode NoPolicy -Reason 'No policy profile was supplied.' }
             $failurePreflight = (Test-AdminParameterBound -Parameters $Script:InvocationParameters -Name 'Preflight') -and [bool]$Script:InvocationParameters['Preflight']
             $failureEnvelope = ConvertTo-AdminAutomationEnvelope -RunId ([guid]::NewGuid()) -StartedAtUtc $failureStartedAtUtc -FinishedAtUtc ([datetime]::UtcNow) -ActionId $failureActionId -ActionName $failureActionName -ReadOnly $failureReadOnly -Preflight $failurePreflight -PolicyDecision $failurePolicyDecision -TargetMode $failureTargetSummary.TargetMode -Transport $failureTargetSummary.Transport -Authentication $failureTargetSummary.Authentication -UseSsl $failureTargetSummary.UseSsl -Status ValidationFailed -Outcome ValidationFailure -ExitCode $Script:AutomationExitCodes.ValidationFailure -RequestedTargetCount $failureTargetSummary.RequestedTargetCount -Errors @([pscustomobject]@{ Category = 'Validation'; Message = $_.Exception.Message })
-            [Console]::Error.WriteLine((ConvertTo-AdminAutomationJson -Envelope $failureEnvelope))
+            $validationJson = ConvertTo-AdminAutomationJson -Envelope $failureEnvelope
+            if ($parameterSnapshotFailed -and $JsonOutputPath.Trim() -in @('-', 'STDOUT')) {
+                # Preserve the native default-stdout validation contract without opening a sink.
+                [Console]::Out.WriteLine($validationJson)
+            }
+            else { [Console]::Error.WriteLine($validationJson) }
             exit $Script:AutomationExitCodes.ValidationFailure
         }
 
