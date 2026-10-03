@@ -150,19 +150,114 @@ public sealed class WindowsFiveChangingMap : Hashtable {
     finally { Set-Item Function:\Invoke-AdminTargetDetailed -Value $recordedDispatcher; Close-AdminRunSink }
 
     Test-ToolkitAssertion -Condition (-not (Test-AdminJsonHasDuplicateProperty -JsonText (('[' * 64) + '0' + (']' * 64)))) -Name 'JSON nesting at the documented depth limit remains supported'
-    foreach ($badJson in @((('[' * 65) + '0' + (']' * 65)), ('[' * 1048576), ('{' * 1048576), ('[' + (('[],' * 8192) + '[]]')), ('{' + ((1..8193 | ForEach-Object { '"k' + $_ + '":0' }) -join ',') + '}'), ('[' + ('0,' * 32769) + '0]'))) {
-        $beforeMemory = [GC]::GetTotalMemory($true); $timer = [Diagnostics.Stopwatch]::StartNew(); $budgetFailure = $false
+    if (-not ('WindowsFiveJsonMemorySampler' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Threading;
+public sealed class WindowsFiveJsonMemorySampler : IDisposable {
+    Thread thread; volatile bool running; public long Peak; public long Samples;
+    public WindowsFiveJsonMemorySampler() { Peak=GC.GetTotalMemory(false); running=true; thread=new Thread(Run); thread.IsBackground=true; thread.Start(); }
+    void Run() { while(running) { long value=GC.GetTotalMemory(false); if(value>Peak)Peak=value; Samples++; Thread.Sleep(1); } }
+    public void Dispose() { running=false; thread.Join(); }
+}
+'@ -ErrorAction Stop
+    }
+    $allocationMethod = [GC].GetMethod('GetAllocatedBytesForCurrentThread')
+    foreach ($badJson in @((('[' * 65) + '0' + (']' * 65)), ('[' * 1048576), (('{"x":' * 65) + '0' + ('}' * 65)), ('[' + (('[],' * 8192) + '[]]')), ('{' + ((1..8193 | ForEach-Object { '"k' + $_ + '":0' }) -join ',') + '}'), ('{' + ((1..8193 | ForEach-Object { '"\u006b' + $_ + '":0' }) -join ',') + '}'), ('[' + ('0,' * 32769) + '0]'))) {
+        $beforeMemory = [GC]::GetTotalMemory($true)
+        $allocationBefore = if ($allocationMethod) { [long]$allocationMethod.Invoke($null, @()) } else { $null }
+        $memorySampler = [WindowsFiveJsonMemorySampler]::new()
+        $timer = [Diagnostics.Stopwatch]::StartNew(); $budgetFailure = $false
         try { Test-AdminJsonHasDuplicateProperty -JsonText $badJson | Out-Null } catch { $budgetFailure = $_.Exception.Message -match 'budget' }
-        $timer.Stop(); $growth = [GC]::GetTotalMemory($false) - $beforeMemory
+        finally { $timer.Stop(); $memorySampler.Dispose() }
+        $uncollectedGrowth = [GC]::GetTotalMemory($false) - $beforeMemory
+        $growth = [GC]::GetTotalMemory($true) - $beforeMemory
+        $observedPeak = $memorySampler.Peak - $beforeMemory
+        $allocatedBytes = if ($allocationMethod) { [long]$allocationMethod.Invoke($null, @()) - $allocationBefore } else { $null }
+        Write-Host "JSON fixture metrics: retained=$growth uncollected=$uncollectedGrowth sampledPeak=$observedPeak samples=$($memorySampler.Samples) threadAllocated=$allocatedBytes seconds=$($timer.Elapsed.TotalSeconds)"
         Test-ToolkitAssertion -Condition $budgetFailure -Name 'JSON hostile depth/container/property/token input fails at a preallocation budget'
         Test-ToolkitAssertion -Condition ($growth -lt 67108864 -and $timer.Elapsed.TotalSeconds -lt 20) -Name 'JSON hostile pre-scan retains bounded memory and work'
+        Test-ToolkitAssertion -Condition ($observedPeak -lt 67108864) -Name 'Observed one-millisecond sampled JSON managed-heap growth remains below 64 MiB'
+        if ($allocationMethod) { Test-ToolkitAssertion -Condition ($allocatedBytes -lt 134217728) -Name 'JSON hostile fixture transient thread allocations remain below 128 MiB' }
     }
     Test-ToolkitAssertion -Condition (Test-AdminJsonHasDuplicateProperty -JsonText '{"scope":1,"SCOPE":2}') -Name 'Bounded JSON scanner retains case-insensitive duplicate detection'
     Test-ToolkitAssertion -Condition (Test-AdminJsonHasDuplicateProperty -JsonText '{"scope":1,"\u0073cope":2}') -Name 'Bounded JSON scanner retains escaped duplicate detection'
+    foreach ($duplicateJson in @('{"a/b":1,"a\/b":2}', '{"a\\b":1,"\u0061\\b":2}', '{"a\"b":1,"\u0061\"b":2}', '{"\ud83d\ude00":1,"\uD83D\uDE00":2}', '{"":1,"":2}', '{"a\nb":1,"\u0061\nb":2}')) {
+        Test-ToolkitAssertion -Condition (Test-AdminJsonHasDuplicateProperty -JsonText $duplicateJson) -Name 'Allocation-bounded key decoding preserves escaped slash, backslash, quote, Unicode, empty and control aliases'
+    }
+    Test-ToolkitAssertion -Condition (-not (Test-AdminJsonHasDuplicateProperty -JsonText '{"\\u0061":1,"a":2}')) -Name 'Literal backslash-u key is distinct from decoded Unicode key'
+    foreach ($controlCode in @(0, 1, 7, 8, 9, 10, 11, 12, 13, 31)) {
+        $rawControlKey = '{"a' + [char]$controlCode + 'b":1,"a' + [char]$controlCode + 'b":2}'
+        $rawControlValue = '{"a":"b' + [char]$controlCode + 'c"}'
+        Test-ToolkitThrow -Action { Test-AdminJsonHasDuplicateProperty -JsonText $rawControlKey | Out-Null } -Name 'Pre-scan rejects unescaped C0 duplicate keys before any general decoder'
+        Test-ToolkitThrow -Action { Test-AdminJsonHasDuplicateProperty -JsonText $rawControlValue | Out-Null } -Name 'Pre-scan rejects unescaped C0 string values before any general decoder'
+    }
+    foreach ($invalidKey in @('a\q', '\U0061', '\u061', '\u00x1')) {
+        Test-ToolkitThrow -Action { Test-AdminJsonHasDuplicateProperty -JsonText ('{"' + $invalidKey + '":1}') | Out-Null } -Name 'Invalid property escape decoding fails closed instead of silently skipping duplicate scan'
+    }
+    foreach ($validUnicode in @('{"\u006a":1,"\u006A":2}', '{"\ud800":1,"\uD800":2}', '{"\udc00":1,"\uDC00":2}')) {
+        Test-ToolkitAssertion -Condition (Test-AdminJsonHasDuplicateProperty -JsonText $validUnicode) -Name 'Unicode hex case and surrogate code-unit aliases preserve baseline duplicate detection'
+    }
+    $rawControlPath = Join-Path $fiveRoot 'raw-control.json'
+    [IO.File]::WriteAllText($rawControlPath, ('{"a' + [char]10 + 'b":1,"a' + [char]10 + 'b":2}'))
+    Test-ToolkitThrow -Action { Read-AdminStrictOrchestrationJson -LiteralPath $rawControlPath -MaximumBytes 4194304 -ArtifactName 'Synthetic raw control' | Out-Null } -Name 'Actual bounded JSON file reader rejects raw-control duplicates before lenient general decoding'
+    Test-ToolkitThrow -Action { Import-AdminPolicyProfile -LiteralPath $rawControlPath | Out-Null } -Name 'Actual policy import refuses raw-control keys before schema or authorization decisions'
     foreach ($reader in @('Policy', 'Plan', 'Checkpoint', 'Request')) {
         $deepPath = Join-Path $fiveRoot ($reader + '.json'); [IO.File]::WriteAllText($deepPath, '[' * 1048576)
         if ($reader -ceq 'Policy') { Test-ToolkitThrow -Action { Import-AdminPolicyProfile -LiteralPath $deepPath | Out-Null } -Name 'Policy import uses bounded duplicate pre-scan' }
         else { Test-ToolkitThrow -Action { Read-AdminStrictOrchestrationJson -LiteralPath $deepPath -MaximumBytes 4194304 -ArtifactName $reader | Out-Null } -Name "$reader reader uses bounded duplicate pre-scan" }
+    }
+
+
+    # Standard grammar is checked before the permissive general decoder. Quoted
+    # apostrophes/slashes and every ordinary JSON value remain supported.
+    foreach ($validJson in @('{}', '[]', 'null', 'true', 'false', '0', '-0', '1', '-123', '0.25', '-2.5E+3', '1e-9',
+        '{"a":[null,true,false,0,-1,2.5,1e2,{"b":"ok"}]}', '{"apostrophe":"it''s fine","slash":"a/b","commentText":"/* text */ // text"}',
+        '{"a\/b":1}', '{"key":"\"\\\/\b\f\n\r\t\u0061\ud83d\ude00"}', (' ' + [char]9 + [char]10 + '{"x":1}' + [char]13),
+        '{"empty":"","nested":{},"array":[]}')) {
+        Test-ToolkitAssertion -Condition (-not (Test-AdminJsonHasDuplicateProperty -JsonText $validJson)) -Name 'Compiled pre-scan preserves complete standard JSON values, quoted punctuation and nesting'
+    }
+    foreach ($invalidJson in @('', ' ', '{a:1}', "{'a':1}", "{'a':1,'a':2}", '{a:1,a:2}', '{/* comment */"a":1}', '{"a":1// comment' + [char]10 + '}',
+        '/*comment*/{}', '{}//comment', '# comment', '{"a":}', '{"a" 1}', '{:1}', '{,"a":1}', '{"a":1,}', '[1,]', '[,1]', '[1 2]',
+        '{"a":1 "b":2}', '{]', '[}', '{"a":[1}', 'true false', '{}[]', '{"a":1}x', '"unterminated', '{"a":"\q"}',
+        '{"a":"\u061"}', '{"a":"\U0061"}', '{"a":"\u00x1"}', '{"a":undefined}', '{"a":NaN}', '{"a":Infinity}', '+1', '01', '-01', '.5', '1.', '1e', '1e+', '--1',
+        'TRUE', 'Null', 'nul', 'falsex', '{"a":1; "b":2}', '{["a"]:1}', ('{' + [char]0 + '"a":1}'), ('{' + [char]0xA0 + '"a":1}'))) {
+        Test-ToolkitThrow -Action { Test-AdminJsonHasDuplicateProperty -JsonText $invalidJson | Out-Null } -Name 'Lexical grammar rejects nonstandard keys/comments, malformed values/numbers/delimiters and trailing data'
+    }
+    foreach ($malformedReader in @("{'a':1,'a':2}", '{a:1,a:2}', '{/* comment */"a":1}', '{"a":1,}')) {
+        $malformedPath = Join-Path $fiveRoot 'nonstandard.json'
+        [IO.File]::WriteAllText($malformedPath, $malformedReader, [Text.UTF8Encoding]::new($false))
+        Test-ToolkitThrow -Action { Read-AdminStrictOrchestrationJson -LiteralPath $malformedPath -MaximumBytes 4194304 -ArtifactName 'Synthetic nonstandard grammar' | Out-Null } -Name 'Actual bounded JSON reader refuses lenient-decoder key/comment forms before materialization'
+        Test-ToolkitThrow -Action { Import-AdminPolicyProfile -LiteralPath $malformedPath | Out-Null } -Name 'Actual policy import refuses nonstandard grammar before schema decisions'
+    }
+    foreach ($maximumBytes in @(1048576, 4194304)) {
+        foreach ($keyShape in @('SparseEscape', 'DenseEscape')) {
+            if ($keyShape -ceq 'SparseEscape') { $largeEncodedKey = ('a' * ($maximumBytes - 32)) + '\u0061'; $decodedLength = $maximumBytes - 31 }
+            else { $escapeCount = [int][Math]::Floor(($maximumBytes - 20) / 6); $largeEncodedKey = '\u0061' * $escapeCount; $decodedLength = $escapeCount }
+            $largeKeyJson = '{"' + $largeEncodedKey + '":0}'
+            $beforeMemory = [GC]::GetTotalMemory($true)
+            $allocationBefore = if ($allocationMethod) { [long]$allocationMethod.Invoke($null, @()) } else { $null }
+            $memorySampler = [WindowsFiveJsonMemorySampler]::new(); $timer = [Diagnostics.Stopwatch]::StartNew()
+            try { $largeDuplicate = Test-AdminJsonHasDuplicateProperty -JsonText $largeKeyJson }
+            finally { $timer.Stop(); $memorySampler.Dispose() }
+            $observedPeak = $memorySampler.Peak - $beforeMemory
+            $allocatedBytes = if ($allocationMethod) { [long]$allocationMethod.Invoke($null, @()) - $allocationBefore } else { $null }
+            $growth = [GC]::GetTotalMemory($true) - $beforeMemory
+            Write-Host "JSON near-limit $maximumBytes $keyShape metrics: retained=$growth sampledPeak=$observedPeak samples=$($memorySampler.Samples) threadAllocated=$allocatedBytes seconds=$($timer.Elapsed.TotalSeconds)"
+            Test-ToolkitAssertion -Condition (-not $largeDuplicate -and $largeKeyJson.Length -le $maximumBytes) -Name 'Near-limit sparse/dense escaped key has valid grammar without silent truncation'
+            Test-ToolkitAssertion -Condition ($growth -lt 67108864 -and $observedPeak -lt 67108864 -and $timer.Elapsed.TotalSeconds -lt 20) -Name 'Near-limit compiled key scanning meets retained/sampled-heap/time bounds'
+            if ($allocationMethod) { Test-ToolkitAssertion -Condition ($allocatedBytes -lt 134217728) -Name 'Near-limit escaped key has bounded compiled transient allocations' }
+            $largeKeyPath = Join-Path $fiveRoot ("large-key-$maximumBytes-$keyShape.json")
+            [IO.File]::WriteAllText($largeKeyPath, $largeKeyJson, [Text.UTF8Encoding]::new($false))
+            $timer.Restart()
+            $largeObject = Read-AdminStrictOrchestrationJson -LiteralPath $largeKeyPath -MaximumBytes $maximumBytes -ArtifactName 'Synthetic near-limit escaped key'
+            $timer.Stop(); $actualLargeKey = @($largeObject.PSObject.Properties.Name)
+            Test-ToolkitAssertion -Condition ($actualLargeKey.Count -eq 1 -and $actualLargeKey[0].Length -eq $decodedLength -and $timer.Elapsed.TotalSeconds -lt 20) -Name 'Actual 1 MiB/4 MiB retained-file reader decodes near-limit sparse/dense keys correctly'
+            if ($maximumBytes -eq 1048576) {
+                Test-ToolkitThrow -Action { Import-AdminPolicyProfile -LiteralPath $largeKeyPath | Out-Null } -Name 'Actual policy reader promptly rejects a near-limit unknown field after bounded standard grammar'
+            }
+            $largeEncodedKey = $null; $largeKeyJson = $null; $largeObject = $null; $actualLargeKey = $null
+        }
     }
 
     $key = Get-AdminSha256Hex -Text ('synthetic-squatting-' + [guid]::NewGuid().ToString('N'))

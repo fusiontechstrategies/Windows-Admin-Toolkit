@@ -1296,6 +1296,143 @@ namespace WindowsAdminToolkit.Security {
         FileStream stream; SafeFileHandle leaf; Info info; bool disposed;
         public string Path { get; private set; }
         internal SafeFileHandle Handle { get { if (disposed) throw new ObjectDisposedException("PathLease"); return leaf; } }
+
+        // HOST_TRUST_BEGIN: bounded JSON grammar is local preflight, never a cleanup payload.
+        public static bool JsonHasDuplicateProperty(string text) {
+            return new JsonGuard(text).Scan();
+        }
+        sealed class JsonGuard {
+            readonly string text; int index, tokens, containers, properties; bool duplicate;
+            public JsonGuard(string source) {
+                if (source == null) throw new IOException("JSON pre-scan requires text.");
+                if (source.Length > 4194304) throw new IOException("JSON pre-scan exceeds the input budget.");
+                text = source;
+            }
+            static IOException Syntax() { return new IOException("JSON pre-scan found invalid standard JSON syntax."); }
+            void Space() {
+                while (index < text.Length && (text[index] == ' ' || text[index] == '\t' || text[index] == '\r' || text[index] == '\n')) index++;
+            }
+            void Token() {
+                if (++tokens > 32768) throw new IOException("JSON pre-scan exceeds the token budget.");
+            }
+            void Punctuation(char expected) {
+                if (index >= text.Length || text[index] != expected) throw Syntax();
+                Token(); index++;
+            }
+            public bool Scan() {
+                Space(); Value(0); Space();
+                if (index != text.Length) throw Syntax();
+                return duplicate;
+            }
+            void Value(int depth) {
+                Space(); if (index >= text.Length) throw Syntax();
+                char ch = text[index];
+                if (ch == '{' || ch == '[') {
+                    if (depth >= 64) throw new IOException("JSON pre-scan exceeds the depth budget.");
+                    if (++containers > 8192) throw new IOException("JSON pre-scan exceeds the container budget.");
+                    if (ch == '{') Object(depth + 1); else Array(depth + 1);
+                } else if (ch == '"') String(false);
+                else if (ch == 't') Literal("true");
+                else if (ch == 'f') Literal("false");
+                else if (ch == 'n') Literal("null");
+                else if (ch == '-' || Digit(ch)) Number();
+                else throw Syntax();
+            }
+            void Object(int depth) {
+                Punctuation('{'); Space();
+                if (index < text.Length && text[index] == '}') { Punctuation('}'); return; }
+                HashSet<string> keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                while (true) {
+                    if (index >= text.Length || text[index] != '"') throw Syntax();
+                    if (++properties > 8192) throw new IOException("JSON pre-scan exceeds the property budget.");
+                    string key = String(true);
+                    if (!keys.Add(key)) duplicate = true;
+                    Space(); Punctuation(':'); Value(depth); Space();
+                    if (index < text.Length && text[index] == '}') { Punctuation('}'); return; }
+                    Punctuation(','); Space();
+                }
+            }
+            void Array(int depth) {
+                Punctuation('['); Space();
+                if (index < text.Length && text[index] == ']') { Punctuation(']'); return; }
+                while (true) {
+                    Value(depth); Space();
+                    if (index < text.Length && text[index] == ']') { Punctuation(']'); return; }
+                    Punctuation(','); Space();
+                }
+            }
+            static bool Digit(char ch) { return ch >= '0' && ch <= '9'; }
+            void Number() {
+                if (text[index] == '-') { index++; if (index >= text.Length) throw Syntax(); }
+                if (text[index] == '0') index++;
+                else {
+                    if (text[index] < '1' || text[index] > '9') throw Syntax();
+                    do { index++; } while (index < text.Length && Digit(text[index]));
+                }
+                if (index < text.Length && text[index] == '.') {
+                    index++; if (index >= text.Length || !Digit(text[index])) throw Syntax();
+                    do { index++; } while (index < text.Length && Digit(text[index]));
+                }
+                if (index < text.Length && (text[index] == 'e' || text[index] == 'E')) {
+                    index++;
+                    if (index < text.Length && (text[index] == '+' || text[index] == '-')) index++;
+                    if (index >= text.Length || !Digit(text[index])) throw Syntax();
+                    do { index++; } while (index < text.Length && Digit(text[index]));
+                }
+            }
+            void Literal(string value) {
+                if (text.Length - index < value.Length) throw Syntax();
+                for (int i = 0; i < value.Length; i++) if (text[index + i] != value[i]) throw Syntax();
+                index += value.Length;
+            }
+            static int Hex(char ch) {
+                if (ch >= '0' && ch <= '9') return ch - '0';
+                if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+                if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+                throw Syntax();
+            }
+            string String(bool key) {
+                Punctuation('"'); int start = index, segment = index; StringBuilder decoded = null;
+                while (index < text.Length) {
+                    char ch = text[index++];
+                    if (ch < 32) throw new IOException("JSON pre-scan found an unescaped string control.");
+                    if (ch == '"') {
+                        if (!key) return null;
+                        if (decoded == null) return text.Substring(start, index - start - 1);
+                        decoded.Append(text, segment, index - segment - 1);
+                        return decoded.ToString();
+                    }
+                    if (ch != '\\') continue;
+                    if (key) {
+                        if (decoded == null) decoded = new StringBuilder(Math.Min(256, text.Length - start));
+                        decoded.Append(text, segment, index - segment - 1);
+                    }
+                    if (index >= text.Length) throw Syntax();
+                    char escape = text[index++], value;
+                    switch (escape) {
+                        case '"': value = '"'; break;
+                        case '\\': value = '\\'; break;
+                        case '/': value = '/'; break;
+                        case 'b': value = '\b'; break;
+                        case 'f': value = '\f'; break;
+                        case 'n': value = '\n'; break;
+                        case 'r': value = '\r'; break;
+                        case 't': value = '\t'; break;
+                        case 'u':
+                            if (text.Length - index < 4) throw Syntax();
+                            int code = 0;
+                            for (int i = 0; i < 4; i++) code = (code << 4) | Hex(text[index++]);
+                            value = (char)code; break;
+                        default: throw Syntax();
+                    }
+                    if (key) decoded.Append(value);
+                    segment = index;
+                }
+                throw Syntax();
+            }
+        }
+        // HOST_TRUST_END
+
         // HOST_TRUST_BEGIN
         public void ValidateHeld() {
             if (disposed) throw new ObjectDisposedException("PathLease");
@@ -6218,93 +6355,8 @@ function Test-AdminJsonHasDuplicateProperty {
         [string]$JsonText
     )
 
-    if ($JsonText.Length -gt 4194304) { throw 'JSON pre-scan exceeds the input budget.' }
-    $tokenCount = 0; $containerCount = 0; $propertyCount = 0
-    $frames = New-Object 'System.Collections.Generic.List[object]'
-    $index = 0
-    while ($index -lt $JsonText.Length) {
-        $character = $JsonText[$index]
-        if ($character -in @('{', '[', '}', ']', ':', ',', '"')) {
-            $tokenCount++
-            if ($tokenCount -gt 32768) { throw 'JSON pre-scan exceeds the token budget.' }
-        }
-        if ($character -eq '{' -or $character -eq '[') {
-            # Check before allocating a frame or key set, including malformed JSON.
-            if ($frames.Count -ge 64) { throw 'JSON pre-scan exceeds the depth budget.' }
-            $containerCount++
-            if ($containerCount -gt 8192) { throw 'JSON pre-scan exceeds the container budget.' }
-        }
-        if ($character -eq '{') {
-            $frames.Add([pscustomobject]@{
-                    Type = 'Object'
-                    Keys = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
-                }) | Out-Null
-            $index++
-            continue
-        }
-        if ($character -eq '[') {
-            $frames.Add([pscustomobject]@{ Type = 'Array'; Keys = $null }) | Out-Null
-            $index++
-            continue
-        }
-        if ($character -eq '}' -or $character -eq ']') {
-            if ($frames.Count -gt 0) {
-                $frames.RemoveAt($frames.Count - 1)
-            }
-            $index++
-            continue
-        }
-        if ($character -ne '"') {
-            $index++
-            continue
-        }
-
-        $stringStart = $index
-        $index++
-        $escaped = $false
-        while ($index -lt $JsonText.Length) {
-            $stringCharacter = $JsonText[$index]
-            if ($escaped) {
-                $escaped = $false
-            }
-            elseif ($stringCharacter -eq '\') {
-                $escaped = $true
-            }
-            elseif ($stringCharacter -eq '"') {
-                break
-            }
-            $index++
-        }
-        if ($index -ge $JsonText.Length) {
-            return $false
-        }
-
-        $stringEnd = $index
-        $nextIndex = $stringEnd + 1
-        while ($nextIndex -lt $JsonText.Length -and [char]::IsWhiteSpace($JsonText[$nextIndex])) {
-            $nextIndex++
-        }
-        if ($nextIndex -lt $JsonText.Length -and $JsonText[$nextIndex] -eq ':' -and $frames.Count -gt 0) {
-            $frame = $frames[$frames.Count - 1]
-            if ($frame.Type -eq 'Object') {
-                $propertyCount++
-                if ($propertyCount -gt 8192) { throw 'JSON pre-scan exceeds the property budget.' }
-                try {
-                    $jsonString = $JsonText.Substring($stringStart, $stringEnd - $stringStart + 1)
-                    $propertyName = [string](ConvertFrom-Json -InputObject $jsonString -ErrorAction Stop)
-                }
-                catch {
-                    return $false
-                }
-                if (-not $frame.Keys.Add($propertyName)) {
-                    return $true
-                }
-            }
-        }
-        $index = $stringEnd + 1
-    }
-
-    return $false
+    Initialize-AdminSafeFileType
+    return [WindowsAdminToolkit.Security.PathLease]::JsonHasDuplicateProperty($JsonText)
 }
 
 function Get-AdminPolicyPropertyError {
