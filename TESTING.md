@@ -140,7 +140,7 @@ The test suite verifies:
 - Strict plan and checkpoint UTF-8, size, suffix, duplicate-key, case-conflict, unknown-property, lifecycle, and canonical-hash validation
 - Separate pending and approved plan files with full-hash authorization and approval-metadata hash verification
 - Rejection of credentials, audit sinks, custom-code actions, and execution-time overrides in plan workflows
-- Atomic checkpoint creation and replacement without temporary artifacts, overwrite, or terminal-target repetition
+- Private checkpoint creation and retained in-place revisions without temporary artifacts, overwrite, or terminal-target repetition; incomplete or ledger-mismatched revisions refuse Resume
 - Safe Resume behavior for completed targets and interrupted `InProgress` targets converted to `Unknown`
 - Preservation of action-specific confirmation and zero retries for approved state-changing `WhatIf` plans
 - Canonical path and raw SHA-256 binding for policy files referenced by approved plans

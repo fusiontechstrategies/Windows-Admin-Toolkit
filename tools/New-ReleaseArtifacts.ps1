@@ -393,6 +393,11 @@ if (-not ('WindowsAdminToolkit.Security.StorageSecurity' -as [type])) {
     Add-Type -TypeDefinition $releaseNativeSource -ErrorAction Stop
 }
 
+$releaseLeases = New-Object 'System.Collections.Generic.List[System.IDisposable]'
+try {
+# Establish the no-follow source identity before any output directory is created.
+# Lexical containment is only meaningful after junction and short-name aliases fail.
+$releaseLeases.Add([WindowsAdminToolkit.Security.PathLease]::OpenTrusted($sourceRoot, $true, $false, $false))
 $resolvedOutput = [IO.Path]::GetFullPath($OutputDirectory)
 $canonicalSource = [IO.Path]::GetFullPath($sourceRoot).TrimEnd('\')
 $canonicalOutput = $resolvedOutput.TrimEnd('\')
@@ -466,8 +471,6 @@ foreach ($sourceFile in $sourceFiles) {
         }) | Out-Null
 }
 
-$releaseLeases = New-Object 'System.Collections.Generic.List[System.IDisposable]'
-try {
 $releaseLeases.Add([WindowsAdminToolkit.Security.PathLease]::OpenTrusted($outputParent, $true, $false, $false))
 [WindowsAdminToolkit.Security.StorageSecurity]::CreatePrivateDirectory($resolvedOutput)
 $releaseLeases.Add([WindowsAdminToolkit.Security.PathLease]::OpenTrusted($resolvedOutput, $true, $false, $true))

@@ -103,7 +103,7 @@ Orchestration plan, checkpoint, and operation-result schemas are version 1.0. Pl
 - Input size is checked on the opened file before allocation; bounded reads reject unexpected extra data. Protected input references require local absolute Windows paths and native handle support in a full PowerShell language session.
 - Version 1 plans use only the current Windows identity and exclude both unsandboxed custom-code actions.
 - Existing exact action, large-list, and PsExec confirmations remain required during execution and resume. `ShouldProcess`, `WhatIf`, policy caps, protected resources, and built-in limits remain active.
-- Checkpoints are atomically replaced before and after each one-target attempt. Resume processes only `Pending` targets and never automatically repeats a terminal target.
+- Checkpoint revisions flush the durable identity ledger first, then update the same retained file object in place before and after each one-target attempt. These revisions are not atomic: interruption can leave incomplete bytes, and Resume refuses truncated or ledger-mismatched evidence until manual reconciliation. Resume processes only `Pending` targets and never automatically repeats a terminal target.
 - An interrupted `InProgress` target becomes `Unknown` and is not repeated because completion cannot be proved safely.
 
 An identity with write access to an artifact can potentially replace its contents and recompute unkeyed hashes. Store pending plans, approved plans, checkpoints, results, logs, and external approval records in appropriately separated access-controlled locations. Verify `Unknown`, timeout, and output-failure cases manually before authorizing new state-changing work. Review [ORCHESTRATION.md](ORCHESTRATION.md) for the complete contract.

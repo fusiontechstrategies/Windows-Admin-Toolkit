@@ -45,7 +45,7 @@ Release status: released on August 24, 2026.
 
 - Strict versioned pending and approved change-plan files with canonical SHA-256 request hashes and separately hashed approval metadata
 - Exact full-hash approval, execution, and resume phrases without mutable action, input, target, transport, policy, or runtime overrides
-- Atomic per-target checkpoints with explicit `Pending`, `InProgress`, `Completed`, `Failed`, `TimedOut`, `Skipped`, and `Unknown` lifecycle states
+- Per-target lifecycle checkpoints with explicit `Pending`, `InProgress`, `Completed`, `Failed`, `TimedOut`, `Skipped`, and `Unknown` lifecycle states
 - Resume of only pending targets, with interrupted in-progress work converted to unknown and no automatic repetition of terminal state changes
 - Current-Windows-identity plan boundary, custom-code exclusion, policy and PsExec file-hash binding, and preservation of every existing safety gate
 - Orchestration plan, checkpoint, and result JSON Schemas plus deterministic synthetic examples

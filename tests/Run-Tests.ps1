@@ -1514,7 +1514,7 @@ $childArguments = @(
     Test-ToolkitAssertion -Condition ($executePlanProcess.ExitCode -eq 0 -and $executePlanEnvelope.operation -ceq 'Execute' -and $executePlanEnvelope.outcome -ceq 'CompleteSuccess' -and $executedCheckpoint.summary.completedCount -eq 1) -Name 'Approved local plan executes and checkpoints a complete target lifecycle'
     Test-ToolkitAssertion -Condition ($executedCheckpoint.targets[0].state -ceq 'Completed' -and $executedCheckpoint.targets[0].attempts -eq 1 -and $executedCheckpoint.targets[0].resultExitCode -eq 0 -and (Get-AdminCheckpointHash -Checkpoint $executedCheckpoint) -ceq $executedCheckpoint.checkpointHash.value) -Name 'Completed checkpoint records one attempt and a verifiable lifecycle hash'
     $checkpointTemporaryArtifacts = @(Get-ChildItem -LiteralPath $resolvedTemporaryRoot -File | Where-Object { $_.Name -like '.wat-checkpoint-*.tmp' -or $_.Name -like '.wat-checkpoint-backup-*.tmp' })
-    Test-ToolkitAssertion -Condition ($checkpointTemporaryArtifacts.Count -eq 0) -Name 'Atomic checkpoint writes leave no temporary or backup artifacts'
+    Test-ToolkitAssertion -Condition ($checkpointTemporaryArtifacts.Count -eq 0) -Name 'Retained in-place checkpoint revisions leave no temporary or backup artifacts'
 
     $checkpointHashBeforeExecuteReuse = (Get-FileHash -LiteralPath $checkpointPath -Algorithm SHA256).Hash
     $executeReuseProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -PlanOperation Execute -PlanPath '$escapedApprovedPlanPath' -CheckpointPath '$escapedCheckpointPath' -PlanApprovalText 'EXECUTE PLAN $planHash'"

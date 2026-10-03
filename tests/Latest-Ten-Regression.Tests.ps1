@@ -159,9 +159,40 @@ function Invoke-AdminTargetWithRetry {
     finally { Remove-Job -Job $replacementProbe -Force }
 
     $releaseTool = Join-Path (Split-Path -Parent $PSScriptRoot) 'tools\New-ReleaseArtifacts.ps1'
+    $releaseSourceRoot = Split-Path -Parent $PSScriptRoot
+    $aliasSource = Join-Path $latestRoot 'real-release-source'
+    $aliasTools = Join-Path $aliasSource 'tools'
+    $sourceAlias = Join-Path $latestRoot 'release-source-alias'
+    [WindowsAdminToolkit.Security.StorageSecurity]::CreatePrivateDirectory($aliasSource)
+    [WindowsAdminToolkit.Security.StorageSecurity]::CreatePrivateDirectory($aliasTools)
+    [IO.File]::Copy((Join-Path $releaseSourceRoot 'WindowsAdminToolkit.ps1'), (Join-Path $aliasSource 'WindowsAdminToolkit.ps1'))
+    [IO.File]::Copy($releaseTool, (Join-Path $aliasTools 'New-ReleaseArtifacts.ps1'))
+    $trustedFixtureTool = Join-Path $aliasTools 'New-ReleaseArtifacts.ps1'
+    foreach ($overlapOutput in @($aliasSource, $latestRoot)) {
+        $overlapError = ''
+        try { & $trustedFixtureTool -OutputDirectory $overlapOutput | Out-Null }
+        catch { $overlapError = $_.Exception.Message }
+        Test-ToolkitAssertion -Condition ($overlapError -match 'must be disjoint') -Name 'Release equal-root and ancestor outputs fail at the containment guard'
+    }
+    try {
+        [void](New-Item -ItemType Junction -Path $sourceAlias -Target $aliasSource)
+        $aliasOutput = Join-Path $aliasTools 'alias-overlap-output'
+        $aliasError = ''
+        try { & (Join-Path $sourceAlias 'tools\New-ReleaseArtifacts.ps1') -OutputDirectory $aliasOutput | Out-Null }
+        catch { $aliasError = $_.Exception.Message }
+        Test-ToolkitAssertion -Condition ($aliasError -match 'Reparse points are forbidden') -Name 'Release source junction alias fails at the early native identity guard'
+        Test-ToolkitAssertion -Condition (-not [IO.Directory]::Exists($aliasOutput)) -Name 'Source junction alias cannot create an output inside actual source before refusal'
+    }
+    finally {
+        # Remove only the owned junction itself before recursive fixture cleanup.
+        if ([IO.Directory]::Exists($sourceAlias)) { [IO.Directory]::Delete($sourceAlias) }
+    }
     foreach ($subtree in @('tools', 'tests', 'examples', 'schemas')) {
-        $nestedOutput = Join-Path (Split-Path -Parent $PSScriptRoot) ($subtree + '\wat-ten-overlap-' + [guid]::NewGuid().ToString('N'))
-        Test-ToolkitThrow -Action { & $releaseTool -OutputDirectory $nestedOutput } -Name "Release source/output overlap rejected under $subtree"
+        $nestedOutput = Join-Path $aliasSource ($subtree + '\wat-ten-overlap-' + [guid]::NewGuid().ToString('N'))
+        $nestedError = ''
+        try { & $trustedFixtureTool -OutputDirectory $nestedOutput | Out-Null }
+        catch { $nestedError = $_.Exception.Message }
+        Test-ToolkitAssertion -Condition ($nestedError -match 'must be disjoint') -Name "Release source/output overlap rejected at containment guard under $subtree"
         Test-ToolkitAssertion -Condition (-not [IO.Directory]::Exists($nestedOutput)) -Name "Rejected $subtree overlap creates no release output"
     }
 }
