@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Builds a new Windows Admin Toolkit release directory with integrity metadata.
 
@@ -83,7 +83,7 @@ function Write-ReleaseUtf8NoBom {
         [string]$Value
     )
 
-    [WindowsAdminToolkit.Security.StorageSecurity]::AppendPrivateFile($LiteralPath, [Text.Encoding]::UTF8.GetBytes($Value), $true, 16777216)
+    [WindowsAdminToolkit.ReleaseSecurity.StorageSecurity]::AppendPrivateFile($LiteralPath, [Text.Encoding]::UTF8.GetBytes($Value), $true, 16777216)
 }
 
 function Test-ReleaseSignedSourceBinding {
@@ -140,18 +140,24 @@ function Get-ReleaseDirectoryFile {
         [string]$LiteralPath
     )
 
-    $pendingDirectories = New-Object 'System.Collections.Generic.Queue[string]'
+    $pendingDirectories = New-Object 'System.Collections.Generic.Queue[object]'
+    $itemCount = 0
     $files = New-Object 'System.Collections.Generic.List[System.IO.FileInfo]'
-    $pendingDirectories.Enqueue([IO.Path]::GetFullPath($LiteralPath))
+    $pendingDirectories.Enqueue([pscustomobject]@{ Path = [IO.Path]::GetFullPath($LiteralPath); Depth = 0 })
     while ($pendingDirectories.Count -gt 0) {
-        $currentDirectory = $pendingDirectories.Dequeue()
-        $releaseLeases.Add([WindowsAdminToolkit.Security.PathLease]::OpenTrusted($currentDirectory, $true, $false, $false))
-        foreach ($item in @(Get-ChildItem -LiteralPath $currentDirectory -Force | Sort-Object Name)) {
+        $currentEntry = $pendingDirectories.Dequeue()
+        $currentDirectory = [string]$currentEntry.Path
+        $releaseLeases.Add([WindowsAdminToolkit.ReleaseSecurity.PathLease]::OpenTrusted($currentDirectory, $true, $false, $false))
+        foreach ($entryPath in [IO.Directory]::EnumerateFileSystemEntries($currentDirectory)) {
+            $itemCount++
+            if ($itemCount -gt 4096) { throw 'Release source exceeds the 4096-item traversal budget.' }
+            $item = Get-Item -LiteralPath $entryPath -Force -ErrorAction Stop
             if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
                 throw "Release source reparse points are not supported: $($item.FullName)"
             }
             if ($item.PSIsContainer) {
-                $pendingDirectories.Enqueue($item.FullName)
+                if ($currentEntry.Depth -ge 32) { throw 'Release source exceeds the 32-level traversal budget.' }
+                $pendingDirectories.Enqueue([pscustomobject]@{ Path = $item.FullName; Depth = $currentEntry.Depth + 1 })
             }
             elseif ($item -is [IO.FileInfo]) {
                 $files.Add($item) | Out-Null
@@ -177,7 +183,7 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using Microsoft.Win32.SafeHandles;
 
-namespace WindowsAdminToolkit.Security {
+namespace WindowsAdminToolkit.ReleaseSecurity {
     // Each ancestor is held without write/delete sharing until the leaf is consumed.
     // OPEN_REPARSE_POINT makes both the initial walk and later object inspection no-follow.
     public sealed class PathLease : IDisposable {
@@ -198,6 +204,40 @@ namespace WindowsAdminToolkit.Security {
         FileStream stream; SafeFileHandle leaf; Info info; bool disposed;
         public string Path { get; private set; }
         public string Identity { get { return info.Volume.ToString("X8") + ":" + info.IndexHigh.ToString("X8") + info.IndexLow.ToString("X8"); } }
+        [StructLayout(LayoutKind.Sequential)] struct UnicodeName { public ushort Length, MaximumLength; public IntPtr Buffer; }
+        [StructLayout(LayoutKind.Sequential)] struct ObjectAttributes { public uint Length; public IntPtr RootDirectory, ObjectName; public uint Attributes; public IntPtr SecurityDescriptor, SecurityQualityOfService; }
+        [StructLayout(LayoutKind.Sequential)] struct IoStatus { public IntPtr Status, Information; }
+        [DllImport("ntdll.dll")] static extern int NtCreateFile(out SafeFileHandle handle, uint access, ref ObjectAttributes attributes, out IoStatus status, IntPtr allocation, uint fileAttributes, uint share, uint disposition, uint options, IntPtr ea, uint eaLength);
+        [DllImport("ntdll.dll")] static extern uint RtlNtStatusToDosError(int status);
+        [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool ConvertStringSecurityDescriptorToSecurityDescriptor(string text, uint revision, out IntPtr descriptor, out uint size);
+        [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
+        internal SafeFileHandle Handle { get { if (disposed) throw new ObjectDisposedException("PathLease"); return leaf; } }
+        public PathLease CreatePrivateChildDirectory(string name) {
+            if (disposed || !IsDirectory || String.IsNullOrEmpty(name) || name == "." || name == ".." || name.IndexOfAny(new char[] {'\\', '/', ':', '\0'}) >= 0)
+                throw new IOException("A release directory requires one literal child component.");
+            if (name.Length > 255 || name.TrimEnd(' ', '.') != name || System.Text.RegularExpressions.Regex.IsMatch(name, @"[\x00-\x1f\x7f:*?""<>|]") || System.Text.RegularExpressions.Regex.IsMatch(name.Split('.')[0], @"\A(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])\z", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                throw new IOException("A release directory requires a canonical ordinary child name.");
+            string sid = StorageSecurity.CurrentSid;
+            IntPtr descriptor = IntPtr.Zero, buffer = IntPtr.Zero, namePtr = IntPtr.Zero; SafeFileHandle child = null;
+            try {
+                uint size;
+                if (!ConvertStringSecurityDescriptorToSecurityDescriptor("O:" + sid + "G:" + sid + "D:P(A;OICI;FA;;;" + sid + ")(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)", 1, out descriptor, out size))
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                buffer = Marshal.StringToHGlobalUni(name);
+                UnicodeName unicode = new UnicodeName(); unicode.Length = checked((ushort)(name.Length * 2)); unicode.MaximumLength = unicode.Length; unicode.Buffer = buffer;
+                namePtr = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(UnicodeName))); Marshal.StructureToPtr(unicode, namePtr, false);
+                ObjectAttributes attributes = new ObjectAttributes(); attributes.Length = (uint)Marshal.SizeOf(typeof(ObjectAttributes)); attributes.RootDirectory = leaf.DangerousGetHandle(); attributes.ObjectName = namePtr; attributes.Attributes = 0x40; attributes.SecurityDescriptor = descriptor;
+                IoStatus status;
+                int result = NtCreateFile(out child, 0x1200a1u, ref attributes, out status, IntPtr.Zero, 0x10, 1, 2, 0x200021, IntPtr.Zero, 0);
+                if (result < 0) throw new Win32Exception((int)RtlNtStatusToDosError(result), "Cannot create private release directory relative to its retained parent.");
+                Info opened;
+                if (!GetFileInformationByHandle(child, out opened) || (opened.Attributes & 0x410) != 0x10) throw new IOException("Created release directory is not an ordinary directory.");
+                StorageSecurity.Validate(child, true, true);
+                PathLease created = new PathLease(); created.Path = System.IO.Path.Combine(Path, name); created.leaf = child; created.info = opened; created.handles.Add(child); child = null;
+                return created;
+            } finally { if (child != null) child.Dispose(); if (namePtr != IntPtr.Zero) Marshal.FreeHGlobal(namePtr); if (buffer != IntPtr.Zero) Marshal.FreeHGlobal(buffer); if (descriptor != IntPtr.Zero) LocalFree(descriptor); }
+        }
+
         public uint LinkCount { get { return info.Links; } }
         public bool IsDirectory { get { return (info.Attributes & 16) != 0; } }
         public long Length { get { return ((long)info.SizeHigh << 32) | info.SizeLow; } }
@@ -316,7 +356,7 @@ namespace WindowsAdminToolkit.Security {
             uint dangerous = 0x40u | 0x40000u | 0x80000u;
             // A canonical volume anchor cannot be renamed and remains nonempty
             // while its independently protected immediate child is retained.
-            if (!volumeRoot) dangerous |= 0x2u | 0x100u | 0x10000u;
+            if (!volumeRoot) dangerous |= 0x2u | 0x4u | 0x100u | 0x10000u;
             if (privateLeaf || !directory) dangerous |= 0x2u | 0x4u | 0x10u | 0x100u | 0x10000u;
             foreach (System.Security.AccessControl.GenericAce ace in descriptor.DiscretionaryAcl) {
                 if ((ace.AceFlags & System.Security.AccessControl.AceFlags.InheritOnly) != 0) continue;
@@ -346,6 +386,15 @@ namespace WindowsAdminToolkit.Security {
                 bool root = directory && count > 0 && count < name.Capacity &&
                     System.Text.RegularExpressions.Regex.IsMatch(name.ToString(), @"^\\\\\?\\Volume\{[0-9A-Fa-f-]{36}\}\\$");
                 ValidateDescriptor(bytes, privateLeaf, directory, root);
+            } finally { LocalFree(descriptor); }
+        }
+        public static void ValidatePublicationParent(PathLease parent) {
+            IntPtr owner, dacl, descriptor;
+            uint error = GetSecurityInfo(parent.Handle, 1, 5, out owner, IntPtr.Zero, out dacl, IntPtr.Zero, out descriptor);
+            if (error != 0) throw new Win32Exception((int)error);
+            try {
+                uint length = GetSecurityDescriptorLength(descriptor); byte[] bytes = new byte[length]; Marshal.Copy(descriptor, bytes, 0, bytes.Length);
+                ValidateDescriptor(bytes, false, true, false);
             } finally { LocalFree(descriptor); }
         }
         public static void CreatePrivateDirectory(string path) {
@@ -379,7 +428,7 @@ namespace WindowsAdminToolkit.Security {
     }
 }
 '@
-if (-not ('WindowsAdminToolkit.Security.StorageSecurity' -as [type])) {
+if (-not ('WindowsAdminToolkit.ReleaseSecurity.StorageSecurity' -as [type])) {
     Add-Type -TypeDefinition $releaseNativeSource -ErrorAction Stop
 }
 
@@ -412,8 +461,8 @@ try {
 # Establish the no-follow source identity before any output directory is created.
 # Lexical containment is only meaningful after junction and short-name aliases fail.
 $sourceRoot = [WindowsAdminToolkit.ReleasePathGuard]::Local($sourceRoot)
-$releaseLeases.Add([WindowsAdminToolkit.Security.PathLease]::OpenTrusted($sourceRoot, $true, $false, $false))
-$toolkitSourceLease = [WindowsAdminToolkit.Security.PathLease]::OpenTrusted($toolkitSourcePath, $false, $false, $false)
+$releaseLeases.Add([WindowsAdminToolkit.ReleaseSecurity.PathLease]::OpenTrusted($sourceRoot, $true, $false, $false))
+$toolkitSourceLease = [WindowsAdminToolkit.ReleaseSecurity.PathLease]::OpenTrusted($toolkitSourcePath, $false, $false, $false)
 $releaseLeases.Add($toolkitSourceLease)
 $toolkitSource = (New-Object Text.UTF8Encoding($false, $true)).GetString($toolkitSourceLease.ReadBytes(4194304))
 $versionMatches = [regex]::Matches($toolkitSource, '(?m)^\$Script:ToolkitVersion\s*=\s*''(?<Version>[0-9]+\.[0-9]+\.[0-9]+)''\s*$')
@@ -430,10 +479,12 @@ if ($canonicalOutput.Equals($canonicalSource, [StringComparison]::OrdinalIgnoreC
 }
 $outputParent = [IO.Path]::GetDirectoryName($resolvedOutput)
 if ([string]::IsNullOrWhiteSpace($outputParent)) { throw 'The release output requires an existing local parent.' }
-$releaseLeases.Add([WindowsAdminToolkit.Security.PathLease]::OpenTrusted($outputParent, $true, $false, $false))
+$outputParentLease = [WindowsAdminToolkit.ReleaseSecurity.PathLease]::OpenTrusted($outputParent, $true, $false, $false)
+$releaseLeases.Add($outputParentLease)
+[WindowsAdminToolkit.ReleaseSecurity.StorageSecurity]::ValidatePublicationParent($outputParentLease)
 $outputInspection = $null
 try {
-    $outputInspection = [WindowsAdminToolkit.Security.PathLease]::Open($resolvedOutput, $true, $false)
+    $outputInspection = [WindowsAdminToolkit.ReleaseSecurity.PathLease]::Open($resolvedOutput, $true, $false)
     throw "The release output path already exists: $resolvedOutput"
 }
 catch {
@@ -469,7 +520,7 @@ $releaseDirectories = @('schemas', 'examples', 'tests', 'tools')
 $sourceFiles = New-Object 'System.Collections.Generic.List[System.IO.FileInfo]'
 foreach ($rootFileName in $rootFileNames) {
     $sourcePath = Join-Path $sourceRoot $rootFileName
-    $releaseLeases.Add([WindowsAdminToolkit.Security.PathLease]::OpenTrusted($sourcePath, $false, $false, $false))
+    $releaseLeases.Add([WindowsAdminToolkit.ReleaseSecurity.PathLease]::OpenTrusted($sourcePath, $false, $false, $false))
     if (-not [IO.File]::Exists($sourcePath)) {
         throw "Required release source file not found: $rootFileName"
     }
@@ -477,7 +528,7 @@ foreach ($rootFileName in $rootFileNames) {
 }
 foreach ($releaseDirectory in $releaseDirectories) {
     $directoryPath = Join-Path $sourceRoot $releaseDirectory
-    $releaseLeases.Add([WindowsAdminToolkit.Security.PathLease]::OpenTrusted($directoryPath, $true, $false, $false))
+    $releaseLeases.Add([WindowsAdminToolkit.ReleaseSecurity.PathLease]::OpenTrusted($directoryPath, $true, $false, $false))
     if (-not [IO.Directory]::Exists($directoryPath)) {
         throw "Required release source directory not found: $releaseDirectory"
     }
@@ -502,8 +553,9 @@ foreach ($sourceFile in $sourceFiles) {
         }) | Out-Null
 }
 
-[WindowsAdminToolkit.Security.StorageSecurity]::CreatePrivateDirectory($resolvedOutput)
-$releaseLeases.Add([WindowsAdminToolkit.Security.PathLease]::OpenTrusted($resolvedOutput, $true, $false, $true))
+$outputRootLease = $outputParentLease.CreatePrivateChildDirectory([IO.Path]::GetFileName($resolvedOutput))
+$releaseLeases.Add($outputRootLease)
+$outputDirectoryLeases = @{ $resolvedOutput = $outputRootLease }
 $sourceHashes = @{}
 $unsignedToolkitBytes = $null
 $outputRootWithSeparator = $resolvedOutput.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
@@ -519,23 +571,30 @@ foreach ($releaseItem in $releaseItems) {
         $pendingParents.Push($destinationParent)
         $destinationParent = [IO.Path]::GetDirectoryName($destinationParent)
     }
-    while ($pendingParents.Count -gt 0) { [WindowsAdminToolkit.Security.StorageSecurity]::CreatePrivateDirectory($pendingParents.Pop()) }
-    $sourceLease = [WindowsAdminToolkit.Security.PathLease]::OpenTrusted($releaseItem.SourcePath, $false, $false, $false)
+    while ($pendingParents.Count -gt 0) {
+        $childDirectory = $pendingParents.Pop()
+        $parentDirectory = [IO.Path]::GetDirectoryName($childDirectory)
+        if (-not $outputDirectoryLeases.ContainsKey($parentDirectory)) { throw 'Release output parent was not created and retained by this builder.' }
+        $childLease = $outputDirectoryLeases[$parentDirectory].CreatePrivateChildDirectory([IO.Path]::GetFileName($childDirectory))
+        $outputDirectoryLeases[$childDirectory] = $childLease
+        $releaseLeases.Add($childLease)
+    }
+    $sourceLease = [WindowsAdminToolkit.ReleaseSecurity.PathLease]::OpenTrusted($releaseItem.SourcePath, $false, $false, $false)
     $releaseLeases.Add($sourceLease)
     $sourceBytes = $sourceLease.ReadBytes(16777216)
     $sourceHashes[$releaseItem.RelativePath] = $sourceLease.Sha256()
-    [WindowsAdminToolkit.Security.StorageSecurity]::AppendPrivateFile($destinationPath, $sourceBytes, $true, 16777216)
+    [WindowsAdminToolkit.ReleaseSecurity.StorageSecurity]::AppendPrivateFile($destinationPath, $sourceBytes, $true, 16777216)
     if ((Get-ReleaseHash -LiteralPath $destinationPath -Algorithm SHA256) -cne $sourceHashes[$releaseItem.RelativePath]) {
         throw "Release copy verification failed: $($releaseItem.RelativePath)"
     }
     if ($releaseItem.RelativePath -ceq 'WindowsAdminToolkit.ps1') { $unsignedToolkitBytes = $sourceBytes }
-    else { $releaseLeases.Add([WindowsAdminToolkit.Security.PathLease]::OpenTrusted($destinationPath, $false, $false, $true)) }
+    else { $releaseLeases.Add([WindowsAdminToolkit.ReleaseSecurity.PathLease]::OpenTrusted($destinationPath, $false, $false, $true)) }
 }
 
 $signed = $false
 $signerThumbprint = $null
 $copiedToolkitPath = Join-Path $resolvedOutput 'WindowsAdminToolkit.ps1'
-$signingLease = [WindowsAdminToolkit.Security.PathLease]::OpenTrusted($copiedToolkitPath, $false, $true, $true)
+$signingLease = [WindowsAdminToolkit.ReleaseSecurity.PathLease]::OpenTrusted($copiedToolkitPath, $false, $true, $true)
 try {
 if ($signingLease.Sha256() -cne $sourceHashes['WindowsAdminToolkit.ps1']) { throw 'The executable staging bytes changed before signing.' }
 if (-not [string]::IsNullOrWhiteSpace($CertificateThumbprint)) {
@@ -579,7 +638,7 @@ if (-not [string]::IsNullOrWhiteSpace($CertificateThumbprint)) {
 }
 }
 finally { $signingLease.Dispose() }
-$releaseLeases.Add([WindowsAdminToolkit.Security.PathLease]::OpenTrusted($copiedToolkitPath, $false, $false, $true))
+$releaseLeases.Add([WindowsAdminToolkit.ReleaseSecurity.PathLease]::OpenTrusted($copiedToolkitPath, $false, $false, $true))
 $finalToolkitHash = Get-ReleaseHash -LiteralPath $copiedToolkitPath -Algorithm SHA256
 if (-not $signed -and $finalToolkitHash -cne $sourceHashes['WindowsAdminToolkit.ps1']) { throw 'The unsigned executable bytes changed in staging.' }
 

@@ -18,7 +18,9 @@ if (-not (Test-Path -LiteralPath $toolkitPath -PathType Leaf)) {
     throw "Toolkit script not found: $toolkitPath"
 }
 
+# Load the fail-closed transport doubles before any test can dispatch.
 . $toolkitPath
+. (Join-Path $PSScriptRoot 'Offline-Transport.Guards.ps1')
 # CI workspaces are intentionally user-writable. All administrative launch trust
 # is exercised separately with adversarial descriptors; these offline backends
 # are explicitly authorized owned fixtures, not protected production installs.
@@ -111,18 +113,42 @@ function Invoke-ToolkitChildProcess {
         [switch]$FileMode,
 
         [Parameter()]
-        [switch]$OmitNonInteractive
+        [switch]$OmitNonInteractive,
+
+        [Parameter()]
+        [switch]$PreventTargetDispatch
     )
 
     if ($InvocationText -match '(?i)-LogFile\s' -and $InvocationText -notmatch '(?i)-AppendTrustedLog') {
         # Repeated child runs explicitly opt in to the private fixture log.
         $InvocationText += ' -AppendTrustedLog'
     }
+    $networkAuditPath = Join-Path $offlineFixtureRoot ('child-network-' + [guid]::NewGuid().ToString('N') + '.json')
     if ($FileMode) {
+        # Raw binder tests cannot install doubles before the application entry.
+        # Only a literal, local, read-only SystemInfo invocation is permitted.
+        $invocationTokens = $null; $invocationErrors = $null
+        $invocationAst = [Management.Automation.Language.Parser]::ParseInput('toolkit ' + $InvocationText, [ref]$invocationTokens, [ref]$invocationErrors)
+        $commands = @($invocationAst.FindAll({ param($node) $node -is [Management.Automation.Language.CommandAst] }, $true))
+        if ($invocationErrors.Count -ne 0 -or $commands.Count -ne 1) { throw 'Unsafe raw child invocation.' }
+        $elements = @($commands[0].CommandElements)
+        $allowed = @('Automation', 'Action', 'Local', 'JsonOutputPath', 'LogFile', 'AppendTrustedLog', 'Credential')
+        $names = @(); $actionValue = ''
+        for ($elementIndex = 1; $elementIndex -lt $elements.Count; $elementIndex++) {
+            $element = $elements[$elementIndex]
+            if ($element -is [Management.Automation.Language.CommandParameterAst]) {
+                if ($element.ParameterName -notin $allowed -or $null -ne $element.Argument) { throw 'Unsafe raw child parameter.' }
+                $names += $element.ParameterName
+                if ($element.ParameterName -eq 'Action' -and $elementIndex + 1 -lt $elements.Count) { $actionValue = $elements[$elementIndex + 1].Extent.Text }
+            }
+            elseif ($element -isnot [Management.Automation.Language.StringConstantExpressionAst]) { throw 'Raw child values must be literal strings.' }
+        }
+        if ('Local' -notin $names -or 'Automation' -notin $names -or $actionValue -cne 'SystemInfo') { throw 'Raw child tests require local SystemInfo.' }
         $commandText = $null
     }
     else {
         $escapedToolkitPath = $toolkitPath.Replace("'", "''")
+        $dispatchRecorder = if ($PreventTargetDispatch) { '$Script:OfflineNetworkGuardCounts.TargetDispatch = 0; Set-Item Function:\Invoke-AdminTargetDetailed -Value { $Script:OfflineNetworkGuardCounts.TargetDispatch++; throw ''Owned child recorder refuses target dispatch.'' }' } else { '' }
         $commandText = @"
 `$ProgressPreference = 'SilentlyContinue'
 `$VerbosePreference = 'SilentlyContinue'
@@ -132,13 +158,16 @@ function Invoke-ToolkitChildProcess {
 function Get-AdminCheckpointRegistryRoot { return '$($Script:OfflineRegistryRoot.Replace("'", "''"))' }
 function Assert-AdminPrivilegedSourceTrust { }
 function Get-AdminLogDirectory { return '$((Join-Path $offlineFixtureRoot 'default-logs').Replace("'", "''"))' }
+. '$((Join-Path $PSScriptRoot 'Offline-Transport.Guards.ps1').Replace("'", "''"))'
+$dispatchRecorder
 `$entryTokens = `$null; `$entryErrors = `$null
 `$entryAst = [Management.Automation.Language.Parser]::ParseFile('$escapedToolkitPath', [ref]`$entryTokens, [ref]`$entryErrors)
 `$entryNode = `$entryAst.Find({ param(`$node)
     `$node -is [Management.Automation.Language.IfStatementAst] -and `$node.Clauses[0].Item1.Extent.Text -ceq '-not `$Script:WasDotSourced'
 }, `$false)
 `$entryText = `$entryNode.Clauses[0].Item2.Extent.Text
-. ([scriptblock]::Create(`$entryText.Substring(1, `$entryText.Length - 2)))
+try { . ([scriptblock]::Create(`$entryText.Substring(1, `$entryText.Length - 2))) }
+finally { [IO.File]::WriteAllText('$($networkAuditPath.Replace("'", "''"))', (`$Script:OfflineNetworkGuardCounts | ConvertTo-Json -Compress)) }
 exit `$LASTEXITCODE
 "@
     }
@@ -178,6 +207,7 @@ exit `$LASTEXITCODE
             ExitCode = $process.ExitCode
             StdOut   = $stdout
             StdErr   = $stderr
+            NetworkGuardAudit = if ([IO.File]::Exists($networkAuditPath)) { [IO.File]::ReadAllText($networkAuditPath) | ConvertFrom-Json } else { $null }
         }
     }
     finally {
@@ -1486,8 +1516,9 @@ $childArguments = @(
     Test-ToolkitAssertion -Condition ($wrongApproveProcess.ExitCode -eq 3 -and $wrongApproveEnvelope.outcome -ceq 'AuthorizationFailure' -and -not (Test-Path -LiteralPath $approvedPlanPath)) -Name 'Plan approval requires the exact complete reviewed hash'
 
     $pendingPlanSourceHashBeforeApproval = (Get-FileHash -LiteralPath $pendingPlanPath -Algorithm SHA256).Hash
-    $approvePlanProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -PlanOperation Approve -PlanPath '$escapedPendingPlanPath' -ApprovedPlanPath '$escapedApprovedPlanPath' -ApprovedBy 'Synthetic Approver' -ApprovalReference 'CHG-TEST-001' -PlanApprovalText 'APPROVE PLAN $planHash'"
+    $approvePlanProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -PlanOperation Approve -PlanPath '$escapedPendingPlanPath' -ApprovedPlanPath '$escapedApprovedPlanPath' -ApprovedBy 'Synthetic Approver' -ApprovalReference 'CHG-TEST-001' -PlanApprovalText 'APPROVE PLAN $planHash' -Verbose -WarningAction Continue"
     $approvePlanEnvelope = ConvertFrom-Json -InputObject $approvePlanProcess.StdOut.Trim() -ErrorAction Stop
+    Test-ToolkitAssertion -Condition ($approvePlanProcess.ExitCode -eq 0) -Name 'Native Approve accepts non-authorizing PowerShell common parameters'
     $approvedPlan = Import-AdminOrchestrationPlan -LiteralPath $approvedPlanPath
     $pendingPlanSourceHashAfterApproval = (Get-FileHash -LiteralPath $pendingPlanPath -Algorithm SHA256).Hash
     Test-ToolkitAssertion -Condition ($approvePlanProcess.ExitCode -eq 0 -and $approvePlanEnvelope.status -ceq 'Approved' -and $approvedPlan.approval.status -ceq 'Approved' -and $approvedPlan.planHash.value -ceq $planHash) -Name 'Approval writes a new approved artifact without changing the execution contract'
@@ -1508,8 +1539,9 @@ $childArguments = @(
     $overrideExecuteEnvelope = ConvertFrom-Json -InputObject $overrideExecuteProcess.StdOut.Trim() -ErrorAction Stop
     Test-ToolkitAssertion -Condition ($overrideExecuteProcess.ExitCode -eq 2 -and $overrideExecuteEnvelope.errors[0].message -match 'cannot override' -and -not (Test-Path -LiteralPath $checkpointPath)) -Name 'Execution rejects even same-value action overrides outside the approved contract'
 
-    $executePlanProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -PlanOperation Execute -PlanPath '$escapedApprovedPlanPath' -CheckpointPath '$escapedCheckpointPath' -PlanApprovalText 'EXECUTE PLAN $planHash' -LogFile '$escapedAutomationLogPath'"
+    $executePlanProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -PlanOperation Execute -PlanPath '$escapedApprovedPlanPath' -CheckpointPath '$escapedCheckpointPath' -PlanApprovalText 'EXECUTE PLAN $planHash' -LogFile '$escapedAutomationLogPath' -ErrorAction Stop -Debug"
     $executePlanEnvelope = ConvertFrom-Json -InputObject $executePlanProcess.StdOut.Trim() -ErrorAction Stop
+    Test-ToolkitAssertion -Condition ($executePlanProcess.ExitCode -eq 0) -Name 'Native Execute accepts non-authorizing PowerShell common parameters'
     $executedCheckpoint = Import-AdminOrchestrationCheckpoint -LiteralPath $checkpointPath -Plan $approvedPlan
     Test-ToolkitAssertion -Condition ($executePlanProcess.ExitCode -eq 0 -and $executePlanEnvelope.operation -ceq 'Execute' -and $executePlanEnvelope.outcome -ceq 'CompleteSuccess' -and $executedCheckpoint.summary.completedCount -eq 1) -Name 'Approved local plan executes and checkpoints a complete target lifecycle'
     Test-ToolkitAssertion -Condition ($executedCheckpoint.targets[0].state -ceq 'Completed' -and $executedCheckpoint.targets[0].attempts -eq 1 -and $executedCheckpoint.targets[0].resultExitCode -eq 0 -and (Get-AdminCheckpointHash -Checkpoint $executedCheckpoint) -ceq $executedCheckpoint.checkpointHash.value) -Name 'Completed checkpoint records one attempt and a verifiable lifecycle hash'
@@ -1524,8 +1556,9 @@ $childArguments = @(
 
     $completedStartedAtUtc = [string]$executedCheckpoint.targets[0].startedAtUtc
     $completedFinishedAtUtc = [string]$executedCheckpoint.targets[0].finishedAtUtc
-    $resumePlanProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -PlanOperation Resume -PlanPath '$escapedApprovedPlanPath' -CheckpointPath '$escapedCheckpointPath' -PlanApprovalText 'RESUME PLAN $planHash' -LogFile '$escapedAutomationLogPath'"
+    $resumePlanProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -PlanOperation Resume -PlanPath '$escapedApprovedPlanPath' -CheckpointPath '$escapedCheckpointPath' -PlanApprovalText 'RESUME PLAN $planHash' -LogFile '$escapedAutomationLogPath' -InformationAction Continue -Verbose"
     $resumePlanEnvelope = ConvertFrom-Json -InputObject $resumePlanProcess.StdOut.Trim() -ErrorAction Stop
+    Test-ToolkitAssertion -Condition ($resumePlanProcess.ExitCode -eq 0) -Name 'Native Resume accepts non-authorizing PowerShell common parameters'
     $resumedCompletedCheckpoint = Import-AdminOrchestrationCheckpoint -LiteralPath $checkpointPath -Plan $approvedPlan
     Test-ToolkitAssertion -Condition ($resumePlanProcess.ExitCode -eq 0 -and $resumePlanEnvelope.outcome -ceq 'CompleteSuccess' -and $resumedCompletedCheckpoint.targets[0].attempts -eq 1) -Name 'Resume succeeds without repeating an already completed target'
     Test-ToolkitAssertion -Condition ([string]$resumedCompletedCheckpoint.targets[0].startedAtUtc -ceq $completedStartedAtUtc -and [string]$resumedCompletedCheckpoint.targets[0].finishedAtUtc -ceq $completedFinishedAtUtc -and $resumedCompletedCheckpoint.targets[0].state -ceq 'Completed') -Name 'Resume preserves completed target timing and terminal state exactly'
@@ -1896,7 +1929,7 @@ $childArguments = @(
     $invalidAuthenticationEnvelope = ConvertFrom-Json -InputObject $invalidAuthenticationProcess.StdOut.Trim() -ErrorAction Stop
     Test-ToolkitAssertion -Condition ($invalidAuthenticationProcess.ExitCode -eq 2 -and $invalidAuthenticationEnvelope.transport.name -ceq 'WinRM' -and $null -eq $invalidAuthenticationEnvelope.transport.authentication) -Name 'Unsupported authentication returns a schema-valid JSON validation envelope'
 
-    $stringCredentialProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText '-Automation -Action SystemInfo -ComputerName server01.example.com -Credential synthetic-user' -FileMode -OmitNonInteractive -TimeoutSeconds 5
+    $stringCredentialProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText '-Automation -Action SystemInfo -Local -Credential synthetic-user' -FileMode -OmitNonInteractive -TimeoutSeconds 5
     $stringCredentialEnvelope = ConvertFrom-Json -InputObject $stringCredentialProcess.StdOut.Trim() -ErrorAction Stop
     Test-ToolkitAssertion -Condition ($stringCredentialProcess.ExitCode -eq 2 -and $stringCredentialEnvelope.outcome -eq 'ValidationFailure' -and $stringCredentialEnvelope.errors[0].message -match 'PSCredential') -Name 'Native automation rejects a username string without opening credential UI'
 
@@ -1937,9 +1970,11 @@ $childArguments = @(
     $timeoutEnvelope = ConvertFrom-Json -InputObject $timeoutProcess.StdOut.Trim() -ErrorAction Stop
     Test-ToolkitAssertion -Condition ($timeoutProcess.ExitCode -eq 5 -and $timeoutEnvelope.outcome -eq 'Timeout' -and $timeoutEnvelope.targets[0].errorCategory -eq 'Timeout') -Name 'All-timeout execution returns stable process exit code 5'
 
-    $remoteFailureProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -Action SystemInfo -ComputerName 192.0.2.10 -ConnectivityTimeoutSeconds 1 -LogFile '$escapedAutomationLogPath'" -TimeoutSeconds 15
+    $remoteFailureProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -Action SystemInfo -ComputerName synthetic-offline.example.test -ConnectivityTimeoutSeconds 1 -LogFile '$escapedAutomationLogPath'" -TimeoutSeconds 15
     $remoteFailureEnvelope = ConvertFrom-Json -InputObject $remoteFailureProcess.StdOut.Trim() -ErrorAction Stop
     Test-ToolkitAssertion -Condition ($remoteFailureProcess.ExitCode -eq 4 -and $remoteFailureEnvelope.targets[0].errorCategory -eq 'Connectivity') -Name 'Unreachable remote target returns a normalized execution failure'
+    $offlineAudit = $remoteFailureProcess.NetworkGuardAudit
+    Test-ToolkitAssertion -Condition ($null -ne $offlineAudit -and $offlineAudit.ConnectivityDouble -eq 1 -and $offlineAudit.RemoteDispatch -eq 0 -and $offlineAudit.RemoteCommand -eq 0 -and $offlineAudit.TcpAttempt -eq 0 -and $offlineAudit.NativeRemoteProcess -eq 0) -Name 'Connectivity failure uses only the double and never reaches transport or TCP'
 
     $jsonOutputPath = Join-Path $resolvedTemporaryRoot 'automation-output.json'
     $escapedJsonOutputPath = $jsonOutputPath.Replace("'", "''")
@@ -1955,6 +1990,11 @@ $childArguments = @(
     $whatIfFileProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -Action ScheduleReboot -Local -WhatIf -JsonOutputPath '$escapedWhatIfOutputPath' -LogFile '$escapedAutomationLogPath'"
     $whatIfFileEnvelope = Get-Content -LiteralPath $whatIfOutputPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
     Test-ToolkitAssertion -Condition ($whatIfFileProcess.ExitCode -eq 0 -and [string]::IsNullOrWhiteSpace($whatIfFileProcess.StdOut) -and $whatIfFileEnvelope.status -eq 'WhatIf') -Name 'WhatIf still creates its requested machine-readable file without console contamination'
+
+    $nativePreviewProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -Action SystemInfo -Local -WhatIf -LogFile '$escapedAutomationLogPath'" -PreventTargetDispatch
+    $nativePreviewEnvelope = ConvertFrom-Json -InputObject $nativePreviewProcess.StdOut.Trim() -ErrorAction Stop
+    Test-ToolkitAssertion -Condition ($nativePreviewProcess.ExitCode -eq 0 -and $nativePreviewEnvelope.status -ceq 'WhatIf' -and $nativePreviewProcess.NetworkGuardAudit.TargetDispatch -eq 0) -Name 'Native read-only WhatIf performs zero recorded target dispatches'
+    Test-ToolkitAssertion -Condition ($nativePreviewProcess.NetworkGuardAudit.RemoteDispatch -eq 0 -and $nativePreviewProcess.NetworkGuardAudit.RemoteCommand -eq 0 -and $nativePreviewProcess.NetworkGuardAudit.TcpAttempt -eq 0 -and $nativePreviewProcess.NetworkGuardAudit.NativeRemoteProcess -eq 0) -Name 'Native WhatIf reaches no TCP, WinRM or native remote transport'
 
     $fileHashBefore = (Get-FileHash -LiteralPath $jsonOutputPath -Algorithm SHA256).Hash
     $overwriteProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -Action RunningProcesses -Local -TopCount 1 -JsonOutputPath '$escapedJsonOutputPath' -LogFile '$escapedAutomationLogPath'"
@@ -2009,6 +2049,7 @@ finally {
 . (Join-Path $PSScriptRoot 'Final-Cloud-Regression.Tests.ps1')
 . (Join-Path $PSScriptRoot 'Latest-Ten-Regression.Tests.ps1')
 . (Join-Path $PSScriptRoot 'Final-Two-Regression.Tests.ps1')
+. (Join-Path $PSScriptRoot 'Final-Five-Regression.Tests.ps1')
 
 Write-Host ''
 if ($Script:Failures.Count -gt 0) {
