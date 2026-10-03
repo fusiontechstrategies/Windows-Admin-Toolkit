@@ -4,6 +4,8 @@ Windows Admin Toolkit uses a dependency-free test harness so the same checks run
 
 ## Current source security regressions
 
+The main harness also runs `tests/Latest-Ten-Regression.Tests.ps1`. Actual offline probes cover loaded-source replacement across background jobs, private relative file creation, preauthorized writer conflicts, retained leaf and ancestor replacement refusal, equal-length audit substitution, explicit trusted log append, target aliases and attribution, zero-success outcome precedence, terminal controls, poisoned environment paths, protected-source DACL controls, and release/source overlap. CI workspaces use an explicit test-only launch-trust stub for synthetic backends; production source protection is independently exercised with rejecting and valid descriptor controls. Cleanup tests replace the exact production root resolver with owned fixture paths and refuse to execute if that replacement fails. No host permission changes or live target mutations are performed.
+
 The main harness also runs `tests/Security-Regression.Tests.ps1` on both editions. It uses unique synthetic filesystem fixtures, mocked WinRM producers, and test-created child processes. Coverage includes junction rejection, locked leaf and ancestor replacement, immutable orchestration policy consumption, bounded discovery and 128 MiB input rejection, read-only previews, explicit policy KB selection, incremental output limits, aggregate worker budgets, concurrent Resume with exactly one target invocation, and checkpoint lease recovery after a helper crash.
 
 These tests do not connect to live administrative targets. The existing release builder checks still verify unsigned candidate payload hashes, manifest and SPDX coverage, source-byte preservation, and no-overwrite output; they do not publish or sign a release.
@@ -138,7 +140,7 @@ The test suite verifies:
 - Strict plan and checkpoint UTF-8, size, suffix, duplicate-key, case-conflict, unknown-property, lifecycle, and canonical-hash validation
 - Separate pending and approved plan files with full-hash authorization and approval-metadata hash verification
 - Rejection of credentials, audit sinks, custom-code actions, and execution-time overrides in plan workflows
-- Atomic checkpoint creation and replacement without temporary artifacts, overwrite, or terminal-target repetition
+- Private checkpoint creation and retained in-place revisions without temporary artifacts, overwrite, or terminal-target repetition; incomplete or ledger-mismatched revisions refuse Resume
 - Safe Resume behavior for completed targets and interrupted `InProgress` targets converted to `Unknown`
 - Preservation of action-specific confirmation and zero retries for approved state-changing `WhatIf` plans
 - Canonical path and raw SHA-256 binding for policy files referenced by approved plans

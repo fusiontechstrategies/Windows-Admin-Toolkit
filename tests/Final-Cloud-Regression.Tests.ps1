@@ -120,6 +120,8 @@ try {
         $resumeParameters.CheckpointPath = $hardlinkCheckpointPath
         Test-ToolkitThrow -Action { Invoke-AdminPlanExecution -Operation Resume -Parameters $resumeParameters -RunId ([guid]::NewGuid()) -StartedAtUtc ([datetime]::UtcNow) -ResolvedOutputPath '-' | Out-Null } -Name 'A hard-link checkpoint alias cannot create a new execution authority'
         $resumeParameters.CheckpointPath = $identityCheckpointPath
+        Test-ToolkitThrow -Action { Invoke-AdminPlanExecution -Operation Resume -Parameters $resumeParameters -RunId ([guid]::NewGuid()) -StartedAtUtc ([datetime]::UtcNow) -ResolvedOutputPath '-' | Out-Null } -Name 'The original checkpoint also refuses an outstanding hard-link alias'
+        [IO.File]::Delete($hardlinkCheckpointPath)
         $completedIdentity = Invoke-AdminPlanExecution -Operation Resume -Parameters $resumeParameters -RunId ([guid]::NewGuid()) -StartedAtUtc ([datetime]::UtcNow) -ResolvedOutputPath '-'
         Test-ToolkitAssertion -Condition ($completedIdentity.outcome -ceq 'CompleteSuccess' -and $Script:IdentityTargetCalls -eq 1) -Name 'The original checkpoint identity executes exactly one synthetic target'
         [IO.File]::WriteAllBytes($identityCheckpointPath, $pendingBytes)

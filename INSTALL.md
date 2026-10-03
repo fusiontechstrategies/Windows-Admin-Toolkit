@@ -4,7 +4,15 @@ The official executable distribution of Windows Admin Toolkit is the Authenticod
 
 Repository clones and GitHub-generated source archives are useful for review and contribution, but they are not signed release assets.
 
-## Verified current-user installation
+## Privileged launch requires protected source
+
+Elevated target dispatch and alternate-credential runs require a script and every ancestor owned by SYSTEM, Administrators, or TrustedInstaller, without ordinary-user or current-user write, delete, ownership, or DACL authority. A verified download into a current-user directory does not meet this requirement. A trusted administrator or deployment system must establish protected permissions; the toolkit does not change existing directory permissions.
+
+Launch a trusted PowerShell executable with `-NoProfile` and verify the installed release before first execution. A signature or hash cannot make mutable initial code safe between verification and launch. Profiles, startup code, other administrators, and identities with existing privileged filesystem authority remain trusted local authority.
+
+Workers receive the original parser source buffer in memory and never reopen the toolkit pathname. This protects already loaded code from subsequent substitution; it does not authenticate code altered before loading.
+
+## Verified current-user installation for non-elevated current-identity use
 
 The following block downloads the latest standalone script and its release manifest into a new temporary directory. It verifies the manifest entry, file hash, Windows Authenticode trust, and publisher identity. It then validates a unique candidate in the installation directory before using an atomic move for a first install or an atomic replacement with automatic rollback for an update.
 

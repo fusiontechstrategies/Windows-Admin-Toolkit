@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Runs dependency-free offline tests for Windows Admin Toolkit.
 #>
@@ -19,6 +19,10 @@ if (-not (Test-Path -LiteralPath $toolkitPath -PathType Leaf)) {
 }
 
 . $toolkitPath
+# CI workspaces are intentionally user-writable. All administrative launch trust
+# is exercised separately with adversarial descriptors; these offline backends
+# are explicitly authorized owned fixtures, not protected production installs.
+function Assert-AdminPrivilegedSourceTrust { }
 Set-StrictMode -Version 2.0
 
 # Every artifact and durable execution ledger belongs to this private fixture.
@@ -34,6 +38,7 @@ $env:TEMP = $offlineFixtureRoot
 $env:TMP = $offlineFixtureRoot
 $Script:OfflineRegistryRoot = Join-Path $offlineFixtureRoot 'checkpoint-ledger'
 function Get-AdminCheckpointRegistryRoot { return $Script:OfflineRegistryRoot }
+function Get-AdminLogDirectory { return Join-Path $offlineFixtureRoot 'default-logs' }
 $testEntryTokens = $null; $testEntryErrors = $null
 $testEntryAst = [Management.Automation.Language.Parser]::ParseFile($toolkitPath, [ref]$testEntryTokens, [ref]$testEntryErrors)
 $testEntryNode = $testEntryAst.Find({ param($node)
@@ -109,6 +114,10 @@ function Invoke-ToolkitChildProcess {
         [switch]$OmitNonInteractive
     )
 
+    if ($InvocationText -match '(?i)-LogFile\s' -and $InvocationText -notmatch '(?i)-AppendTrustedLog') {
+        # Repeated child runs explicitly opt in to the private fixture log.
+        $InvocationText += ' -AppendTrustedLog'
+    }
     if ($FileMode) {
         $commandText = $null
     }
@@ -121,6 +130,8 @@ function Invoke-ToolkitChildProcess {
 `$InformationPreference = 'SilentlyContinue'
 . '$escapedToolkitPath' $InvocationText
 function Get-AdminCheckpointRegistryRoot { return '$($Script:OfflineRegistryRoot.Replace("'", "''"))' }
+function Assert-AdminPrivilegedSourceTrust { }
+function Get-AdminLogDirectory { return '$((Join-Path $offlineFixtureRoot 'default-logs').Replace("'", "''"))' }
 `$entryTokens = `$null; `$entryErrors = `$null
 `$entryAst = [Management.Automation.Language.Parser]::ParseFile('$escapedToolkitPath', [ref]`$entryTokens, [ref]`$entryErrors)
 `$entryNode = `$entryAst.Find({ param(`$node)
@@ -987,19 +998,19 @@ $childArguments = @(
     $auditProbeRunId = [guid]'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
     $auditProbeEvent = ConvertTo-AdminAuditEvent -RunId $auditProbeRunId -Sequence 1 -EventType run.started -TimestampUtc ([datetime]'2026-08-22T12:00:00Z') -Stage Initialization -Outcome Started
     [void](Write-AdminAuditRecord -Context $auditProbeContext -Event $auditProbeEvent)
-    $auditProbeBytes = [System.IO.File]::ReadAllBytes($auditProbePath)
-    $auditProbeRecord = [System.IO.File]::ReadAllText($auditProbePath) | ConvertFrom-Json -ErrorAction Stop
+    $auditProbeBytes = $auditProbeContext.Sink.ReadBytes(16777216)
+    $auditProbeRecord = [Text.Encoding]::UTF8.GetString($auditProbeBytes) | ConvertFrom-Json -ErrorAction Stop
     Test-ToolkitAssertion -Condition ($auditProbeContext.RecordCount -eq 1 -and $auditProbeRecord.eventId -ceq 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb:000001') -Name 'JSON Lines audit writer emits a sequenced versioned record'
     Test-ToolkitAssertion -Condition ($auditProbeBytes.Length -gt 0 -and $auditProbeBytes[0] -eq [byte][char]'{' -and -not ($auditProbeBytes.Length -ge 3 -and $auditProbeBytes[0] -eq 0xEF -and $auditProbeBytes[1] -eq 0xBB -and $auditProbeBytes[2] -eq 0xBF)) -Name 'Audit records use UTF-8 without a byte-order mark'
     Test-ToolkitThrow -Action { Resolve-AdminAuditPath -LiteralPath $auditProbePath | Out-Null } -Name 'Audit path resolution refuses an existing file'
     Test-ToolkitThrow -Action { Resolve-AdminAuditPath -LiteralPath '-' | Out-Null } -Name 'Audit path resolution refuses stdout'
     Test-ToolkitThrow -Action { Resolve-AdminAuditPath -LiteralPath (Join-Path $resolvedTemporaryRoot 'audit.txt') | Out-Null } -Name 'Audit path resolution requires the JSON Lines extension'
     Test-ToolkitThrow -Action { Resolve-AdminAuditPath -LiteralPath (Join-Path $resolvedTemporaryRoot 'collision.jsonl') -CollisionPaths @((Join-Path $resolvedTemporaryRoot 'collision.jsonl')) | Out-Null } -Name 'Audit path resolution rejects output-sink collisions'
-    [System.IO.File]::AppendAllText($auditProbePath, "external`n", (New-Object System.Text.UTF8Encoding($false)))
+    Test-ToolkitThrow -Action { [System.IO.File]::AppendAllText($auditProbePath, "external`n", (New-Object System.Text.UTF8Encoding($false))) } -Name 'Audit object blocks an external appender between records'
+    $auditProbeContext.BytesWritten--
     $secondAuditProbeEvent = ConvertTo-AdminAuditEvent -RunId $auditProbeRunId -Sequence 2 -EventType request.resolved -TimestampUtc ([datetime]'2026-08-22T12:00:00Z') -Stage Request
     Test-ToolkitThrow -Action { Write-AdminAuditRecord -Context $auditProbeContext -Event $secondAuditProbeEvent | Out-Null } -Name 'Audit writer detects unexpected file mutation during a run'
-    $auditProbeStream = [System.IO.File]::OpenWrite($auditProbePath)
-    try { $auditProbeStream.SetLength([int64]$auditProbeContext.BytesWritten) } finally { $auditProbeStream.Dispose() }
+    $auditProbeContext.BytesWritten++
     Test-ToolkitThrow -Action { Write-AdminAuditRecord -Context $auditProbeContext -Event $secondAuditProbeEvent | Out-Null } -Name 'Audit writer permanently latches a per-run sink failure'
 
     $computerFile = Join-Path $resolvedTemporaryRoot 'computers.txt'
@@ -1096,7 +1107,7 @@ $childArguments = @(
         $Script:InvocationParameters = [ordered]@{ PolicyPath = $readOnlyPolicyPath }
         $LogFile = $interactivePolicyLogPath
         Invoke-WindowsAdminToolkit -Confirm:$false *> $null
-        $interactivePolicyLogText = Get-Content -LiteralPath $interactivePolicyLogPath -Raw -ErrorAction Stop
+        $interactivePolicyLogText = [Text.Encoding]::UTF8.GetString($Script:State.LogContext.ReadBytes(16777216))
         Test-ToolkitAssertion -Condition ($interactivePolicyLogText -match "Policy profile 'Read-only local operations' loaded and validated") -Name 'Interactive mode loads and logs a supplied policy profile'
         Test-ToolkitAssertion -Condition ($interactivePolicyLogText -match 'Policy allowed the selected target context: PolicyAllowed') -Name 'Interactive mode applies policy before showing actions for a target context'
 
@@ -1503,7 +1514,7 @@ $childArguments = @(
     Test-ToolkitAssertion -Condition ($executePlanProcess.ExitCode -eq 0 -and $executePlanEnvelope.operation -ceq 'Execute' -and $executePlanEnvelope.outcome -ceq 'CompleteSuccess' -and $executedCheckpoint.summary.completedCount -eq 1) -Name 'Approved local plan executes and checkpoints a complete target lifecycle'
     Test-ToolkitAssertion -Condition ($executedCheckpoint.targets[0].state -ceq 'Completed' -and $executedCheckpoint.targets[0].attempts -eq 1 -and $executedCheckpoint.targets[0].resultExitCode -eq 0 -and (Get-AdminCheckpointHash -Checkpoint $executedCheckpoint) -ceq $executedCheckpoint.checkpointHash.value) -Name 'Completed checkpoint records one attempt and a verifiable lifecycle hash'
     $checkpointTemporaryArtifacts = @(Get-ChildItem -LiteralPath $resolvedTemporaryRoot -File | Where-Object { $_.Name -like '.wat-checkpoint-*.tmp' -or $_.Name -like '.wat-checkpoint-backup-*.tmp' })
-    Test-ToolkitAssertion -Condition ($checkpointTemporaryArtifacts.Count -eq 0) -Name 'Atomic checkpoint writes leave no temporary or backup artifacts'
+    Test-ToolkitAssertion -Condition ($checkpointTemporaryArtifacts.Count -eq 0) -Name 'Retained in-place checkpoint revisions leave no temporary or backup artifacts'
 
     $checkpointHashBeforeExecuteReuse = (Get-FileHash -LiteralPath $checkpointPath -Algorithm SHA256).Hash
     $executeReuseProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -PlanOperation Execute -PlanPath '$escapedApprovedPlanPath' -CheckpointPath '$escapedCheckpointPath' -PlanApprovalText 'EXECUTE PLAN $planHash'"
@@ -1593,7 +1604,7 @@ $childArguments = @(
     $interruptedResumeProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -PlanOperation Resume -PlanPath '$escapedApprovedPlanPath' -CheckpointPath '$escapedInterruptedCheckpointPath' -PlanApprovalText 'RESUME PLAN $planHash'"
     $interruptedResumeEnvelope = ConvertFrom-Json -InputObject $interruptedResumeProcess.StdOut.Trim() -ErrorAction Stop
     $unknownCheckpoint = Import-AdminOrchestrationCheckpoint -LiteralPath $interruptedCheckpointPath -Plan $approvedPlan
-    Test-ToolkitAssertion -Condition ($interruptedResumeProcess.ExitCode -eq 1 -and $interruptedResumeEnvelope.outcome -ceq 'PartialSuccess' -and $unknownCheckpoint.targets[0].state -ceq 'Unknown') -Name 'Resume converts an interrupted in-progress target to Unknown instead of rerunning it'
+    Test-ToolkitAssertion -Condition ($interruptedResumeProcess.ExitCode -eq 10 -and $interruptedResumeEnvelope.outcome -ceq 'InternalFailure' -and $unknownCheckpoint.targets[0].state -ceq 'Unknown') -Name 'Resume converts an interrupted in-progress target to Unknown instead of rerunning it'
     Test-ToolkitAssertion -Condition ($unknownCheckpoint.targets[0].attempts -eq 1 -and [string]$unknownCheckpoint.targets[0].startedAtUtc -ceq $interruptedStartedAtUtc -and $unknownCheckpoint.targets[0].errorCategory -ceq 'Interruption') -Name 'Unknown interruption evidence preserves the original single attempt and start time'
 
     $rebootPendingPlanPath = Join-Path $resolvedTemporaryRoot 'reboot-pending.watplan.json'
@@ -1776,13 +1787,18 @@ $childArguments = @(
     $escapedMutateAuditCode = $mutateAuditCode.Replace("'", "''")
     $mutatedAuditProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -Action CustomPowerShell -Local -PowerShellText '$escapedMutateAuditCode' -ConfirmationText 'RUN SCRIPT' -AuditPath '$escapedMutatedAuditPath' -LogFile '$escapedAutomationLogPath'"
     $mutatedAuditEnvelope = ConvertFrom-Json -InputObject $mutatedAuditProcess.StdOut.Trim() -ErrorAction Stop
-    Test-ToolkitAssertion -Condition ($mutatedAuditProcess.ExitCode -eq 10 -and $mutatedAuditEnvelope.outcome -ceq 'InternalFailure' -and -not $mutatedAuditEnvelope.audit.complete) -Name 'Audit sink mutation is visible as stable internal failure exit code 10'
-    Test-ToolkitAssertion -Condition (@($mutatedAuditEnvelope.targets).Count -eq 1 -and $mutatedAuditEnvelope.targets[0].status -ceq 'Success' -and $mutatedAuditEnvelope.warnings[-1] -match 'Review preserved target evidence') -Name 'Audit failure preserves completed target evidence and warns against blind retry'
+    Test-ToolkitAssertion -Condition ($mutatedAuditProcess.ExitCode -eq 4 -and $mutatedAuditEnvelope.outcome -ceq 'ExecutionFailure' -and $mutatedAuditEnvelope.audit.complete) -Name 'Blocked audit mutation returns execution failure while retaining complete audit evidence'
+    Test-ToolkitAssertion -Condition (@($mutatedAuditEnvelope.targets).Count -eq 1 -and $mutatedAuditEnvelope.targets[0].status -ceq 'Failed' -and $mutatedAuditEnvelope.audit.recordCount -eq 6) -Name 'Audit mutation denial retains the failed target result and complete audit lifecycle'
     Test-ToolkitAssertion -Condition (($mutatedAuditEnvelope | ConvertTo-Json -Compress -Depth 20) -notmatch [regex]::Escape($mutateAuditCode)) -Name 'Audit failure result excludes operator-supplied custom source text'
 
     $fileModeStdoutProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText "-Automation -Action SystemInfo -Local -JsonOutputPath STDOUT -LogFile `"$automationLogPath`"" -FileMode
     $fileModeStdoutEnvelope = ConvertFrom-Json -InputObject $fileModeStdoutProcess.StdOut.Trim() -ErrorAction Stop
-    Test-ToolkitAssertion -Condition ($fileModeStdoutProcess.ExitCode -eq 0 -and $fileModeStdoutEnvelope.outcome -eq 'CompleteSuccess') -Name 'STDOUT alias works through the native PowerShell File command line'
+    if (Test-Administrator) {
+        Test-ToolkitAssertion -Condition ($fileModeStdoutProcess.ExitCode -eq 2 -and $fileModeStdoutEnvelope.outcome -ceq 'ValidationFailure' -and @($fileModeStdoutEnvelope.targets).Count -eq 0) -Name 'Privileged native File launch refuses user-writable CI source before target work'
+    }
+    else {
+        Test-ToolkitAssertion -Condition ($fileModeStdoutProcess.ExitCode -eq 0 -and $fileModeStdoutEnvelope.outcome -eq 'CompleteSuccess') -Name 'STDOUT alias works through the non-elevated native PowerShell File command line'
+    }
 
     $catalogProcess = Invoke-ToolkitChildProcess -EnginePath $currentEnginePath -InvocationText '-Automation -ListActions'
     $catalogEnvelope = ConvertFrom-Json -InputObject $catalogProcess.StdOut.Trim() -ErrorAction Stop
@@ -1983,6 +1999,7 @@ $childArguments = @(
     }
 }
 finally {
+    Close-AdminRunSink
     if (Test-Path -LiteralPath $resolvedTemporaryRoot -PathType Container) {
         Remove-Item -LiteralPath $resolvedTemporaryRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -1990,6 +2007,7 @@ finally {
 
 . (Join-Path $PSScriptRoot 'Security-Regression.Tests.ps1')
 . (Join-Path $PSScriptRoot 'Final-Cloud-Regression.Tests.ps1')
+. (Join-Path $PSScriptRoot 'Latest-Ten-Regression.Tests.ps1')
 
 Write-Host ''
 if ($Script:Failures.Count -gt 0) {

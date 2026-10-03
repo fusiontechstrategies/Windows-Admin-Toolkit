@@ -69,7 +69,7 @@ $hash = $approved.planHash.value
 
 State-changing plans still require their existing exact `-ConfirmationText` at both `Execute` and `Resume`. Plans over 25 targets still require `-TargetListConfirmationText 'USE TARGET LIST'`, and PsExec plans still require `-PsExecConfirmationText 'USE PSEXEC'`. `ShouldProcess`, `WhatIf`, protected-process rules, path safeguards, built-in limits, policy restrictions, and the no-retry rule for state changes all remain active.
 
-Execute and Resume hold one exclusive checkpoint lease across import, every target claim, invocation, and checkpoint write. A competing operation fails before selecting pending work. The lease rejects reentry in the same process, survives atomic checkpoint replacement, and is released by the operating system after a process crash. An interrupted `InProgress` target still becomes `Unknown` during explicit recovery.
+Execute and Resume hold exclusive checkpoint identity leases and one private read/write file object across import, every target claim, invocation, and revision. The file is opened relative to a retained no-follow parent handle; every ancestor remains pinned without write or delete sharing. Competing writers, leaf replacement and ancestor relocation fail before work is claimed. All revisions use the same object. Kernel handles release after a crash. Interrupted `InProgress` targets become `Unknown` during explicit recovery.
 
 Checkpoint IDs also have an exclusive identity lease and a private durable ledger under the executing identity's Windows Local Application Data directory (`WindowsAdminToolkit-CheckpointLedger-v1`). Each record binds the ID to one canonical checkpoint path, approved plan hash, revision, and checkpoint hash. Copies, hard-link aliases, foreign-identity checkpoints, and stale snapshots cannot establish another execution authority. The ledger is flushed before the checkpoint is published. Interrupted ledger or artifact writes fail closed and require manual reconciliation.
 
@@ -77,7 +77,7 @@ Resume must use the original Windows identity, checkpoint path, and matching led
 
 Approved external references use no-follow file handles and locked ancestor directories. Policy execution uses the profile parsed from the exact opened stream. PsExec is revalidated immediately before launch while the same path identity is locked. Protected input files require local absolute Windows paths and native handle support in a full PowerShell language session.
 
-Targets are checkpointed one at a time in deterministic plan order. Version 1 intentionally favors exact recovery semantics over concurrent execution: a checkpoint is atomically updated before a target starts and after its terminal result is known.
+Targets are checkpointed one at a time in deterministic plan order. The durable identity ledger is flushed first, followed by an in-place checkpoint revision through the retained object before a target starts and after its terminal result is known. This retains object identity instead of reopening a pathname for atomic replacement. A crash can leave an incomplete revision or ledger mismatch; Resume refuses both and requires manual reconciliation. This is an explicit availability tradeoff.
 
 ## Resume safely
 
@@ -111,13 +111,15 @@ Resume runs only `Pending` targets. It never automatically repeats `Completed`, 
 
 Each target permits at most one orchestration attempt. The checkpoint summary is recomputed from target states and protected by `WAT-CHECKPOINT-1` SHA-256 canonicalization. Checkpoint schema `1.0` is defined in `schemas/orchestration-checkpoint-v1.schema.json`; result schema `1.0` is defined in `schemas/orchestration-result-v1.schema.json`.
 
+Any `Unknown` or remaining `InProgress` target makes the aggregate `InternalFailure` with exit code 10. `PartialSuccess` requires at least one `Completed` target. With zero completions, failed or heterogeneous skipped states return execution failure, otherwise timed-out states return timeout.
+
 Lifecycle completion and action outcome remain distinct. A target whose requested action finishes with `PartialSuccess` is terminal `Completed`, but the orchestration result remains `CompletedWithExceptions` with partial-success exit code 1. An all-skipped validation retains exit code 2, while an all-skipped authorization denial retains exit code 3.
 
 ## Strict artifact handling
 
 Plans are limited to 1 MiB and checkpoints to 4 MiB. Both must be UTF-8 without a byte-order mark and are parsed with duplicate-key, case-conflict, unknown-property, schema-version, timestamp, identifier, lifecycle, path, and hash validation. Artifact paths are literal, traversal-safe, extension-bound, and cannot collide with configured result or log paths. New plans, approved plans, execution checkpoints, and JSON results refuse overwrite.
 
-Atomic checkpoint replacement protects against partial writes, not deletion or malicious replacement by an identity that can write the directory. Store plans and checkpoints in an access-controlled location, separate plan authors from approvers where practical, retain approved plans with ticket evidence, and back up checkpoints during long runs.
+Checkpoint protection lasts through execution and result construction. After handles close, current-user and privileged filesystem authority can change artifacts; hashes and the separately flushed ledger refuse inconsistent recovery but are not immutable retention. Older checkpoints without protected current-identity DACLs require manual reconciliation. Store plans and checkpoints in an access-controlled location and back up the complete recovery evidence.
 
 Orchestration checkpoint records are recovery evidence, not substitutes for the opt-in JSON Lines audit contract. Plan operations intentionally do not accept `-AuditPath` or Event Log audit parameters in version 3.0. Capture the orchestration result, approved plan, checkpoint, ordinary log, and external change-system evidence together.
 

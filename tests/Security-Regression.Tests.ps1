@@ -1,4 +1,4 @@
-# Dependency-free security regressions. The main harness supplies assertions.
+﻿# Dependency-free security regressions. The main harness supplies assertions.
 # All filesystem effects are limited to this unique synthetic fixture directory.
 
 $securityRoot = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) ('wat-security-' + [guid]::NewGuid().ToString('N'))))
@@ -185,7 +185,21 @@ try {
             param($Name, $ScriptBlock, $ArgumentList)
             $null = $PSBoundParameters
             $Script:WorkerReservations.Add([pscustomobject]@{ Bytes = [int]$ArgumentList[12]; Items = [int]$ArgumentList[13] }) | Out-Null
-            $envelope = & $ScriptBlock @ArgumentList
+            # This synchronous job adapter deliberately shares script scope.
+            # Restore retained parent objects after the worker loads its own state.
+            $parentSinks = $Script:MutableSinks
+            $parentState = $Script:State
+            $parentCheckpointFiles = $Script:CheckpointFiles
+            $parentSource = $Script:ToolkitLoadedSource
+            $parentToolkitPath = $Script:ToolkitPath
+            try { $envelope = & $ScriptBlock @ArgumentList }
+            finally {
+                $Script:MutableSinks = $parentSinks
+                $Script:State = $parentState
+                $Script:CheckpointFiles = $parentCheckpointFiles
+                $Script:ToolkitLoadedSource = $parentSource
+                $Script:ToolkitPath = $parentToolkitPath
+            }
             return [pscustomobject]@{ State = 'Completed'; Envelope = $envelope }
         }
         Set-Item Function:\Receive-Job -Value {
@@ -249,7 +263,9 @@ try {
     }
     # Substitute only cleanup root expressions; the child retains its genuine
     # SystemRoot so Windows PowerShell's Add-Type compiler resolves correctly.
-    $fixtureActionText = $cleanupActionText.Replace('$env:TEMP', "'$($payloadUserTemp.Replace("'", "''"))'").Replace('$env:SystemRoot', "'$($payloadWindows.Replace("'", "''"))'")
+    $fixtureRoots = "[string[]]@('$($payloadUserTemp.Replace("'", "''"))', '$($payloadWindowsTemp.Replace("'", "''"))')"
+    $fixtureActionText = $cleanupActionText.Replace('[WindowsAdminToolkit.Security.SystemPaths]::CleanupRoots()', $fixtureRoots)
+    if ($fixtureActionText -ceq $cleanupActionText -or $fixtureActionText.Contains('[WindowsAdminToolkit.Security.SystemPaths]::CleanupRoots()')) { throw 'Cleanup fixture did not replace the production root resolver; refuse execution.' }
     $fixturePayload = ConvertTo-AdminEncodedPayload -ActionText $fixtureActionText -ArgumentList @(2, 100)
     $payloadBootstrap = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($fixturePayload))
     $cleanupPayloadResult = Invoke-TestPowerShellCommandProcess -EnginePath $currentEnginePath -CommandText $payloadBootstrap
@@ -347,6 +363,7 @@ try {
     }
 }
 finally {
+    Close-AdminRunSink
     # Remove junction objects explicitly before recursively removing fixtures.
     foreach ($junction in $securityJunctions) { if ([IO.Directory]::Exists($junction)) { [IO.Directory]::Delete($junction) } }
     if ([IO.Directory]::Exists($securityRoot) -and $securityRoot.StartsWith($securityTempPrefix, [StringComparison]::OrdinalIgnoreCase)) {

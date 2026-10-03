@@ -20,6 +20,8 @@ Do not rebuild a published version with different bytes. Correct a release with 
 
 The release builder copies an explicit allowlist of source, documentation, schema, example, test, and tool files. It never modifies or signs the repository copy. The destination parent must exist and the destination itself must not.
 
+Source and output directories must be disjoint: equal paths, descendants under any source directory, and output ancestors containing the source are rejected before creating a destination. The source root and its ancestry are pinned and validated with no-follow identity checks before any output directory is created; reparse and short-name aliases are rejected before source/output containment is evaluated.
+
 ```powershell
 ./tools/New-ReleaseArtifacts.ps1 `
   -OutputDirectory 'C:\ReleaseStaging\WindowsAdminToolkit-3.0.1'

@@ -29,7 +29,7 @@ Windows Admin Toolkit gives technicians an interactive console and gives automat
 - Optional least-privilege policy profiles with explicit machine-readable decisions
 - Capability preflight that checks action readiness without executing the requested action
 - Opt-in JSON Lines and Windows Event Log auditing with stable target IDs and tamper-evident summaries
-- Reviewable change plans, separate approvals, atomic checkpoints, and safe resume semantics
+- Reviewable change plans, separate approvals, durable retained checkpoints, and safe resume semantics
 - Release tooling for optional Authenticode signing, SHA-256 manifests, and SPDX 2.3 SBOMs
 - CSV, JSON, and self-contained HTML reporting
 - No automatic firewall, WinRM, TrustedHosts, or execution-policy changes
@@ -67,6 +67,8 @@ Read [SECURITY.md](SECURITY.md) and [RESPONSIBLE_USE.md](RESPONSIBLE_USE.md) bef
 
 ![Synthetic Windows Admin Toolkit control flow showing capability preflight, a frozen plan, hash-bound approval, bounded execution, structured verification, complete audit evidence, and interruption-safe resume behavior.](examples/visuals/windows-admin-toolkit-guarded-automation.png)
 
+This illustration records published version 3.0.0. Current checkpoint revisions retain one protected file object and update it in place after flushing the identity ledger. Revisions are not atomic; interruption can require manual reconciliation before Resume. See [ORCHESTRATION.md](ORCHESTRATION.md).
+
 Constructed control map based on the published v3.0.0 examples. Policy can narrow built-in behavior but cannot broaden it. Preflight checks capability without executing the requested action, and `-WhatIf` previews a state change without opening the target connection. Resume runs only targets still marked `Pending`; interrupted `InProgress` targets become `Unknown` and require review.
 
 ## Requirements
@@ -80,6 +82,8 @@ Constructed control map based on the published v3.0.0 examples. Policy can narro
 The toolkit does not enable remote-management services or weaken security settings on your behalf.
 
 ## Install and verify the signed release
+
+The current-user installer is for non-elevated, current-identity operation. Elevated or alternate-credential runs require administrator-managed protected source and ancestry, launched by a trusted engine with `-NoProfile`. Signature verification does not establish those filesystem permissions. See [INSTALL.md](INSTALL.md) before privileged use.
 
 No PowerShell Gallery package has been published. Version 3.0.1 contains validated Gallery metadata so the exact future release candidate can be tested through both modern and legacy package clients before any publication decision. Until that process is complete, use only the signed GitHub release linked here.
 

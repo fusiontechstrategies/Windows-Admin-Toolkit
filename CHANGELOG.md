@@ -6,6 +6,10 @@ The format follows Keep a Changelog principles, and the project uses Semantic Ve
 
 ## [Unreleased]
 
+### Changed
+
+- Retain one protected checkpoint object through import and every revision. The durable identity ledger is flushed before in-place updates; revisions are not atomic, and incomplete or mismatched evidence requires manual reconciliation before Resume. This supersedes the atomic checkpoint publication described for version 3.0.0 below.
+
 ### Fixed
 
 - Applied no-connection `WhatIf` previews to read-only actions and service queries.
