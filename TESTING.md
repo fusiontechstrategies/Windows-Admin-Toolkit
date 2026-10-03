@@ -159,7 +159,9 @@ The test suite verifies:
 - Rejection of metacharacters, malformed paths, traversal notation, and ambiguous addresses
 - Strict, bounded UTF-8 decoding for target lists and custom PowerShell files
 - CSV formula neutralization and HTML encoding
-- Atomic UTF-8 exports with explicit BOM and no overwrites
+- Native retained-parent UTF-8 exports with exact BOM bytes, no-replace final collisions, private file identities, object-only failure cleanup, real junction controls, rename denial while held and a rename-after-release positive control
+- Missing output-parent refusal with no directory side effect, trusted inherited-parent support, actual other-principal mutable DACL rejection, and real JSON/export/Plan Create/Approve publication paths
+- Read-only scanner token defaults and SARIF-only code-scanning write authority
 - `ShouldProcess` support and absence of execution-policy bypasses
 - Absence of `Invoke-Expression`, plaintext credential conversion, and automatic security-setting changes
 - Native automation rejection of username strings without opening credential UI
@@ -174,3 +176,9 @@ The test suite verifies:
 - Application ASCII compatibility and the repository rule prohibiting em dashes
 
 The automated suite makes no destructive system changes.
+
+The final publication fixtures distinguish ancestor-only volume-root grants from strict terminal-parent grants. They exercise actual isolated add-subdirectory DACL refusal and synthetic mapping/UNC rejection before any provider lookup. No mapped network drive, SUBST alias, remote endpoint, alternate user token or host ACL is created or contacted.
+
+A native-created local directory symlink with a synthetic UNC target exercises remote-capable ancestry refusal without opening the target. Provider-command counters remain zero; native cleanup removes only the owned symbolic-link object. Native relative preflight also tests existing-file and existing-directory collisions with preserved final bytes.
+
+The final path-boundary fixtures exercise local symbolic links with an intentionally nonexistent UNC target without contacting it. Provider-call counters verify that direct policy, target-list, custom-source, hashing, PsExec, signature/capture, log/audit and embedded approval-reference routes reject the link before provider lookup. Separate real unsigned release construction and native rejection controls cover packaging. Fixtures create only owned private profile directories and link objects; they do not change existing host ACLs or launch PsExec.

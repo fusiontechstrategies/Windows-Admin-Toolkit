@@ -56,7 +56,7 @@ Automation mode is noninteractive and fails closed when an action, target select
 - Logs contain action summaries but not credentials, custom source text, or custom-command output.
 - Expert-action failures retain normalized categories but omit operator-supplied exception text from error fields and logs.
 - Custom CMD and custom PowerShell are unsandboxed expert actions. Their exact confirmations do not make untrusted content safe.
-- Existing JSON output files are not overwritten. Output is written atomically to a validated literal path.
+- JSON output, CSV/JSON/HTML exports, and pending/approved plan publication require an existing trusted local parent. Every ancestor is pinned without write or delete sharing, reparse points and less-privileged mutation grants are rejected, and a private create-new temporary object is flushed and renamed with no replacement relative to the same retained parent. Failure cleanup uses that file handle. No output parent is created or its ACL repaired. The final file is private to the current identity, SYSTEM and Administrators.
 - Capability preflight executes only built-in discovery logic. It does not execute the requested action or log supplied custom code.
 
 ## Policy security
@@ -121,3 +121,32 @@ See [RESPONSIBLE_USE.md](RESPONSIBLE_USE.md) for operational guidance.
 PsExec requires trusted Authenticode status, the exact reviewed Microsoft certificate subject and DER SHA-256, and the existing product and version checks. The approved certificate was inspected from official PsTools 2.43. Certificate rotation requires a reviewed source update; a generic trusted signer or a subject containing Microsoft's name is insufficient.
 
 Native stdout and stderr share one bounded pipe budget before retention. The remote producer projects output incrementally, and per-target item and byte quotas are forwarded across retry attempts. Fast process exit does not enable an unbounded final file read. Oversized output fails with `OutputLimit`; the toolkit does not automatically retry that failure.
+
+## Scanner token authority
+
+Security workflow token defaults are read-only. Only the Semgrep SARIF upload job receives `security-events: write`; Gitleaks explicitly receives only contents and pull-request read access. Third-party actions stay pinned, and checkout credentials are not persisted. Fork pull-request uploads remain excluded.
+
+Publication paths must resolve to a direct local hard-disk volume. UNC paths, mapped network drives, substituted drive aliases and unknown device mappings are refused before filesystem-provider lookup. The current DOS drive mapping is checked without opening an endpoint, then native no-follow ancestry and identity checks remain required. Terminal publication parents also reject less-privileged file or subdirectory creation grants, including at a volume root; ancestor-only volume-root exceptions do not apply to that terminal parent. This conservative boundary does not support alternate drive providers.
+
+Existence, type and collision preflight uses retained no-follow native objects. No pathname-based filesystem-provider lookup precedes ancestry validation, including for local-looking paths whose ancestors contain remote-targeting reparse points. New-output collision checks open only a strict relative leaf under the retained parent and never traverse reparse points; actual publication still enforces no replacement independently.
+
+## File path boundary inventory
+
+The following table covers the public command paths and their shared helpers. Lexical checks, extension checks and direct DOS drive-mapping checks do not open an endpoint. Native no-follow acquisition must precede filesystem-provider metadata, signature inspection, content or hash reads. A preflight result is not an authorization token; actual consumers acquire their own retained objects.
+
+| Supplied or embedded path | Acquisition and later use |
+| --- | --- |
+| `ComputerListPath`, direct policy import and `PowerShellFile` | `Open-AdminSafePath` retains every ancestor and leaf before bounded UTF-8 reads. Input resolution uses `OpenForInspection` for structural size checks; this read-only inspection does not imply ACL trust. |
+| Interactive custom PowerShell file | The same 1 MiB bounded reader runs before parsing. Reading a file does not sandbox its later explicitly authorized expert action. |
+| `PsExecPath`, embedded PsExec reference, direct signature/capture helpers | A literal local path is opened before metadata or Authenticode inspection. PATH discovery is disabled. Signature inspection and process capture acquire their own input lease; the PsExec launch retains its outer lease through capture. Existing exact signer, product, version and consent checks remain mandatory. |
+| Policy/PsExec plan references in Create, Approve, Execute and Resume | Native reads supply hashes. Approval uses the same reference-lock helper as execution; policy metadata is parsed from that locked bounded stream. Both references remain pinned during reference verification. Execution retains them through target work. |
+| Pending/approved plan and checkpoint imports | Existing-artifact preflight uses structural no-follow inspection. Actual strict JSON import reacquires a bounded read lease, and checkpoint execution retains its exclusive native lease and durable ledger contract. |
+| JSON output, interactive CSV/JSON/HTML export, Plan Create and Approve publication | Existing trusted parent is mandatory. Relative native collision checks, private temporary creation, flush, no-replace rename and cleanup use retained parent/file handles. No missing parent is created, and no ACL is repaired. |
+| `LogFile`, `AuditPath` and mutable checkpoint updates | Native presence checks classify only native missing-file/path errors as absence. Missing log/audit parent discovery opens ancestors natively before creating private components under the retained trusted ancestor. Mutable files retain ancestry and exact object identity through bounded updates. |
+| Release `OutputDirectory` and source allowlist | A direct local drive and retained trusted source/output ancestors are acquired before source bytes, enumeration or collision inspection. Existing output is refused. Generated release content stays inside a new private retained output tree; signing remains explicit and never changes the source tree. |
+
+Fixed registry inventory, reboot checks and validated registry action inputs intentionally use the registry provider. They are not filesystem paths. The fixed System32 Windows PowerShell signature helper is acquired with administrator-only native trust before launch. Private checkpoint-ledger lookup uses its known-folder root under a retained trusted parent and then the current-identity-only ledger directory; identifiers and ledger contents remain validated. Release certificate lookup uses only a validated hexadecimal thumbprint and an explicit local certificate-store selection. These fixed provider uses are not substituted for supplied-path validation.
+
+Remaining pathname metadata in PsExec validation is inside its retained input lease. Remaining release enumeration, hash and manifest reads are inside retained trusted source directories or the newly created private output tree. The threat model excludes an already-compromised current identity, SYSTEM or Administrators; native leases still prevent namespace replacement during each protected operation. Drive-mapping checks conservatively refuse aliases and unsupported providers, and retained native ancestry checks remain necessary after that preflight.
+
+Plan policy decisions, metadata and the raw-file SHA-256 now come from one retained import snapshot, including any accepted UTF-8 BOM. Creating a plan does not reopen the policy to derive its digest. Replacing the policy after evaluation therefore makes approval fail its recorded hash instead of pairing an earlier decision with later bytes. Configured collision checks include the actual `PowerShellFile` parameter and reject source/log collisions before even a WhatIf request initializes a sink.

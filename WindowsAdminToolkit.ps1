@@ -1,4 +1,4 @@
-﻿<#PSScriptInfo
+<#PSScriptInfo
 
 .VERSION 3.0.1
 
@@ -599,22 +599,47 @@ function Get-AdminRuntimeConfigurationError {
     return $null
 }
 
+function Test-AdminMissingNativePathError {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][System.Exception]$Exception)
+    $cursor = $Exception
+    while ($null -ne $cursor) {
+        if ($cursor -is [System.ComponentModel.Win32Exception]) { return $cursor.NativeErrorCode -in @(2, 3) }
+        $cursor = $cursor.InnerException
+    }
+    return $false
+}
+
+function Test-AdminNativeFilePresence {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$LiteralPath)
+    $inspection = $null
+    try { $inspection = Open-AdminSafePath -LiteralPath $LiteralPath; return $true }
+    catch { if (Test-AdminMissingNativePathError -Exception $_.Exception) { return $false }; throw }
+    finally { if ($null -ne $inspection) { $inspection.Dispose() } }
+}
+
 function Open-AdminMutableFile {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string]$LiteralPath, [Parameter()][switch]$Create)
     if (-not (Test-AdminLiteralFilePathText -LiteralPath $LiteralPath)) { throw 'Unsafe retained output path.' }
     Initialize-AdminSafeFileType
     $fullPath = [IO.Path]::GetFullPath($LiteralPath)
+    [void][WindowsAdminToolkit.Security.SystemPaths]::RequireLocalPublicationPath($fullPath)
     $parent = [IO.Path]::GetDirectoryName($fullPath)
     $pending = New-Object 'System.Collections.Generic.Stack[string]'
     $existing = $parent
-    while (-not [IO.Directory]::Exists($existing)) {
-        $pending.Push($existing)
-        $next = [IO.Path]::GetDirectoryName($existing)
-        if ([string]::IsNullOrWhiteSpace($next) -or $next -ceq $existing) { throw 'No trusted output ancestor exists.' }
-        $existing = $next
+    $guard = $null
+    while ($null -eq $guard) {
+        try { $guard = [WindowsAdminToolkit.Security.PathLease]::OpenTrusted($existing, $true, $false, $false) }
+        catch {
+            if (-not (Test-AdminMissingNativePathError -Exception $_.Exception)) { throw }
+            $pending.Push($existing)
+            $next = [IO.Path]::GetDirectoryName($existing)
+            if ([string]::IsNullOrWhiteSpace($next) -or $next -ceq $existing) { throw 'No trusted output ancestor exists.' }
+            $existing = $next
+        }
     }
-    $guard = [WindowsAdminToolkit.Security.PathLease]::OpenTrusted($existing, $true, $false, $false)
     try {
         while ($pending.Count -gt 0) {
             $child = $pending.Pop()
@@ -652,8 +677,9 @@ function Initialize-AdminLog {
     if (-not (Test-AdminLiteralFilePathText -LiteralPath $RequestedPath)) { throw 'Unsafe log path.' }
     $fullPath = [IO.Path]::GetFullPath($RequestedPath)
     if ($Script:State.LogContext -and $Script:State.LogContext.Path.Equals($fullPath, [StringComparison]::OrdinalIgnoreCase)) { return $fullPath }
-    if ([IO.File]::Exists($fullPath) -and -not $AppendTrusted) { throw 'An existing log requires explicit -AppendTrustedLog and trusted private ownership.' }
-    $sink = Open-AdminMutableFile -LiteralPath $fullPath -Create:(-not $AppendTrusted -or -not [IO.File]::Exists($fullPath))
+    $exists = Test-AdminNativeFilePresence -LiteralPath $fullPath
+    if ($exists -and -not $AppendTrusted) { throw 'An existing log requires explicit -AppendTrustedLog and trusted private ownership.' }
+    $sink = Open-AdminMutableFile -LiteralPath $fullPath -Create:(-not $AppendTrusted -or -not $exists)
     $Script:MutableSinks.Add($sink) | Out-Null
     $Script:State.LogContext = $sink
     $Script:State.LogFile = $fullPath
@@ -801,10 +827,6 @@ function Import-AdminComputerList {
         [ValidateRange(1, 1000)]
         [int]$MaximumTargets = 500
     )
-
-    if (-not (Test-Path -LiteralPath $LiteralPath -PathType Leaf)) {
-        throw "Computer list not found: $LiteralPath"
-    }
 
     $rawText = Read-AdminBoundedUtf8File -LiteralPath $LiteralPath -MaximumBytes 1048576
     $rawLines = @($rawText -split '\r\n|\n|\r')
@@ -1059,26 +1081,28 @@ function Write-AdminUtf8File {
         [bool]$EmitBom = $true
     )
 
+    if (-not (Test-AdminLiteralFilePathText -LiteralPath $LiteralPath)) {
+        throw 'The export path contains an unsafe or unsupported component.'
+    }
     $fullPath = [System.IO.Path]::GetFullPath($LiteralPath)
-    if (Test-Path -LiteralPath $fullPath) {
-        throw "Refusing to overwrite an existing file: $fullPath"
-    }
-
-    $parent = Split-Path -Parent $fullPath
-    if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
-        [void][System.IO.Directory]::CreateDirectory($parent)
-    }
-
-    $temporaryPath = Join-Path $parent ('.admin-export-{0}.tmp' -f [guid]::NewGuid().ToString('N'))
+    Initialize-AdminSafeFileType
+    [void][WindowsAdminToolkit.Security.SystemPaths]::RequireLocalPublicationPath($fullPath)
+    Initialize-AdminSafeFileType
+    $temporaryName = '.admin-export-{0}.tmp' -f [guid]::NewGuid().ToString('N')
+    $publication = $null
     try {
+        # The parent must already exist. Native opens reject every reparse point
+        # and retain trusted ancestry without write or delete sharing.
+        $publication = New-Object WindowsAdminToolkit.Security.NativePublication((Split-Path -Parent $fullPath), $temporaryName)
         $encoding = New-Object System.Text.UTF8Encoding($EmitBom)
-        [System.IO.File]::WriteAllText($temporaryPath, $Content, $encoding)
-        [System.IO.File]::Move($temporaryPath, $fullPath)
+        $preamble = $encoding.GetPreamble()
+        $bytes = $encoding.GetBytes($Content)
+        $publication.Write($preamble)
+        $publication.Write($bytes)
+        $publication.Publish([System.IO.Path]::GetFileName($fullPath))
     }
     finally {
-        if (Test-Path -LiteralPath $temporaryPath) {
-            [System.IO.File]::Delete($temporaryPath)
-        }
+        if ($null -ne $publication) { $publication.Dispose() }
     }
 
     return $fullPath
@@ -1212,6 +1236,28 @@ namespace WindowsAdminToolkit.Security {
                 return Marshal.PtrToStringUni(path);
             } finally { if (path != IntPtr.Zero) Marshal.FreeCoTaskMem(path); }
         }
+        // HOST_TRUST_BEGIN: local publication preflight is not a remote payload.
+        [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+        static extern uint QueryDosDevice(string name, [Out, MarshalAs(UnmanagedType.LPArray, ArraySubType=UnmanagedType.U2)] char[] target, uint maximum);
+        public static void ValidatePublicationDeviceTarget(string target) {
+            if (String.IsNullOrEmpty(target) || !System.Text.RegularExpressions.Regex.IsMatch(target,
+                @"^\\Device\\HarddiskVolume[0-9]+$", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant))
+                throw new IOException("Publication requires a direct local hard-disk volume, not a network, substituted or unknown drive mapping.");
+        }
+        public static string RequireLocalPublicationPath(string path) {
+            string full = System.IO.Path.GetFullPath(path);
+            if (full.Length < 3 || !((full[0] >= 'A' && full[0] <= 'Z') || (full[0] >= 'a' && full[0] <= 'z')) || full[1] != ':' || full[2] != '\\')
+                throw new IOException("Publication requires an absolute local drive path.");
+            char[] mapping = new char[32768];
+            uint count = QueryDosDevice(full.Substring(0,2), mapping, (uint)mapping.Length);
+            if (count == 0 || count > mapping.Length) throw new IOException("Cannot prove the current local publication drive mapping.");
+            int end = Array.IndexOf(mapping, '\0', 0, (int)count);
+            if (end <= 0) throw new IOException("Invalid publication drive mapping.");
+            // Later MULTI_SZ entries are stale mappings and convey no authority.
+            ValidatePublicationDeviceTarget(new string(mapping, 0, end));
+            return full;
+        }
+        // HOST_TRUST_END
         public static string[] CleanupRoots() {
             return new string[] { System.IO.Path.Combine(LocalApplicationData(), "Temp"), System.IO.Path.Combine(WindowsDirectory(), "Temp") };
         }
@@ -1296,6 +1342,8 @@ namespace WindowsAdminToolkit.Security {
             leaf = handle; info = opened;
         }
         // HOST_TRUST_BEGIN: omitted from the isolated target cleanup helper.
+        // Read-only structural preflight does not grant trust or execution authority.
+        public static PathLease OpenForInspection(string path) { return OpenCore(path, false, false, true); }
         public static PathLease OpenTrusted(string path, bool directory, bool allowWrite, bool privateLeaf) {
             PathLease lease = OpenCore(path, directory, false, allowWrite);
             try {
@@ -1388,6 +1436,9 @@ namespace WindowsAdminToolkit.Security {
             ValidateDescriptor(bytes, privateLeaf, directory, volumeRoot, false);
         }
         public static void ValidateDescriptor(byte[] bytes, bool privateLeaf, bool directory, bool volumeRoot, bool administratorOnly) {
+            ValidateDescriptor(bytes, privateLeaf, directory, volumeRoot, administratorOnly, false);
+        }
+        public static void ValidateDescriptor(byte[] bytes, bool privateLeaf, bool directory, bool volumeRoot, bool administratorOnly, bool publicationParent) {
             System.Security.AccessControl.RawSecurityDescriptor descriptor = new System.Security.AccessControl.RawSecurityDescriptor(bytes, 0);
             string user = administratorOnly ? "" : CurrentSid;
             if (descriptor.Owner == null || !Trusted(descriptor.Owner.Value, user) || (privateLeaf && descriptor.Owner.Value != user))
@@ -1400,7 +1451,10 @@ namespace WindowsAdminToolkit.Security {
             // A canonical volume anchor cannot be renamed and remains nonempty
             // while its independently protected immediate child is retained.
             if (!volumeRoot) dangerous |= 0x2u | 0x100u | 0x10000u;
-            if (privateLeaf || !directory) dangerous |= 0x2u | 0x4u | 0x10u | 0x100u | 0x10000u;
+            // Terminal publication parents must not permit final-name planting.
+            // Volume-root relaxation applies only to a pinned ancestor above a
+            // separate protected child, never to the selected output parent.
+            if (privateLeaf || !directory || publicationParent) dangerous |= 0x2u | 0x4u | 0x10u | 0x100u | 0x10000u;
             foreach (System.Security.AccessControl.GenericAce ace in descriptor.DiscretionaryAcl) {
                 if ((ace.AceFlags & System.Security.AccessControl.AceFlags.InheritOnly) != 0) continue;
                 System.Security.AccessControl.CommonAce common = ace as System.Security.AccessControl.CommonAce;
@@ -1419,7 +1473,13 @@ namespace WindowsAdminToolkit.Security {
         public static void Validate(SafeFileHandle handle, bool privateLeaf, bool directory) {
             Validate(handle, privateLeaf, directory, false);
         }
+        public static void ValidatePublicationParent(SafeFileHandle handle) {
+            Validate(handle, false, true, false, true);
+        }
         public static void Validate(SafeFileHandle handle, bool privateLeaf, bool directory, bool administratorOnly) {
+            Validate(handle, privateLeaf, directory, administratorOnly, false);
+        }
+        static void Validate(SafeFileHandle handle, bool privateLeaf, bool directory, bool administratorOnly, bool publicationParent) {
             IntPtr owner, dacl, descriptor;
             uint error = GetSecurityInfo(handle, 1, 5, out owner, IntPtr.Zero, out dacl, IntPtr.Zero, out descriptor);
             if (error != 0) throw new Win32Exception((int)error);
@@ -1431,7 +1491,7 @@ namespace WindowsAdminToolkit.Security {
                 uint count = GetFinalPathNameByHandle(handle, name, (uint)name.Capacity, 1);
                 bool root = directory && count > 0 && count < name.Capacity &&
                     System.Text.RegularExpressions.Regex.IsMatch(name.ToString(), @"^\\\\\?\\Volume\{[0-9A-Fa-f-]{36}\}\\$");
-                ValidateDescriptor(bytes, privateLeaf, directory, root, administratorOnly);
+                ValidateDescriptor(bytes, privateLeaf, directory, root, administratorOnly, publicationParent);
             } finally { LocalFree(descriptor); }
         }
         public static void CreatePrivateDirectory(string path) {
@@ -1552,6 +1612,114 @@ namespace WindowsAdminToolkit.Security {
             if (stream != null) stream.Dispose();
             if (handle != null) handle.Dispose();
             if (parent != null) parent.Dispose();
+        }
+    }
+    // New-file publication remains bound to the same trusted parent and file
+    // objects through creation, flush, no-replace rename and failed-temp cleanup.
+    public sealed class NativePublication : IDisposable {
+        [StructLayout(LayoutKind.Sequential)] struct US { public ushort Length, MaximumLength; public IntPtr Buffer; }
+        [StructLayout(LayoutKind.Sequential)] struct OA { public int Length; public IntPtr RootDirectory, ObjectName; public uint Attributes; public IntPtr SecurityDescriptor, SecurityQualityOfService; }
+        [StructLayout(LayoutKind.Sequential)] struct IOS { public IntPtr Status, Information; }
+        [StructLayout(LayoutKind.Sequential)] struct Rename { public uint Replace; public IntPtr RootDirectory; public uint NameLength; public ushort First; }
+        [StructLayout(LayoutKind.Sequential)] struct Info {
+            public uint Attributes; public System.Runtime.InteropServices.ComTypes.FILETIME Creation, Access, Write;
+            public uint Volume, SizeHigh, SizeLow, Links, IndexHigh, IndexLow;
+        }
+        [DllImport("ntdll.dll")] static extern int NtCreateFile(out SafeFileHandle handle, uint access, ref OA attributes, out IOS status, IntPtr allocation, uint attributesValue, uint share, uint disposition, uint options, IntPtr ea, uint eaLength);
+        [DllImport("ntdll.dll")] static extern int NtSetInformationFile(SafeFileHandle handle, out IOS status, IntPtr information, uint length, int informationClass);
+        [DllImport("ntdll.dll")] static extern uint RtlNtStatusToDosError(int status);
+        [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool ConvertStringSecurityDescriptorToSecurityDescriptor(string text, uint revision, out IntPtr descriptor, out uint size);
+        [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
+        [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetFileInformationByHandle(SafeFileHandle handle, out Info info);
+        PathLease parent; SafeFileHandle file; FileStream stream; bool created, published, disposed;
+        public string FileIdentity { get; private set; }
+        public string ParentIdentity { get; private set; }
+        public string TemporaryName { get; private set; }
+        public string PublishedName { get; private set; }
+        public string CleanupStatus { get; private set; }
+        public string RenameStatus { get; private set; }
+        public static int RenameNameOffset { get { return (int)Marshal.OffsetOf(typeof(Rename), "First"); } }
+        static void Leaf(string name) {
+            if (String.IsNullOrEmpty(name) || name.Length > 255 || name == "." || name == ".." || name.EndsWith(".") || name.EndsWith(" ") || name.IndexOfAny(System.IO.Path.GetInvalidFileNameChars()) >= 0 || name.IndexOfAny(new char[] {'\\','/'}) >= 0)
+                throw new IOException("Strict single relative leaf required.");
+            string stem = name.Split('.')[0].ToUpperInvariant();
+            if (stem == "CON" || stem == "PRN" || stem == "AUX" || stem == "NUL" || System.Text.RegularExpressions.Regex.IsMatch(stem, "^(COM|LPT)[1-9]$"))
+                throw new IOException("Reserved device leaf forbidden.");
+        }
+        static string Identity(SafeFileHandle handle) {
+            Info info;
+            if (!GetFileInformationByHandle(handle, out info)) throw new Win32Exception(Marshal.GetLastWin32Error());
+            if ((info.Attributes & (0x400u | 16u)) != 0 || info.Links != 1) throw new IOException("Ordinary single-link artifact required.");
+            return info.Volume.ToString("X8") + ":" + info.IndexHigh.ToString("X8") + info.IndexLow.ToString("X8");
+        }
+        public NativePublication(string parentPath, string temporaryName) {
+            Leaf(temporaryName); TemporaryName = temporaryName;
+            IntPtr text=IntPtr.Zero, unicode=IntPtr.Zero, sd=IntPtr.Zero;
+            try {
+                SystemPaths.RequireLocalPublicationPath(parentPath);
+                parent = PathLease.OpenTrusted(parentPath, true, false, false); parent.ValidateHeld();
+                StorageSecurity.ValidatePublicationParent(parent.Handle); ParentIdentity = parent.Identity;
+                text=Marshal.StringToHGlobalUni(temporaryName);
+                US us=new US(); us.Length=checked((ushort)(temporaryName.Length*2)); us.MaximumLength=checked((ushort)(us.Length+2)); us.Buffer=text;
+                unicode=Marshal.AllocHGlobal(Marshal.SizeOf(typeof(US))); Marshal.StructureToPtr(us,unicode,false);
+                string sid=StorageSecurity.CurrentSid; uint size;
+                if (!ConvertStringSecurityDescriptorToSecurityDescriptor("O:"+sid+"G:"+sid+"D:P(A;;FA;;;"+sid+")(A;;FA;;;SY)(A;;FA;;;BA)",1,out sd,out size)) throw new Win32Exception(Marshal.GetLastWin32Error());
+                OA oa=new OA(); oa.Length=Marshal.SizeOf(typeof(OA)); oa.RootDirectory=parent.Handle.DangerousGetHandle(); oa.ObjectName=unicode; oa.Attributes=0x1040; oa.SecurityDescriptor=sd;
+                IOS io; int status=NtCreateFile(out file,0xc0130000u,ref oa,out io,IntPtr.Zero,0x80u,1u,2u,0x200060u,IntPtr.Zero,0);
+                if(status<0) throw new Win32Exception((int)RtlNtStatusToDosError(status),"Relative create-new failed: "+status.ToString("X8"));
+                created=true; StorageSecurity.Validate(file,true,false); FileIdentity=Identity(file);
+                stream=new FileStream(file,FileAccess.ReadWrite);
+            } catch { Dispose(); throw; }
+            finally { if(sd!=IntPtr.Zero) LocalFree(sd); if(unicode!=IntPtr.Zero) Marshal.FreeHGlobal(unicode); if(text!=IntPtr.Zero) Marshal.FreeHGlobal(text); }
+        }
+        void Validate() {
+            if(disposed) throw new ObjectDisposedException("NativePublication");
+            parent.ValidateHeld(); StorageSecurity.ValidatePublicationParent(parent.Handle); StorageSecurity.Validate(file,true,false);
+            if(Identity(file)!=FileIdentity || parent.Identity!=ParentIdentity) throw new IOException("Retained identity changed.");
+        }
+        public void EnsureDestinationAbsent(string name) {
+            Leaf(name); Validate();
+            IntPtr text=IntPtr.Zero, unicode=IntPtr.Zero; SafeFileHandle existing=null;
+            try {
+                text=Marshal.StringToHGlobalUni(name);
+                US us=new US(); us.Length=checked((ushort)(name.Length*2)); us.MaximumLength=checked((ushort)(us.Length+2)); us.Buffer=text;
+                unicode=Marshal.AllocHGlobal(Marshal.SizeOf(typeof(US))); Marshal.StructureToPtr(us,unicode,false);
+                OA oa=new OA(); oa.Length=Marshal.SizeOf(typeof(OA)); oa.RootDirectory=parent.Handle.DangerousGetHandle(); oa.ObjectName=unicode; oa.Attributes=0x1040;
+                // Relative leaf-only FILE_OPEN, no reparse traversal, either type.
+                IOS io; int status=NtCreateFile(out existing,0x100080u,ref oa,out io,IntPtr.Zero,0,7u,1u,0x200020u,IntPtr.Zero,0);
+                if(status==unchecked((int)0xC0000034u)) return; // Exact absent leaf only.
+                if(status>=0) throw new IOException("Refusing to overwrite an existing output destination.");
+                throw new Win32Exception((int)RtlNtStatusToDosError(status),"Cannot prove relative destination absence: "+status.ToString("X8"));
+            } finally { if(existing!=null) existing.Dispose(); if(unicode!=IntPtr.Zero) Marshal.FreeHGlobal(unicode); if(text!=IntPtr.Zero) Marshal.FreeHGlobal(text); }
+        }
+        public void Write(byte[] bytes) {
+            Validate(); if(published) throw new IOException("Already published.");
+            stream.Write(bytes,0,bytes.Length); stream.Flush(true); Validate();
+        }
+        public void Publish(string name) {
+            Leaf(name); Validate(); if(published) throw new IOException("Already published.");
+            stream.Flush(true); byte[] bytes=Encoding.Unicode.GetBytes(name);
+            int offset=RenameNameOffset; int length=Marshal.SizeOf(typeof(Rename))+bytes.Length; IntPtr buffer=Marshal.AllocHGlobal(length);
+            try {
+                for(int i=0;i<length;i++) Marshal.WriteByte(buffer,i,0);
+                // BOOLEAN ReplaceIfExists is FALSE. No flags or path-based lookup.
+                Marshal.WriteIntPtr(buffer,(int)Marshal.OffsetOf(typeof(Rename),"RootDirectory"),parent.Handle.DangerousGetHandle());
+                Marshal.WriteInt32(buffer,(int)Marshal.OffsetOf(typeof(Rename),"NameLength"),bytes.Length); Marshal.Copy(bytes,0,IntPtr.Add(buffer,offset),bytes.Length);
+                IOS io; int status=NtSetInformationFile(file,out io,buffer,(uint)length,10); RenameStatus=status.ToString("X8");
+                if(status<0) throw new Win32Exception((int)RtlNtStatusToDosError(status),"Relative no-replace rename failed: "+RenameStatus);
+                published=true; PublishedName=name; Validate();
+            } finally { Marshal.FreeHGlobal(buffer); }
+        }
+        public void Dispose() {
+            if(disposed) return; disposed=true;
+            try {
+                if(created && !published && file!=null && !file.IsInvalid && !file.IsClosed) {
+                    IntPtr deletion=Marshal.AllocHGlobal(1);
+                    try { Marshal.WriteByte(deletion,1); IOS io; int status=NtSetInformationFile(file,out io,deletion,1,13); CleanupStatus=status.ToString("X8");
+                        if(status<0) throw new Win32Exception((int)RtlNtStatusToDosError(status),"Object cleanup failed: "+CleanupStatus);
+                    } finally { Marshal.FreeHGlobal(deletion); }
+                }
+            } finally { if(stream!=null) stream.Dispose(); if(file!=null) file.Dispose(); if(parent!=null) parent.Dispose(); }
         }
     }
     public sealed class CapturedProcess {
@@ -1730,7 +1898,9 @@ function Open-AdminSafePath {
     )
     if (-not (Test-AdminLiteralFilePathText -LiteralPath $LiteralPath)) { throw 'Unsafe protected file path.' }
     Initialize-AdminSafeFileType
-    return [WindowsAdminToolkit.Security.PathLease]::Open([IO.Path]::GetFullPath($LiteralPath), [bool]$Directory, $false)
+    $fullPath = [IO.Path]::GetFullPath($LiteralPath)
+    [void][WindowsAdminToolkit.Security.SystemPaths]::RequireLocalPublicationPath($fullPath)
+    return [WindowsAdminToolkit.Security.PathLease]::Open($fullPath, [bool]$Directory, $false)
 }
 
 $Script:ActionScripts = [ordered]@{}
@@ -3031,6 +3201,8 @@ function Get-AdminAuthenticodeSignatureInfo {
         [string]$LiteralPath
     )
 
+    $inputLease = Open-AdminSafePath -LiteralPath $LiteralPath
+    try {
     if ($PSVersionTable.PSEdition -eq 'Desktop') {
         $signature = Get-AuthenticodeSignature -LiteralPath $LiteralPath -ErrorAction Stop
         return [pscustomobject]@{
@@ -3043,9 +3215,6 @@ function Get-AdminAuthenticodeSignatureInfo {
 
     Initialize-AdminSafeFileType
     $windowsPowerShellPath = Join-Path ([WindowsAdminToolkit.Security.SystemPaths]::SystemDirectory()) 'WindowsPowerShell\v1.0\powershell.exe'
-    if (-not (Test-Path -LiteralPath $windowsPowerShellPath -PathType Leaf)) {
-        throw 'Windows PowerShell is required to validate the PsExec Authenticode signature in this PowerShell edition.'
-    }
 
     $signatureAction = @'
 param(
@@ -3095,6 +3264,8 @@ if ($signature.SignerCertificate) {
     }
 
     return $signatureData[0]
+    }
+    finally { $inputLease.Dispose() }
 }
 
 function Test-AdminPsExecPublisher {
@@ -3122,21 +3293,8 @@ function Resolve-AdminPsExec {
         throw 'The PsExec path contains an unsafe or unsupported component.'
     }
 
-    $resolvedPath = $null
-    if (Test-Path -LiteralPath $Path -PathType Leaf) {
-        $resolvedPath = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).Path
-    }
-    else {
-        $command = Get-Command -Name $Path -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($command) {
-            $resolvedPath = $command.Path
-        }
-    }
-
-    if ([string]::IsNullOrWhiteSpace($resolvedPath)) {
-        throw "PsExec was not found: $Path"
-    }
-
+    # Literal local paths only. PATH discovery can touch network entries before validation.
+    $resolvedPath = [IO.Path]::GetFullPath($Path)
     $lease = Open-AdminSafePath -LiteralPath $resolvedPath
     try {
     $item = Get-Item -LiteralPath $resolvedPath -ErrorAction Stop
@@ -3379,8 +3537,9 @@ function Invoke-AdminCapturedProcess {
         [Parameter(Mandatory = $true)][int]$TimeoutSeconds,
         [Parameter(Mandatory = $true)][int]$MaximumBytes
     )
-    Initialize-AdminSafeFileType
-    return [WindowsAdminToolkit.Security.ProcessCapture]::Run($LiteralPath, $ArgumentText, $TimeoutSeconds, $MaximumBytes)
+    $lease = Open-AdminSafePath -LiteralPath $LiteralPath
+    try { return [WindowsAdminToolkit.Security.ProcessCapture]::Run($lease.Path, $ArgumentText, $TimeoutSeconds, $MaximumBytes) }
+    finally { $lease.Dispose() }
 }
 
 function Invoke-AdminPsExecTarget {
@@ -4572,18 +4731,12 @@ function Get-AdminActionRequest {
             $sourceMode = Read-Host 'Select script source [T]'
             if ($sourceMode -match '^(?i)F') {
                 $scriptPath = Read-Host 'Path to .ps1 file'
-                if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf) -or [System.IO.Path]::GetExtension($scriptPath) -ine '.ps1') {
+                if ([System.IO.Path]::GetExtension($scriptPath) -ine '.ps1') {
                     Write-Host 'A valid .ps1 file is required.' -ForegroundColor Red
                     $cancelled = $true
                     break
                 }
-                $item = Get-Item -LiteralPath $scriptPath
-                if ($item.Length -gt 1048576) {
-                    Write-Host 'The script exceeds the 1 MiB limit.' -ForegroundColor Red
-                    $cancelled = $true
-                    break
-                }
-                $scriptText = Get-Content -LiteralPath $scriptPath -Raw -ErrorAction Stop
+                $scriptText = Read-AdminBoundedUtf8File -LiteralPath $scriptPath -MaximumBytes 1048576
             }
             else {
                 $scriptText = Read-Host 'PowerShell code'
@@ -4881,15 +5034,8 @@ function Resolve-AdminAuditPath {
             throw 'AuditPath must be different from every other configured output path.'
         }
     }
-    if (Test-Path -LiteralPath $fullPath) {
+    if (Test-AdminNativeFilePresence -LiteralPath $fullPath) {
         throw "Refusing to append to or overwrite an existing audit file: $fullPath"
-    }
-    $parent = Split-Path -Parent $fullPath
-    if ([string]::IsNullOrWhiteSpace($parent)) {
-        throw 'AuditPath must include a valid parent directory.'
-    }
-    if ((Test-Path -LiteralPath $parent) -and -not (Test-Path -LiteralPath $parent -PathType Container)) {
-        throw 'The audit parent path is not a directory.'
     }
     return $fullPath
 }
@@ -5841,19 +5987,14 @@ function Resolve-AdminAutomationOutputPath {
     }
 
     $fullPath = [System.IO.Path]::GetFullPath($LiteralPath)
+    Initialize-AdminSafeFileType
+    [void][WindowsAdminToolkit.Security.SystemPaths]::RequireLocalPublicationPath($fullPath)
     if ([System.IO.Path]::GetExtension($fullPath) -ine '.json') {
         throw 'The JSON output path must use the .json extension.'
-    }
-    if (Test-Path -LiteralPath $fullPath) {
-        throw "Refusing to overwrite an existing JSON output file: $fullPath"
     }
     $parent = Split-Path -Parent $fullPath
     if ([string]::IsNullOrWhiteSpace($parent)) {
         throw 'The JSON output path must include a valid parent directory.'
-    }
-
-    if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
-        [void][System.IO.Directory]::CreateDirectory($parent)
     }
 
     $leafName = Split-Path -Leaf $fullPath
@@ -5865,20 +6006,17 @@ function Resolve-AdminAutomationOutputPath {
         throw 'The JSON output file name is not supported on Windows.'
     }
 
+    Initialize-AdminSafeFileType
     $outputProbe = $null
-    $outputProbeCreated = $false
-    $outputProbePath = Join-Path $parent ('.admin-json-probe-{0}.tmp' -f [guid]::NewGuid().ToString('N'))
     try {
-        $outputProbe = [System.IO.File]::Open($outputProbePath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
-        $outputProbeCreated = $true
+        # This writeability probe is a protected, retained object. Publication
+        # reacquires and validates its own capability; this string conveys no trust.
+        $outputProbeName = '.admin-json-probe-{0}.tmp' -f [guid]::NewGuid().ToString('N')
+        $outputProbe = New-Object WindowsAdminToolkit.Security.NativePublication($parent, $outputProbeName)
+        $outputProbe.EnsureDestinationAbsent($leafName)
     }
     finally {
-        if ($outputProbe) {
-            $outputProbe.Dispose()
-        }
-        if ($outputProbeCreated -and (Test-Path -LiteralPath $outputProbePath -PathType Leaf)) {
-            [System.IO.File]::Delete($outputProbePath)
-        }
+        if ($null -ne $outputProbe) { $outputProbe.Dispose() }
     }
 
     return $fullPath
@@ -5936,9 +6074,11 @@ function Resolve-AdminAutomationInputFile {
     if (-not [string]::IsNullOrWhiteSpace($RequiredExtension) -and [System.IO.Path]::GetExtension($fullPath) -ine $RequiredExtension) {
         throw "The input file must use the $RequiredExtension extension."
     }
-    if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
-        throw "Input file not found: $fullPath"
-    }
+    Initialize-AdminSafeFileType
+    [void][WindowsAdminToolkit.Security.SystemPaths]::RequireLocalPublicationPath($fullPath)
+    $inspection = [WindowsAdminToolkit.Security.PathLease]::OpenForInspection($fullPath)
+    try { [void]$inspection.Length }
+    finally { $inspection.Dispose() }
 
     return $fullPath
 }
@@ -6242,11 +6382,19 @@ function Import-AdminPolicyProfile {
         [ValidateNotNullOrEmpty()]
         [string]$LiteralPath,
 
-        [Parameter()][AllowNull()][string]$ValidatedJsonText
+        [Parameter()][AllowNull()][object]$Lease
     )
 
     $resolvedPath = Resolve-AdminAutomationInputFile -LiteralPath $LiteralPath -RequiredExtension '.json'
-    $jsonText = if ($PSBoundParameters.ContainsKey('ValidatedJsonText')) { $ValidatedJsonText } else { Read-AdminBoundedUtf8File -LiteralPath $resolvedPath -MaximumBytes 1048576 }
+    $ownsLease = $null -eq $Lease
+    $policyLease = if ($ownsLease) { Open-AdminSafePath -LiteralPath $resolvedPath } else { $Lease }
+    try {
+        if (-not $policyLease.Path.Equals($resolvedPath, [StringComparison]::OrdinalIgnoreCase)) { throw 'Policy lease path differs from the supplied policy path.' }
+        $jsonText = Read-AdminBoundedUtf8File -LiteralPath $resolvedPath -MaximumBytes 1048576 -Lease $policyLease
+        # Hash the same retained raw object, including any accepted UTF-8 BOM.
+        $sourceSha256 = $policyLease.Sha256()
+    }
+    finally { if ($ownsLease) { $policyLease.Dispose() } }
     if (Test-AdminJsonHasDuplicateProperty -JsonText $jsonText) {
         throw 'The policy profile contains duplicate or case-conflicting property names.'
     }
@@ -6501,6 +6649,7 @@ function Import-AdminPolicyProfile {
         ProfileName    = [string]$policyObject.profileName
         Description    = $description
         SourcePath     = $resolvedPath
+        SourceSha256   = $sourceSha256
         ActionsAllow   = @($actionAllow)
         ActionsDeny    = @($actionDeny)
         TransportsAllow = @($transportAllow)
@@ -7654,7 +7803,7 @@ function Assert-AdminDistinctConfiguredPath {
         [Parameter()][AllowNull()][string]$ResolvedOutputPath)
     $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
     $declaredOutput = $null
-    foreach ($name in @('JsonOutputPath', 'LogFile', 'AuditPath', 'PlanPath', 'ApprovedPlanPath', 'CheckpointPath', 'PolicyPath', 'ComputerListPath', 'PowerShellFilePath', 'PsExecPath')) {
+    foreach ($name in @('JsonOutputPath', 'LogFile', 'AuditPath', 'PlanPath', 'ApprovedPlanPath', 'CheckpointPath', 'PolicyPath', 'ComputerListPath', 'PowerShellFile', 'PsExecPath')) {
         if (-not (Test-AdminParameterBound -Parameters $Parameters -Name $name)) { continue }
         $value = [string]$Parameters[$name]
         if ([string]::IsNullOrWhiteSpace($value)) { continue }
@@ -7804,22 +7953,9 @@ function Get-AdminFileSha256Hex {
         [string]$LiteralPath
     )
 
-    if (-not (Test-Path -LiteralPath $LiteralPath -PathType Leaf)) {
-        throw "Input file not found: $LiteralPath"
-    }
-    $stream = $null
-    $sha256 = [System.Security.Cryptography.SHA256]::Create()
-    try {
-        $stream = [System.IO.File]::Open($LiteralPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
-        $hashBytes = $sha256.ComputeHash($stream)
-        return ([System.BitConverter]::ToString($hashBytes)).Replace('-', '').ToLowerInvariant()
-    }
-    finally {
-        if ($stream) {
-            $stream.Dispose()
-        }
-        $sha256.Dispose()
-    }
+    $lease = Open-AdminSafePath -LiteralPath $LiteralPath
+    try { return $lease.Sha256() }
+    finally { $lease.Dispose() }
 }
 
 function Resolve-AdminOrchestrationArtifactPath {
@@ -7841,32 +7977,28 @@ function Resolve-AdminOrchestrationArtifactPath {
         throw "The $($ArtifactType.ToLowerInvariant()) path contains an unsafe or unsupported component."
     }
     $fullPath = [System.IO.Path]::GetFullPath($LiteralPath)
+    Initialize-AdminSafeFileType
+    [void][WindowsAdminToolkit.Security.SystemPaths]::RequireLocalPublicationPath($fullPath)
     $requiredSuffix = if ($ArtifactType -eq 'Plan') { '.watplan.json' } else { '.watcheckpoint.json' }
     if (-not $fullPath.EndsWith($requiredSuffix, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "The $($ArtifactType.ToLowerInvariant()) path must end with $requiredSuffix."
     }
 
-    if ($Existing) {
-        if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
-            throw "$ArtifactType file not found: $fullPath"
+    $artifactProbe = $null
+    try {
+        if ($Existing) {
+            # Read-only structural inspection preserves ordinary schema import.
+            # Actual protected consumers still acquire their own trust/ACL leases.
+            $artifactProbe = [WindowsAdminToolkit.Security.PathLease]::OpenForInspection($fullPath)
         }
-        $item = Get-Item -LiteralPath $fullPath -Force -ErrorAction Stop
-        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw "$ArtifactType files cannot be symbolic links or reparse points."
-        }
-    }
-    else {
-        if (Test-Path -LiteralPath $fullPath) {
-            throw "Refusing to overwrite an existing $($ArtifactType.ToLowerInvariant()) file: $fullPath"
-        }
-        $parent = Split-Path -Parent $fullPath
-        if ([string]::IsNullOrWhiteSpace($parent)) {
-            throw "The $($ArtifactType.ToLowerInvariant()) path must include a valid parent directory."
-        }
-        if ((Test-Path -LiteralPath $parent) -and -not (Test-Path -LiteralPath $parent -PathType Container)) {
-            throw "The $($ArtifactType.ToLowerInvariant()) parent path is not a directory."
+        else {
+            $parent = [IO.Path]::GetDirectoryName($fullPath)
+            $artifactProbeName = '.admin-plan-probe-{0}.tmp' -f [guid]::NewGuid().ToString('N')
+            $artifactProbe = New-Object WindowsAdminToolkit.Security.NativePublication($parent, $artifactProbeName)
+            $artifactProbe.EnsureDestinationAbsent([IO.Path]::GetFileName($fullPath))
         }
     }
+    finally { if ($null -ne $artifactProbe) { $artifactProbe.Dispose() } }
     return $fullPath
 }
 
@@ -8634,10 +8766,12 @@ function ConvertTo-AdminOrchestrationPlan {
 
     $policy = if ($null -ne $Request.PolicyProfile) {
         $policyPath = [string]$Request.PolicyProfile.SourcePath
+        $policyHash = [string]$Request.PolicyProfile.SourceSha256
+        if ($policyHash -cnotmatch '^[a-f0-9]{64}$') { throw 'The policy profile lacks a bound raw-byte source digest.' }
         [pscustomobject][ordered]@{
             applied       = $true
             path          = $policyPath
-            fileSha256    = Get-AdminFileSha256Hex -LiteralPath $policyPath
+            fileSha256    = $policyHash
             schemaVersion = [string]$Request.PolicyProfile.SchemaVersion
             profileName   = [string]$Request.PolicyProfile.ProfileName
             decision      = [string]$Request.PolicyDecision.decision
@@ -8746,27 +8880,9 @@ function Test-AdminPlanExternalReference {
         [psobject]$Plan
     )
 
-    if ($Plan.request.policy.applied) {
-        $policyPath = [string]$Plan.request.policy.path
-        if (-not (Test-Path -LiteralPath $policyPath -PathType Leaf) -or (Get-AdminFileSha256Hex -LiteralPath $policyPath) -cne [string]$Plan.request.policy.fileSha256) {
-            throw 'The approved policy file is missing or no longer matches the plan hash.'
-        }
-        $policyProfile = Import-AdminPolicyProfile -LiteralPath $policyPath
-        if ([string]$policyProfile.SchemaVersion -cne [string]$Plan.request.policy.schemaVersion -or [string]$policyProfile.ProfileName -cne [string]$Plan.request.policy.profileName) {
-            throw 'The approved policy metadata no longer matches the plan.'
-        }
-    }
-    if ([string]$Plan.request.transport.name -ceq 'PsExec') {
-        $psExecPath = [string]$Plan.request.transport.psExecPath
-        if (-not (Test-Path -LiteralPath $psExecPath -PathType Leaf) -or (Get-AdminFileSha256Hex -LiteralPath $psExecPath) -cne [string]$Plan.request.transport.psExecSha256) {
-            throw 'The approved PsExec executable is missing or no longer matches the plan hash.'
-        }
-        $resolvedPsExec = Resolve-AdminPsExec -Path $psExecPath
-        if (-not $resolvedPsExec.Equals($psExecPath, [System.StringComparison]::OrdinalIgnoreCase)) {
-            throw 'The approved PsExec executable resolved to a different path.'
-        }
-    }
-    return $true
+    $references = Open-AdminPlanExternalReferenceLock -Plan $Plan
+    try { return $true }
+    finally { foreach ($lease in $references.Leases) { $lease.Dispose() } }
 }
 
 function Open-AdminPlanExternalReferenceLock {
@@ -8780,8 +8896,7 @@ function Open-AdminPlanExternalReferenceLock {
             $lease = Open-AdminSafePath -LiteralPath $path
             $leases.Add($lease) | Out-Null
             if ($lease.Sha256() -cne [string]$Plan.request.policy.fileSha256) { throw 'The approved policy file no longer matches the plan hash.' }
-            $json = Read-AdminBoundedUtf8File -LiteralPath $path -MaximumBytes 1048576 -Lease $lease
-            $policyProfile = Import-AdminPolicyProfile -LiteralPath $path -ValidatedJsonText $json
+            $policyProfile = Import-AdminPolicyProfile -LiteralPath $path -Lease $lease
             if ($policyProfile.SchemaVersion -cne $Plan.request.policy.schemaVersion -or $policyProfile.ProfileName -cne $Plan.request.policy.profileName) { throw 'The approved policy metadata no longer matches the plan.' }
         }
         if ([string]$Plan.request.transport.name -ceq 'PsExec') {

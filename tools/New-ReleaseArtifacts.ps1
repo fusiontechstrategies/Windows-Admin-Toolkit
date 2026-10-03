@@ -145,6 +145,7 @@ function Get-ReleaseDirectoryFile {
     $pendingDirectories.Enqueue([IO.Path]::GetFullPath($LiteralPath))
     while ($pendingDirectories.Count -gt 0) {
         $currentDirectory = $pendingDirectories.Dequeue()
+        $releaseLeases.Add([WindowsAdminToolkit.Security.PathLease]::OpenTrusted($currentDirectory, $true, $false, $false))
         foreach ($item in @(Get-ChildItem -LiteralPath $currentDirectory -Force | Sort-Object Name)) {
             if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
                 throw "Release source reparse points are not supported: $($item.FullName)"
@@ -165,17 +166,6 @@ function Get-ReleaseDirectoryFile {
 
 $sourceRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $toolkitSourcePath = Join-Path $sourceRoot 'WindowsAdminToolkit.ps1'
-if (-not [IO.File]::Exists($toolkitSourcePath)) {
-    throw "Toolkit source file not found: $toolkitSourcePath"
-}
-
-$toolkitSource = [IO.File]::ReadAllText($toolkitSourcePath)
-$versionMatches = [regex]::Matches($toolkitSource, '(?m)^\$Script:ToolkitVersion\s*=\s*''(?<Version>[0-9]+\.[0-9]+\.[0-9]+)''\s*$')
-if ($versionMatches.Count -ne 1) {
-    throw 'The toolkit source must contain exactly one canonical ToolkitVersion assignment.'
-}
-$toolkitVersion = $versionMatches[0].Groups['Version'].Value
-
 # The release builder owns this helper; payload source is only read as data.
 $releaseNativeSource = @'
 using System;
@@ -393,12 +383,44 @@ if (-not ('WindowsAdminToolkit.Security.StorageSecurity' -as [type])) {
     Add-Type -TypeDefinition $releaseNativeSource -ErrorAction Stop
 }
 
+# Fixed literal helper: drive mapping lookup does not open a filesystem endpoint.
+if (-not ('WindowsAdminToolkit.ReleasePathGuard' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.Runtime.InteropServices;
+namespace WindowsAdminToolkit {
+    public static class ReleasePathGuard {
+        [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+        static extern uint QueryDosDevice(string name, [Out, MarshalAs(UnmanagedType.LPArray, ArraySubType=UnmanagedType.U2)] char[] target, uint maximum);
+        public static string Local(string path) {
+            string full=Path.GetFullPath(path);
+            if(full.Length<3 || !((full[0]>='A'&&full[0]<='Z')||(full[0]>='a'&&full[0]<='z')) || full[1]!=':' || full[2]!='\\') throw new IOException("A literal local release drive path is required.");
+            char[] buffer=new char[32768]; uint count=QueryDosDevice(full.Substring(0,2),buffer,(uint)buffer.Length);
+            if(count==0 || count>buffer.Length) throw new IOException("Cannot prove release drive mapping.");
+            int end=Array.IndexOf(buffer,'\0',0,(int)count);
+            if(end<=0 || !System.Text.RegularExpressions.Regex.IsMatch(new string(buffer,0,end),@"^\\Device\\HarddiskVolume[0-9]+\z",System.Text.RegularExpressions.RegexOptions.IgnoreCase|System.Text.RegularExpressions.RegexOptions.CultureInvariant)) throw new IOException("Only direct local hard-disk release drives are supported.");
+            return full;
+        }
+    }
+}
+'@ -ErrorAction Stop
+}
+
 $releaseLeases = New-Object 'System.Collections.Generic.List[System.IDisposable]'
 try {
 # Establish the no-follow source identity before any output directory is created.
 # Lexical containment is only meaningful after junction and short-name aliases fail.
+$sourceRoot = [WindowsAdminToolkit.ReleasePathGuard]::Local($sourceRoot)
 $releaseLeases.Add([WindowsAdminToolkit.Security.PathLease]::OpenTrusted($sourceRoot, $true, $false, $false))
-$resolvedOutput = [IO.Path]::GetFullPath($OutputDirectory)
+$toolkitSourceLease = [WindowsAdminToolkit.Security.PathLease]::OpenTrusted($toolkitSourcePath, $false, $false, $false)
+$releaseLeases.Add($toolkitSourceLease)
+$toolkitSource = (New-Object Text.UTF8Encoding($false, $true)).GetString($toolkitSourceLease.ReadBytes(4194304))
+$versionMatches = [regex]::Matches($toolkitSource, '(?m)^\$Script:ToolkitVersion\s*=\s*''(?<Version>[0-9]+\.[0-9]+\.[0-9]+)''\s*$')
+if ($versionMatches.Count -ne 1) { throw 'The toolkit source must contain exactly one canonical ToolkitVersion assignment.' }
+$toolkitVersion = $versionMatches[0].Groups['Version'].Value
+
+$resolvedOutput = [WindowsAdminToolkit.ReleasePathGuard]::Local($OutputDirectory)
 $canonicalSource = [IO.Path]::GetFullPath($sourceRoot).TrimEnd('\')
 $canonicalOutput = $resolvedOutput.TrimEnd('\')
 if ($canonicalOutput.Equals($canonicalSource, [StringComparison]::OrdinalIgnoreCase) -or
@@ -407,12 +429,19 @@ if ($canonicalOutput.Equals($canonicalSource, [StringComparison]::OrdinalIgnoreC
     throw 'Release output and source directories must be disjoint.'
 }
 $outputParent = [IO.Path]::GetDirectoryName($resolvedOutput)
-if ([string]::IsNullOrWhiteSpace($outputParent) -or -not [IO.Directory]::Exists($outputParent)) {
-    throw "The release output parent directory must already exist: $outputParent"
-}
-if ([IO.Directory]::Exists($resolvedOutput) -or [IO.File]::Exists($resolvedOutput)) {
+if ([string]::IsNullOrWhiteSpace($outputParent)) { throw 'The release output requires an existing local parent.' }
+$releaseLeases.Add([WindowsAdminToolkit.Security.PathLease]::OpenTrusted($outputParent, $true, $false, $false))
+$outputInspection = $null
+try {
+    $outputInspection = [WindowsAdminToolkit.Security.PathLease]::Open($resolvedOutput, $true, $false)
     throw "The release output path already exists: $resolvedOutput"
 }
+catch {
+    $cursor = $_.Exception
+    while ($cursor -and $cursor -isnot [ComponentModel.Win32Exception]) { $cursor = $cursor.InnerException }
+    if (-not $cursor -or $cursor.NativeErrorCode -notin @(2, 3)) { throw }
+}
+finally { if ($null -ne $outputInspection) { $outputInspection.Dispose() } }
 
 $rootFileNames = @(
     'WindowsAdminToolkit.ps1',
@@ -440,6 +469,7 @@ $releaseDirectories = @('schemas', 'examples', 'tests', 'tools')
 $sourceFiles = New-Object 'System.Collections.Generic.List[System.IO.FileInfo]'
 foreach ($rootFileName in $rootFileNames) {
     $sourcePath = Join-Path $sourceRoot $rootFileName
+    $releaseLeases.Add([WindowsAdminToolkit.Security.PathLease]::OpenTrusted($sourcePath, $false, $false, $false))
     if (-not [IO.File]::Exists($sourcePath)) {
         throw "Required release source file not found: $rootFileName"
     }
@@ -447,6 +477,7 @@ foreach ($rootFileName in $rootFileNames) {
 }
 foreach ($releaseDirectory in $releaseDirectories) {
     $directoryPath = Join-Path $sourceRoot $releaseDirectory
+    $releaseLeases.Add([WindowsAdminToolkit.Security.PathLease]::OpenTrusted($directoryPath, $true, $false, $false))
     if (-not [IO.Directory]::Exists($directoryPath)) {
         throw "Required release source directory not found: $releaseDirectory"
     }
@@ -471,7 +502,6 @@ foreach ($sourceFile in $sourceFiles) {
         }) | Out-Null
 }
 
-$releaseLeases.Add([WindowsAdminToolkit.Security.PathLease]::OpenTrusted($outputParent, $true, $false, $false))
 [WindowsAdminToolkit.Security.StorageSecurity]::CreatePrivateDirectory($resolvedOutput)
 $releaseLeases.Add([WindowsAdminToolkit.Security.PathLease]::OpenTrusted($resolvedOutput, $true, $false, $true))
 $sourceHashes = @{}
