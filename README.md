@@ -55,7 +55,7 @@ Windows Admin Toolkit treats remote administration as a privileged security boun
 - Destructive and unsandboxed actions require an exact confirmation phrase in addition to PowerShell approval.
 - Core Windows processes, including `lsass`, `services`, and `svchost`, are blocked from process termination.
 - Temporary-file cleanup never touches Windows Prefetch, ignores reparse points, uses literal paths, and enforces a file-count ceiling.
-- CSV exports neutralize spreadsheet formulas. HTML exports encode values. File exports are atomic and never overwrite an existing report.
+- CSV exports neutralize spreadsheet formulas. HTML exports encode values. File exports use private, retained native objects and an atomic no-replace rename. Output parents must already exist, reject reparse ancestry, and deny less-privileged mutation; missing directories are not created or repaired.
 - Logs record action summaries, not credentials, custom code, or custom-command output.
 - Optional policies can only narrow actions, transports, target modes, targets, runtime limits, and supported action inputs.
 - Audit records exclude credentials, custom source text, and raw action output; configured sink failures are explicit.
@@ -307,7 +307,7 @@ Download and open the [sanitized HTML report](examples/demo/system-info-sample.h
 | Parameter | Default | Purpose |
 | --- | --- | --- |
 | `Transport` | `WinRM` | Selects `WinRM` or the optional `PsExec` fallback |
-| `PsExecPath` | `PsExec64.exe` | Locates a Microsoft-signed PsExec executable |
+| `PsExecPath` | `PsExec64.exe` | Literal local PsExec path; a basename means the current directory, never PATH discovery |
 | `WinRmIdentity` (`Credential` alias) | Current identity | Supplies an optional in-memory `PSCredential` for WinRM only |
 | `MaxConcurrentJobs` | `8` | Limits simultaneous remote targets from 1 through 32 |
 | `RetryCount` | `1` | Retries read-only remote actions only |

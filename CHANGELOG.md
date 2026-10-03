@@ -12,6 +12,8 @@ The format follows Keep a Changelog principles, and the project uses Semantic Ve
 
 ### Fixed
 
+- Bound JSON/export and pending/approved plan publication to retained trusted parent and private file handles, with no-replace rename and object-only temporary cleanup. Missing output parents now fail without pathname directory creation.
+- Restricted security-events write to the SARIF upload job; scheduled secret scanning explicitly uses read-only token permissions.
 - Applied no-connection `WhatIf` previews to read-only actions and service queries.
 - Required explicit approved KB selections when Windows Update has a policy allow list.
 - Bounded WinRM collection and nested result projection before materialization.
@@ -156,3 +158,5 @@ The format follows Keep a Changelog principles, and the project uses Semantic Ve
 [3.0.0]: https://github.com/fusiontechstrategies/Windows-Admin-Toolkit/releases/tag/v3.0.0
 [2.0.0]: https://github.com/fusiontechstrategies/Windows-Admin-Toolkit/releases/tag/v2.0.0
 [Unreleased]: https://github.com/fusiontechstrategies/Windows-Admin-Toolkit/compare/v3.0.1...HEAD
+
+- Reject narrow lower-principal name-creation grants on terminal publication parents. Refuse unsupported network/alias output mappings before filesystem-provider lookup while retaining native ancestry validation.

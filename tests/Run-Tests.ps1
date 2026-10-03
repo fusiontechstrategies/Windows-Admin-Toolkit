@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Runs dependency-free offline tests for Windows Admin Toolkit.
 #>
@@ -2008,6 +2008,7 @@ finally {
 . (Join-Path $PSScriptRoot 'Security-Regression.Tests.ps1')
 . (Join-Path $PSScriptRoot 'Final-Cloud-Regression.Tests.ps1')
 . (Join-Path $PSScriptRoot 'Latest-Ten-Regression.Tests.ps1')
+. (Join-Path $PSScriptRoot 'Final-Two-Regression.Tests.ps1')
 
 Write-Host ''
 if ($Script:Failures.Count -gt 0) {

@@ -133,3 +133,15 @@ Synthetic, non-secret examples are available in `examples/orchestration`:
 - `completed-system-info-result.json`
 
 The example hashes are internally consistent and are validated by the native test suite and the committed JSON Schemas.
+
+## Pending and approved plan publication
+
+Create and Approve use the shared protected new-file publisher. Their local parent directories must already exist and pass ancestry/owner/DACL validation, with no junctions or symlinks and no less-privileged mutation rights. The parent and temporary object remain retained through private create-new, content flush, and same-parent no-replace native rename. Existing destinations are never overwritten; failure cleanup removes only the retained unpublished object. Missing parents are rejected without directory creation or ACL changes. Provision output directories before invoking the operation. This new-file atomic rename does not change the separate non-atomic checkpoint revision contract.
+
+Publication paths must resolve to a direct local hard-disk volume. UNC paths, mapped network drives, substituted drive aliases and unknown device mappings are refused before filesystem-provider lookup. The current DOS drive mapping is checked without opening an endpoint, then native no-follow ancestry and identity checks remain required. Terminal publication parents also reject less-privileged file or subdirectory creation grants, including at a volume root; ancestor-only volume-root exceptions do not apply to that terminal parent. This conservative boundary does not support alternate drive providers.
+
+Existence, type and collision preflight uses retained no-follow native objects. No pathname-based filesystem-provider lookup precedes ancestry validation, including for local-looking paths whose ancestors contain remote-targeting reparse points. New-output collision checks open only a strict relative leaf under the retained parent and never traverse reparse points; actual publication still enforces no replacement independently.
+
+## Literal local file inputs
+
+Policy, computer-list, custom-script and PsExec inputs are acquired through native no-follow handles before file metadata, content or hashes are inspected. Drive mappings must be direct local hard-disk volumes; UNC, network drive, substituted-drive and unknown mappings are refused. PsExec is a literal path. A basename resolves in the current directory, and the toolkit does not search PATH. Approval validates embedded policy and PsExec references through the same retained reads as execution. Ordinary schema imports remain structural validation only and do not grant file trust.

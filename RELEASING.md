@@ -124,3 +124,5 @@ Microsoft's current guidance requires script metadata and pre-validation, recomm
 - Use synthetic examples and inspect packaged files for secrets before upload.
 - Retain the commit ID, signed script, manifest, SBOM, test results, and release-channel audit evidence together.
 - Treat any signature, manifest, SBOM, or provenance discrepancy as a release blocker.
+
+The builder validates direct local drive mappings and acquires native no-follow source and output ancestry before file metadata or enumeration. A missing output parent is refused. Its helper is fixed builder code, never executed payload source. Generated files are confined to the newly created private retained output tree; certificate-store access and timestamping still require the explicit signing options above.
