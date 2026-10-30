@@ -2453,7 +2453,7 @@ $Script:ActionScripts.PendingReboot = {
     $checkErrors = New-Object 'System.Collections.Generic.List[string]'
 
     try {
-        $rename = Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction SilentlyContinue
+        $rename = Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -ErrorAction Stop
         if ($null -ne $rename -and $rename.PendingFileRenameOperations) {
             $reasons.Add('Pending file rename operations') | Out-Null
         }
@@ -2469,7 +2469,7 @@ $Script:ActionScripts.PendingReboot = {
             'HKLM:\SOFTWARE\Microsoft\SMS\Mobile Client\Reboot Management\RebootData'
         )) {
         try {
-            if (Test-Path -LiteralPath $path) {
+            if (Test-Path -LiteralPath $path -ErrorAction Stop) {
                 $reasons.Add($path) | Out-Null
             }
         }

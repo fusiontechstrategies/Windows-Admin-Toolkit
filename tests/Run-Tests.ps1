@@ -630,6 +630,36 @@ Test-ToolkitAssertion -Condition (Test-AdminProcessName -ProcessName 'notepad.ex
 Test-ToolkitAssertion -Condition (-not (Test-AdminProcessName -ProcessName '..\notepad.exe')) -Name 'Rejects a process path'
 Test-ToolkitThrow -Action { & $Script:ActionScripts.TerminateProcess 'svchost.exe' | Out-Null } -Name 'Process action blocks termination of svchost'
 
+$pendingRebootPermissionResult = & {
+    $pendingRebootPermissionScript = $Script:ActionScripts.PendingReboot.ToString().
+        Replace('Get-ItemProperty', 'Get-SyntheticDeniedItemProperty').
+        Replace('Test-Path', 'Test-SyntheticDeniedPath').
+        Replace('Invoke-CimMethod', 'Invoke-SyntheticMissingCimMethod')
+    function Get-SyntheticDeniedItemProperty {
+        [CmdletBinding()]
+        param([string]$LiteralPath, [string]$Name)
+        $null = $Name
+        if ($LiteralPath -like '*ComputerName*') {
+            return [pscustomobject]@{ ComputerName = 'synthetic-host' }
+        }
+        return [pscustomobject]@{ PendingFileRenameOperations = $null }
+    }
+    function Test-SyntheticDeniedPath {
+        [CmdletBinding()]
+        param([string]$LiteralPath)
+        throw [System.UnauthorizedAccessException]::new("Synthetic registry denial: $LiteralPath")
+    }
+    function Invoke-SyntheticMissingCimMethod {
+        [CmdletBinding()]
+        param([string]$Namespace, [string]$ClassName, [string]$MethodName)
+        $null = @($Namespace, $ClassName, $MethodName)
+        throw 'Invalid namespace'
+    }
+    & ([scriptblock]::Create($pendingRebootPermissionScript))
+}
+Test-ToolkitAssertion -Condition ($pendingRebootPermissionResult.Status -ceq 'ChecksWithErrors') -Name 'Pending reboot reports registry permission failures as partial checks'
+Test-ToolkitAssertion -Condition (@($pendingRebootPermissionResult.CheckErrors | Where-Object { $_ -like 'Registry check failed:*Synthetic registry denial*' }).Count -eq 4) -Name 'Pending reboot preserves every registry permission failure'
+
 Test-ToolkitAssertion -Condition (Test-AdminRegistryPath -RegistryPath 'HKLM:') -Name 'Accepts a registry hive root'
 Test-ToolkitAssertion -Condition (Test-AdminRegistryPath -RegistryPath 'HKLM:\SOFTWARE\Microsoft') -Name 'Accepts a registry provider path'
 Test-ToolkitAssertion -Condition (Test-AdminRegistryPath -RegistryPath 'HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft') -Name 'Accepts a long registry hive path'
