@@ -283,33 +283,40 @@ Download and open the [sanitized HTML report](examples/demo/system-info-sample.h
 ## Common launch options
 
 ```powershell
+$installedScript = Join-Path $env:LOCALAPPDATA 'Programs\WindowsAdminToolkit\WindowsAdminToolkit.ps1'
+if (-not (Test-Path -LiteralPath $installedScript -PathType Leaf)) {
+    throw "Install the verified release first; expected $installedScript"
+}
+
 # Default secure WinRM transport
-.\WindowsAdminToolkit.ps1
+& $installedScript
 
 # WinRM over HTTPS
-.\WindowsAdminToolkit.ps1 -Transport WinRM -UseSsl
+& $installedScript -Transport WinRM -UseSsl
 
 # Kerberos authentication with four concurrent remote jobs
-.\WindowsAdminToolkit.ps1 -Authentication Kerberos -MaxConcurrentJobs 4
+& $installedScript -Authentication Kerberos -MaxConcurrentJobs 4
 
 # Optional PsExec fallback under the current Windows identity
-.\WindowsAdminToolkit.ps1 -Transport PsExec -PsExecPath C:\Tools\PsExec64.exe
+& $installedScript -Transport PsExec -PsExecPath C:\Tools\PsExec64.exe
 
 # Preview state-changing actions without applying them
-.\WindowsAdminToolkit.ps1 -WhatIf
+& $installedScript -WhatIf
 
 # Noninteractive local inventory with clean JSON on stdout
-.\WindowsAdminToolkit.ps1 -Automation -Action SystemInfo -Local -JsonOutputPath -
+& $installedScript -Automation -Action SystemInfo -Local -JsonOutputPath -
 
-# Validate policy and capability readiness without running the requested action
-.\WindowsAdminToolkit.ps1 -Automation -Action SystemInfo -Local -PolicyPath .\examples\policies\read-only-local.json -Preflight -JsonOutputPath -
+# Validate a locally reviewed policy and capability readiness without running the requested action
+& $installedScript -Automation -Action SystemInfo -Local -PolicyPath C:\Policies\read-only-local.json -Preflight -JsonOutputPath -
 
 # Create a new per-run JSON Lines audit alongside the JSON result
-.\WindowsAdminToolkit.ps1 -Automation -Action SystemInfo -Local -AuditPath C:\Audit\wat-system-info.jsonl -JsonOutputPath C:\Results\wat-system-info.json
+& $installedScript -Automation -Action SystemInfo -Local -AuditPath C:\Audit\wat-system-info.jsonl -JsonOutputPath C:\Results\wat-system-info.json
 
 # Create a reviewable plan without executing its action
-.\WindowsAdminToolkit.ps1 -Automation -PlanOperation Create -PlanPath C:\ChangePlans\system-info-pending.watplan.json -Action SystemInfo -Local -JsonOutputPath -
+& $installedScript -Automation -PlanOperation Create -PlanPath C:\ChangePlans\system-info-pending.watplan.json -Action SystemInfo -Local -JsonOutputPath -
 ```
+
+The repository includes a [read-only local policy example](examples/policies/read-only-local.json); copy it to a protected local path and review it before using the policy command above. From a source checkout, you may instead set `$installedScript = (Resolve-Path .\WindowsAdminToolkit.ps1).Path` after reviewing the unpublished source state.
 
 | Parameter | Default | Purpose |
 | --- | --- | --- |
@@ -341,19 +348,26 @@ Automation mode accepts `WinRmIdentity` (or its backward-compatible `Credential`
 
 Version 3.0.1 preserves the fail-closed automation, least-privilege policy, enterprise audit interfaces, and controlled orchestration introduced in 3.0.0. Direct automation runs one stable named action without menus or prompts and uses the same action implementations as the interactive menu.
 
+The policy examples below assume you downloaded, reviewed, and copied the repository's [read-only local](examples/policies/read-only-local.json) and [help-desk WinRM](examples/policies/helpdesk-winrm.json) examples into the protected `C:\Policies` directory.
+
 ```powershell
+$installedScript = Join-Path $env:LOCALAPPDATA 'Programs\WindowsAdminToolkit\WindowsAdminToolkit.ps1'
+if (-not (Test-Path -LiteralPath $installedScript -PathType Leaf)) {
+    throw "Install the verified release first; expected $installedScript"
+}
+
 # Enumerate all stable action IDs and input requirements
-.\WindowsAdminToolkit.ps1 -Automation -ListActions -JsonOutputPath -
+& $installedScript -Automation -ListActions -JsonOutputPath -
 
 # Query one remote target over WinRM and create a new JSON result
-.\WindowsAdminToolkit.ps1 `
+& $installedScript `
   -Automation `
   -Action DiskSpace `
   -ComputerName server01.example.com `
   -JsonOutputPath C:\Ops\Results\server01-disk.json
 
 # Preview a state-changing action without contacting the target
-.\WindowsAdminToolkit.ps1 `
+& $installedScript `
   -Automation `
   -Action ScheduleReboot `
   -ComputerName server01.example.com `
@@ -362,25 +376,25 @@ Version 3.0.1 preserves the fail-closed automation, least-privilege policy, ente
   -JsonOutputPath -
 
 # Enumerate action decisions under a validated policy
-.\WindowsAdminToolkit.ps1 `
+& $installedScript `
   -Automation `
   -ListActions `
-  -PolicyPath .\examples\policies\read-only-local.json `
+  -PolicyPath C:\Policies\read-only-local.json `
   -JsonOutputPath -
 
 # Check a remote action's dependencies without executing that action
-.\WindowsAdminToolkit.ps1 `
+& $installedScript `
   -Automation `
   -Action EventLogQuery `
   -ComputerName server01.example.com `
   -EventLogName System `
   -EntryCount 50 `
-  -PolicyPath .\examples\policies\helpdesk-winrm.json `
+  -PolicyPath C:\Policies\helpdesk-winrm.json `
   -Preflight `
   -JsonOutputPath -
 
 # Create a per-run JSON Lines audit for SIEM, RMM, or ticket ingestion
-.\WindowsAdminToolkit.ps1 `
+& $installedScript `
   -Automation `
   -Action SystemInfo `
   -Local `
